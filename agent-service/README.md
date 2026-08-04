@@ -1,0 +1,105 @@
+# TTRPG Telegram bot (eve agent)
+
+Eve-агент, который ведёт настольную ролевую игру в Telegram: соло-партия в
+личном чате или группа до 6 игроков.
+
+## Структура
+
+```
+agent/
+├── agent.ts              # defineAgent: модель LLM (OpenRouter по умолчанию)
+├── instructions.md       # системный промпт DM (соло / группа до 6)
+├── channels/telegram.ts  # Telegram-канал (webhook POST /eve/v1/telegram)
+├── tools/
+│   ├── roll_dice.ts      # скилл: броски костей
+│   ├── skill_check.ts    # скилл: проверки характеристик
+│   ├── combat.ts         # скилл: пошаговый бой (HP/AC врагов)
+│   ├── initiative.ts     # скилл: очередь ходов
+│   ├── save_campaign.ts  # сохраняет новую кампанию после опросника
+│   ├── list_campaigns.ts # кампании пользователя (owner/member)
+│   ├── start_campaign.ts # запуск кампании: привязка к чату/топику
+│   ├── get_game_context.ts # кампания + персонажи привязанного чата в контекст
+│   ├── save_character.ts # персонаж внутри кампании
+│   └── invite_member.ts  # приглашение участника (только DM)
+├── skills/
+│   ├── create-campaign/  # процедура опросника создания кампании
+│   └── create-character/ # процедура создания персонажа
+└── lib/
+    ├── engine/dnd5e.ts   # правила: броски и проверки
+    ├── memory.ts         # состояние партии (defineState) + MemoryStore-заглушка
+    └── campaigns/        # хранилище кампаний: MD-файлы, роли, привязка к чатам
+```
+
+## Кампании и персонажи
+
+Команды бота: `/newcampaign` (опросник создания кампании), `/mycampaigns`
+(список), `/startcampaign` (запуск и привязка к текущему чату/топику),
+`/newchar` (создание персонажа), `/invite` (приглашение игрока, только DM).
+
+- Кампании и персонажи хранятся как MD-файлы в `data/campaigns/`
+  (переопределяется `CAMPAIGN_DATA_DIR`): `campaign.md` + `characters/*.md`.
+- Кампания создаётся где угодно, но после `/startcampaign` привязывается к
+  чату (или топику форум-группы); один чат — одна активная кампания.
+- Роли: `dm` (администратор, создатель кампании) и `player`. Приглашает
+  участников DM, назначать новых DM может только владелец. Персонаж существует
+  только внутри кампании и принадлежит ей.
+- Зарегистрируйте команды в BotFather (`/setcommands`):
+
+  ```
+  newcampaign - Создать кампанию
+  mycampaigns - Мои кампании
+  startcampaign - Запустить кампанию в этом чате
+  newchar - Создать персонажа
+  invite - Пригласить игрока в кампанию
+  ```
+
+## Локальный запуск
+
+```bash
+npm install
+npm run dev -- --no-ui
+```
+
+Задайте в окружении `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`
+(шаблон в `.env.example`).
+
+### Получение сообщений без публичного URL (long polling)
+
+Телеграм-канал eve принимает только webhook на `POST /eve/v1/telegram`, поэтому
+в локальной разработке достаточно проксировать webhook-обновления из long
+polling во второй терминал:
+
+```bash
+npm run poll
+```
+
+Скрипт опрашивает Telegram (`getUpdates`) и пересылает каждое обновление в
+локальный eve на `http://localhost:2000/eve/v1/telegram` (путь можно поменять
+через `EVE_URL`). Никакого туннеля не нужно. В групповых чатах бот реагирует
+на `/`-команды, `@упоминания` и ответы на свои сообщения; в личных — на любой
+текст. При старте локального режима скрипт сам сбрасывает зарегистрированный
+webhook (webhook и polling в Telegram несовместимы).
+
+### Альтернатива: webhook на деплое
+
+Зарегистрируйте публичный URL (деплой или туннель вроде cloudflared):
+
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://your-app.example.com/eve/v1/telegram",
+       "secret_token":"'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
+       "allowed_updates":["message","callback_query"]}'
+```
+
+В групповых чатах бот реагирует на `/`-команды, `@упоминания` и ответы на свои
+сообщения; в личных — на любой текст.
+
+## Проверка
+
+```bash
+npm run typecheck
+npm run build
+npm run smoke    # смоук-тест хранилища кампаний (роли, персонажи, привязка к чату)
+```

@@ -1,0 +1,32 @@
+{
+  "name": "agent-service",
+  "version": "0.0.0",
+  "type": "module",
+  "imports": {
+    "#*": "./agent/*"
+  },
+  "scripts": {
+    "build": "eve build",
+    "dev": "eve dev",
+    "poll": "node --env-file=.env scripts/telegram-poll.ts",
+    "smoke": "node scripts/smoke-campaigns.ts",
+    "start": "eve start",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.20",
+    "ai": "^7.0.38",
+    "eve": "0.29.5",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "ai": "^7.0.38"
+  },
+  "engines": {
+    "node": "24.x"
+  }
+}
