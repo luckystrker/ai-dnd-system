@@ -34,6 +34,8 @@ export interface Campaign {
   tone?: string;
   openingScene?: string;
   boundChat?: BoundChat;
+  /** Текущий игровой день (1 после старта кампании). */
+  currentDay?: number;
   members: CampaignMember[];
   createdAt: string;
 }
@@ -51,11 +53,59 @@ export interface CharacterSheet {
   background?: string;
   motivation?: string;
   dmNotes?: string;
+  // Динамическое состояние персонажа (обновляется по ходу игры).
+  hp?: number;
+  maxHp?: number;
+  conditions?: string[];
+  inventory?: string[];
+  gold?: number;
+  xp?: number;
+  location?: string;
+  updatedAt?: string;
   createdAt: string;
+}
+
+/** Патч динамического состояния персонажа (для updateCharacter). */
+export interface CharacterStatePatch {
+  level?: number;
+  hp?: number;
+  maxHp?: number;
+  conditions?: string[];
+  inventory?: string[];
+  gold?: number;
+  xp?: number;
+  location?: string;
+}
+
+/** Статус NPC в мире кампании. */
+export type NpcStatus = "alive" | "dead" | "unknown";
+
+/** Отношение NPC к одному персонажу/игроку: шкала -5 (враг) .. +5 (союзник). */
+export interface NpcRelationship {
+  attitude: number;
+  notes?: string;
+}
+
+export interface NpcProfile {
+  id: string;
+  campaignId: string;
+  name: string;
+  slug: string;
+  /** Роль/описание NPC в мире (трактирщик, капитан стражи и т.п.). */
+  role?: string;
+  status: NpcStatus;
+  location?: string;
+  /** Отношения NPC к персонажам партии, ключ — имя персонажа. */
+  relationships: Record<string, NpcRelationship>;
+  firstSeenDay?: number;
+  lastSeenDay?: number;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export const memberRoleSchema = z.enum(["dm", "player"]);
 export const campaignLengthSchema = z.enum(["short", "medium", "long"]);
+export const npcStatusSchema = z.enum(["alive", "dead", "unknown"]);
 
 /** Максимальный размер партии (используется и в lib/memory.ts). */
 export const MAX_PARTY = 6;

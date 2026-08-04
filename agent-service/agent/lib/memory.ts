@@ -51,20 +51,11 @@ export function addToParty(character: PlayerCharacter): { ok: boolean; error?: s
 }
 
 /**
- * Долговременная память: пока заготовка.
- * TODO: реализовать персистентное хранилище (например Postgres + pgvector),
- * чтобы кампания переживала сессии, а recall работал по всем прошедшим событиям.
+ * Долговременная память кампании живёт в файлах папки кампании:
+ * - history/days/day-NNNN.md — транскрипт по игровым дням (пишет hooks/transcript.ts);
+ * - history/summary.md, history/key-events.md — саммари и ключевые моменты
+ *   (пишет субагент chronicler, см. agent/lib/campaigns/journal.ts);
+ * - npcs/ — профили и память NPC (agent/lib/campaigns/npc.ts);
+ * - characters/ — листы персонажей с динамическим состоянием.
+ * gameState выше — только per-session состояние текущей игры.
  */
-export interface MemoryStore {
-  remember(key: string, value: string): void;
-  recall(key: string): string | undefined;
-}
-
-export const memory: MemoryStore = {
-  remember(_key, _value) {
-    // TODO: сохранить в хранилище
-  },
-  recall() {
-    return undefined; // TODO: найти в хранилище
-  },
-};

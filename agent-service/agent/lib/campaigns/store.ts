@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterSheet, type MemberRole } from "./types.ts";
+import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterSheet, type CharacterStatePatch, type MemberRole } from "./types.ts";
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
 
 /** Входные данные для создания кампании (после опросника). */
@@ -54,8 +54,10 @@ export interface CampaignStore {
   listForUser(userId: string): Campaign[];
   findByBoundChat(chatId: string, messageThreadId?: number): Campaign | undefined;
   bindAndActivate(campaignId: string, actorUserId: string, chat: BoundChat): Campaign;
+  advanceDay(campaignId: string, actorUserId: string): Campaign;
   addMember(campaignId: string, inviterUserId: string, member: NewMemberInput): Campaign;
   saveCharacter(campaignId: string, actorUserId: string, input: NewCharacterInput): CharacterSheet;
+  updateCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterStatePatch): CharacterSheet;
   listCharacters(campaignId: string): CharacterSheet[];
 }
 
@@ -160,6 +162,18 @@ export class MarkdownCampaignStore implements CampaignStore {
     }
     campaign.status = "active";
     campaign.boundChat = chat;
+    if (campaign.currentDay === undefined) campaign.currentDay = 1;
+    this.writeCampaign(campaign, this.readDescription(campaign));
+    return campaign;
+  }
+
+  advanceDay(campaignId: string, actorUserId: string): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    this.requireRole(campaign, actorUserId, "dm");
+    if (campaign.status !== "active") {
+      throw new StoreError("Игровые дни можно двигать только в активной кампании.", "conflict");
+    }
+    campaign.currentDay = (campaign.currentDay ?? 1) + 1;
     this.writeCampaign(campaign, this.readDescription(campaign));
     return campaign;
   }
@@ -217,6 +231,31 @@ export class MarkdownCampaignStore implements CampaignStore {
       motivation: input.motivation,
       createdAt: new Date().toISOString(),
     };
+    this.writeCharacter(campaign.slug, sheet);
+    return sheet;
+  }
+
+  updateCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterStatePatch): CharacterSheet {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const needle = nameOrSlug.toLowerCase();
+    const sheet = this.listCharacters(campaign.id).find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+    if (!sheet) {
+      throw new StoreError(`Персонаж «${nameOrSlug}» не найден в кампании.`, "not_found");
+    }
+    if (patch.level !== undefined) sheet.level = patch.level;
+    if (patch.hp !== undefined) sheet.hp = patch.hp;
+    if (patch.maxHp !== undefined) sheet.maxHp = patch.maxHp;
+    if (patch.conditions !== undefined) sheet.conditions = patch.conditions;
+    if (patch.inventory !== undefined) sheet.inventory = patch.inventory;
+    if (patch.gold !== undefined) sheet.gold = patch.gold;
+    if (patch.xp !== undefined) sheet.xp = patch.xp;
+    if (patch.location !== undefined) sheet.location = patch.location;
+    sheet.updatedAt = new Date().toISOString();
     this.writeCharacter(campaign.slug, sheet);
     return sheet;
   }
@@ -321,6 +360,7 @@ function campaignToFrontmatter(campaign: Campaign): Record<string, unknown> {
     tone: campaign.tone,
     openingScene: campaign.openingScene,
     boundChat: campaign.boundChat,
+    currentDay: campaign.currentDay,
     members: campaign.members,
     createdAt: campaign.createdAt,
   };
@@ -363,6 +403,7 @@ function docToCampaign(doc: string): Campaign {
               : undefined,
         }
       : undefined,
+    currentDay: typeof data.currentDay === "number" ? data.currentDay : undefined,
     members,
     createdAt: asString(data.createdAt),
   };
@@ -380,8 +421,21 @@ function characterToFrontmatter(sheet: CharacterSheet): Record<string, unknown> 
     level: sheet.level,
     stats: sheet.stats,
     motivation: sheet.motivation,
+    hp: sheet.hp,
+    maxHp: sheet.maxHp,
+    conditions: sheet.conditions,
+    inventory: sheet.inventory,
+    gold: sheet.gold,
+    xp: sheet.xp,
+    location: sheet.location,
+    updatedAt: sheet.updatedAt,
     createdAt: sheet.createdAt,
   };
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => asString(item));
 }
 
 function docToCharacter(doc: string): CharacterSheet {
@@ -404,6 +458,14 @@ function docToCharacter(doc: string): CharacterSheet {
     stats,
     background: body || undefined,
     motivation: data.motivation ? asString(data.motivation) : undefined,
+    hp: typeof data.hp === "number" ? data.hp : undefined,
+    maxHp: typeof data.maxHp === "number" ? data.maxHp : undefined,
+    conditions: asStringArray(data.conditions),
+    inventory: asStringArray(data.inventory),
+    gold: typeof data.gold === "number" ? data.gold : undefined,
+    xp: typeof data.xp === "number" ? data.xp : undefined,
+    location: data.location ? asString(data.location) : undefined,
+    updatedAt: data.updatedAt ? asString(data.updatedAt) : undefined,
     createdAt: asString(data.createdAt),
   };
 }
