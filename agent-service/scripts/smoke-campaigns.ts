@@ -4,7 +4,7 @@
  * MarkdownNpcStore и журнал (транскрипт/саммари/ключевые события).
  * Запуск: npm run smoke
  */
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -257,6 +257,50 @@ check("advance_day двигает currentDay", () => {
   if (!journal.listDays(campaign.slug).includes(2)) throw new Error("файл дня 2 не создан");
   const reread = store.getCampaign(campaign.id)!;
   if (reread.currentDay !== 2) throw new Error("currentDay не пережил roundtrip");
+});
+
+// --- Авто-вступление и поиск по чату без фильтра статуса ---
+
+check("autoRegister добавляет написавшего как player", () => {
+  const updated = store.autoRegister(campaign.id, { userId: "777", username: "newbie" });
+  const member = updated.members.find((entry) => entry.userId === "777");
+  if (!member || member.role !== "player") throw new Error("участник не добавлен как player");
+});
+
+check("autoRegister идемпотентен", () => {
+  const updated = store.autoRegister(campaign.id, { userId: "777", username: "newbie" });
+  if (updated.members.filter((entry) => entry.userId === "777").length !== 1) {
+    throw new Error("появился дубликат участника");
+  }
+});
+
+check("autoRegister принудительно снижает роль dm до player", () => {
+  const updated = store.autoRegister(campaign.id, { userId: "888", role: "dm" });
+  const member = updated.members.find((entry) => entry.userId === "888");
+  if (!member || member.role !== "player") throw new Error("роль не снижена до player");
+});
+
+check("autoRegister молча пропускает при полной партии", () => {
+  // Игроков уже 3: 222, 777, 888. Дополняем до MAX_PARTY = 6.
+  for (const id of ["901", "902", "903"]) {
+    store.autoRegister(campaign.id, { userId: id });
+  }
+  const updated = store.autoRegister(campaign.id, { userId: "904" });
+  if (updated.members.some((entry) => entry.userId === "904")) throw new Error("лимит MAX_PARTY не сработал");
+});
+
+check("findByBoundChat c anyStatus находит неактивную кампанию", () => {
+  const path = join(root, campaign.slug, "campaign.md");
+  const activeDoc = readFileSync(path, "utf8");
+  const finishedDoc = activeDoc.replace('status: "active"', 'status: "finished"');
+  if (finishedDoc === activeDoc) throw new Error("не удалось подменить статус на finished");
+  writeFileSync(path, finishedDoc);
+  try {
+    if (store.findByBoundChat("-1001", 7)) throw new Error("finished найдена без anyStatus");
+    if (!store.findByBoundChat("-1001", 7, { anyStatus: true })) throw new Error("anyStatus не нашёл finished");
+  } finally {
+    writeFileSync(path, activeDoc);
+  }
 });
 
 // --- Динамическое состояние персонажа ---

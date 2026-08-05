@@ -11,6 +11,8 @@ export interface CallerIdentity {
   userId: string;
   username?: string;
   chatId?: string;
+  /** Тип чата из auth: private / group / supergroup / channel. */
+  chatType?: string;
   messageThreadId?: number;
 }
 
@@ -40,6 +42,7 @@ export function resolveCallerIdentity(auth: unknown): CallerIdentity | undefined
     userId,
     username: attribute(candidate, "username"),
     chatId: attribute(candidate, "chat_id"),
+    chatType: attribute(candidate, "chat_type"),
     messageThreadId: Number.isFinite(messageThreadId) ? messageThreadId : undefined,
   };
 }

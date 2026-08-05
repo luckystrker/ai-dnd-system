@@ -52,10 +52,11 @@ export interface CampaignStore {
   getCampaign(idOrSlug: string): Campaign | undefined;
   listCampaigns(): Campaign[];
   listForUser(userId: string): Campaign[];
-  findByBoundChat(chatId: string, messageThreadId?: number): Campaign | undefined;
+  findByBoundChat(chatId: string, messageThreadId?: number, options?: { anyStatus?: boolean }): Campaign | undefined;
   bindAndActivate(campaignId: string, actorUserId: string, chat: BoundChat): Campaign;
   advanceDay(campaignId: string, actorUserId: string): Campaign;
   addMember(campaignId: string, inviterUserId: string, member: NewMemberInput): Campaign;
+  autoRegister(campaignId: string, user: NewMemberInput): Campaign;
   saveCharacter(campaignId: string, actorUserId: string, input: NewCharacterInput): CharacterSheet;
   updateCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterStatePatch): CharacterSheet;
   listCharacters(campaignId: string): CharacterSheet[];
@@ -138,10 +139,10 @@ export class MarkdownCampaignStore implements CampaignStore {
     );
   }
 
-  findByBoundChat(chatId: string, messageThreadId?: number): Campaign | undefined {
+  findByBoundChat(chatId: string, messageThreadId?: number, options?: { anyStatus?: boolean }): Campaign | undefined {
     return this.listCampaigns().find(
       (campaign) =>
-        campaign.status === "active" &&
+        (options?.anyStatus === true || campaign.status === "active") &&
         campaign.boundChat?.chatId === chatId &&
         campaign.boundChat.messageThreadId === messageThreadId,
     );
@@ -196,6 +197,29 @@ export class MarkdownCampaignStore implements CampaignStore {
       name: member.name,
       username: member.username,
       role,
+    });
+    this.writeCampaign(campaign, this.readDescription(campaign));
+    return campaign;
+  }
+
+  /**
+   * Авто-вступление: любой написавший в привязанный чат становится игроком.
+   * Без проверки роли DM и идемпотентно: существующий участник не меняется,
+   * запрошенная роль dm принудительно снижается до player, при полной партии
+   * (MAX_PARTY игроков) новый участник молча пропускается.
+   */
+  autoRegister(campaignId: string, user: NewMemberInput): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    if (campaign.members.some((existing) => existing.userId === user.userId)) {
+      return campaign;
+    }
+    const players = campaign.members.filter((member) => member.role === "player").length;
+    if (players >= MAX_PARTY) return campaign;
+    campaign.members.push({
+      userId: user.userId,
+      name: user.name,
+      username: user.username,
+      role: "player",
     });
     this.writeCampaign(campaign, this.readDescription(campaign));
     return campaign;

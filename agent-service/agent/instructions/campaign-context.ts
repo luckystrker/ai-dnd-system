@@ -14,9 +14,9 @@ import {
   readKeyEvents,
 } from "../lib/campaigns/journal.ts";
 import { npcStore } from "../lib/campaigns/npc.ts";
-import { resolveCallerIdentity } from "../lib/campaigns/session.ts";
+import { resolveCallerIdentity, type CallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
-import type { Campaign, CharacterSheet, NpcProfile } from "../lib/campaigns/types.ts";
+import type { Campaign, CampaignMember, CharacterSheet, NpcProfile } from "../lib/campaigns/types.ts";
 
 const SUMMARY_CAP = 2000;
 const KEY_EVENTS_CAP = 2000;
@@ -46,7 +46,14 @@ function npcRoster(npcs: NpcProfile[]): string {
   return lines.join("\n");
 }
 
-function partyState(characters: CharacterSheet[]): string {
+/** Человекочитаемая метка участника: @username, имя или user id. */
+function memberLabel(member: CampaignMember | undefined): string | undefined {
+  if (!member) return undefined;
+  if (member.username) return `@${member.username}`;
+  return member.name ?? member.userId;
+}
+
+function partyState(campaign: Campaign, characters: CharacterSheet[]): string {
   if (characters.length === 0) return "(персонажи ещё не созданы)";
   return characters
     .map((sheet) => {
@@ -57,14 +64,40 @@ function partyState(characters: CharacterSheet[]): string {
       if (sheet.conditions?.length) parts.push(`состояния: ${sheet.conditions.join(", ")}`);
       if (sheet.gold !== undefined) parts.push(`золото: ${sheet.gold}`);
       if (sheet.location) parts.push(`локация: ${sheet.location}`);
+      const owner = campaign.members.find((member) => member.userId === sheet.ownerUserId);
+      const ownerLabel = memberLabel(owner);
+      if (ownerLabel) parts.push(`играет ${ownerLabel}`);
       return `- ${sheet.name} (${parts.join("; ")})`;
     })
     .join("\n");
 }
 
-function buildMemoryBlock(campaign: Campaign): string {
+/**
+ * Кто пишет сейчас и кому принадлежат персонажи — якорь агентности:
+ * модель не должна говорить и решать за чужих персонажей. Только для групп.
+ */
+function speakerSection(
+  identity: CallerIdentity,
+  characters: CharacterSheet[],
+): string | undefined {
+  if (!identity.chatType || identity.chatType === "private") return undefined;
+  const speaker = identity.username ? `@${identity.username}` : identity.userId;
+  const own = characters.filter((sheet) => sheet.ownerUserId === identity.userId).map((sheet) => sheet.name);
+  const others = characters.filter((sheet) => sheet.ownerUserId !== identity.userId).map((sheet) => sheet.name);
+  const lines = [`Сейчас пишет: ${speaker}`];
+  if (own.length > 0) {
+    lines.push(`Персонаж этого игрока: ${own.join(", ")} — он управляет только ${own.length > 1 ? "ими" : "им"}.`);
+  }
+  if (others.length > 0) {
+    lines.push(`Не пиши, не действуй и не решай за: ${others.join(", ")} — это персонажи других игроков.`);
+  }
+  return lines.join("\n");
+}
+
+function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string {
   const slug = campaign.slug;
   const day = campaign.currentDay ?? 1;
+  const characters = campaignStore.listCharacters(campaign.id);
 
   const sections: string[] = [
     `## Память кампании «${campaign.title}» (игровой день ${day})`,
@@ -77,6 +110,9 @@ function buildMemoryBlock(campaign: Campaign): string {
       .filter(Boolean)
       .join("; "),
   ];
+
+  const speaker = speakerSection(identity, characters);
+  if (speaker) sections.push(speaker);
 
   const summary = readCampaignSummary(slug);
   if (summary) {
@@ -100,7 +136,7 @@ function buildMemoryBlock(campaign: Campaign): string {
   }
 
   sections.push("### NPC\n" + npcRoster(npcStore.listNpcs(campaign.id)));
-  sections.push("### Партия\n" + partyState(campaignStore.listCharacters(campaign.id)));
+  sections.push("### Партия\n" + partyState(campaign, characters));
 
   sections.push(
     "Полный транскрипт дня — через read_day, карточка NPC — через get_npc. " +
@@ -118,8 +154,8 @@ export default defineDynamic({
         const campaign = identity?.chatId
           ? campaignStore.findByBoundChat(identity.chatId, identity.messageThreadId)
           : undefined;
-        if (!campaign) return null;
-        return defineInstructions({ markdown: buildMemoryBlock(campaign) });
+        if (!identity || !campaign) return null;
+        return defineInstructions({ markdown: buildMemoryBlock(campaign, identity) });
       } catch {
         // Память — дополнение к игре: при сбое чтения ход продолжается без неё.
         return null;

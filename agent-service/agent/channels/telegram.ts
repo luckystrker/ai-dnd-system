@@ -27,7 +27,11 @@ import {
   verifyTelegramRequest,
   type TelegramChatType,
   type TelegramMessage,
+  type TelegramUser,
 } from "eve/channels/telegram";
+
+import { appendTranscriptEntry } from "../lib/campaigns/journal.ts";
+import { campaignStore } from "../lib/campaigns/store.ts";
 
 const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
 
@@ -63,6 +67,50 @@ function isBotCommand(text: string, botUsername: string | undefined): boolean {
   if (!match) return false;
   const target = match.groups?.target;
   return target === undefined || (botUsername !== undefined && target.toLowerCase() === botUsername.toLowerCase());
+}
+
+/** Имя пользователя для транскрипта/регистрации, если нет username. */
+function displayName(user: TelegramUser): string | undefined {
+  const name = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
+  return name || undefined;
+}
+
+/**
+ * Наблюдение за всем трафиком группы в чате/топике, привязанном к кампании
+ * (статус кампании не важен — авто-вступление работает в любой момент).
+ *
+ * Каждый написавший автоматически становится игроком кампании. Сообщения НЕ
+ * в адрес бота дополнительно пишутся в транскрипт дня, чтобы DM видел
+ * диалоги игроков между собой; ход агента при этом не запускается — пока
+ * игроки общаются сами, бот молчит. Сообщения, проходящие shouldDispatch,
+ * в транскрипт здесь не дублируются: их запишет transcript-хук.
+ */
+function observeCampaignTraffic(message: TelegramMessage): void {
+  try {
+    if (message.chat.type === "private" || message.chat.type === "channel") return;
+    if (!message.from || message.from.isBot) return;
+    const campaign = campaignStore.findByBoundChat(message.chat.id, topicOf(message), { anyStatus: true });
+    if (!campaign) return;
+
+    campaignStore.autoRegister(campaign.id, {
+      userId: message.from.id,
+      name: displayName(message.from),
+      username: message.from.username,
+    });
+
+    if (shouldDispatch(message)) return;
+    const text = message.text || message.caption;
+    if (!text.trim()) return;
+    appendTranscriptEntry(campaign.slug, campaign.currentDay ?? 1, {
+      kind: "player",
+      author: message.from.username ?? displayName(message.from) ?? message.from.id,
+      text,
+      eventId: `tg-${message.chat.id}-${message.messageId}`,
+    });
+  } catch (error) {
+    // Наблюдение не должно ломать обработку самого сообщения.
+    console.error("telegram channel: campaign observation failed", error);
+  }
 }
 
 /**
@@ -159,6 +207,7 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
       }
 
       const message = update.message;
+      observeCampaignTraffic(message);
       if (!shouldDispatch(message)) return new Response("ok");
 
       const state: TelegramState = {
