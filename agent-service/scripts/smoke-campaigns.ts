@@ -115,6 +115,7 @@ check("игрок создаёт персонажа", () => {
     stats: { strength: 16, constitution: 15 },
     background: "Бывший кузнец из разрушенной деревни.",
     motivation: "Вернуть фамильный молот.",
+    appearance: "stocky dwarf with a braided red beard, scarred cheek, worn plate armor",
   });
   if (sheet.level !== 1) throw new Error("level по умолчанию != 1");
 });
@@ -133,6 +134,9 @@ check("roundtrip листа персонажа", () => {
   if (sheet.stats.strength !== 16) throw new Error("stats потеряны");
   if (sheet.background !== "Бывший кузнец из разрушенной деревни.") throw new Error("background потерян");
   if (sheet.characterClass !== "fighter") throw new Error("class потерян");
+  if (sheet.appearance !== "stocky dwarf with a braided red beard, scarred cheek, worn plate armor") {
+    throw new Error("appearance потерян");
+  }
 });
 
 expectError("запуск посторонним отклоняется", "access_denied", () =>
@@ -329,6 +333,31 @@ check("состояние персонажа переживает roundtrip", ()
 expectError("update_character для неизвестного персонажа", "not_found", () =>
   store.updateCharacter(campaign.id, "кто-то", { hp: 1 }),
 );
+
+// --- Промпт иллюстраций сцен ---
+
+const scenePrompt = await import("../agent/lib/scene-prompt.ts");
+
+check("buildScenePrompt собирает сцену, внешность и сеттинг", () => {
+  const prompt = scenePrompt.buildScenePrompt({
+    sceneDescription: "A tavern at night in a snowstorm",
+    appearances: ["stocky dwarf with a braided red beard"],
+    setting: "Заснеженное королевство Вальдхейм",
+    theme: "Восстание против тирании",
+  });
+  if (!prompt.startsWith("A tavern at night in a snowstorm")) throw new Error("описание сцены не первое");
+  if (!prompt.includes("stocky dwarf with a braided red beard")) throw new Error("внешность не попала в промпт");
+  if (!prompt.includes("Setting: Заснеженное королевство Вальдхейм")) throw new Error("сеттинг не попал в промпт");
+  if (!prompt.includes(scenePrompt.STYLE_SUFFIX)) throw new Error("суффикс стиля не попал в промпт");
+});
+
+check("appearancesForCharacters: case-insensitive, неизвестные имена игнорируются", () => {
+  const sheets = store.listCharacters(campaign.id);
+  const appearances = scenePrompt.appearancesForCharacters(["торин дубощит", "Кто-То"], sheets);
+  if (appearances.length !== 1) throw new Error(`ожидалась 1 внешность, получено ${appearances.length}`);
+  if (!appearances[0].includes("braided red beard")) throw new Error("не та внешность");
+  if (scenePrompt.appearancesForCharacters(undefined, sheets).length !== 0) throw new Error("undefined должен давать пустой список");
+});
 
 // --- NPC ---
 

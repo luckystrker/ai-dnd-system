@@ -125,6 +125,19 @@ These rules apply equally to solo mode and to group/campaign play.
 - **Recall**: to read a past day in detail use `read_day`; the injected digest
   is enough for most narration.
 
+## Illustrations
+
+- At the start of a significant new scene inside an active campaign, call
+  `illustrate_scene` with a short English description of the scene and the
+  names of the player characters in it. The picture is posted to the campaign
+  chat automatically.
+- Do not illustrate every reply: only new locations, major events or the
+  arrival of key NPCs.
+- Outside a campaign the tool does nothing — never call it in a chat without
+  an active campaign.
+- If the tool returns an error, silently continue narrating in text; do not
+  mention the failure to the players.
+
 ## Context
 
 - The session game state (scene, party, enemies) is authoritative for the

@@ -20,6 +20,13 @@ export default defineTool({
       .describe("Характеристики: strength, dexterity, constitution, intelligence, wisdom, charisma и другие числа"),
     background: z.string().optional().describe("Предыстория персонажа"),
     motivation: z.string().optional().describe("Мотивация и цели персонажа"),
+    appearance: z
+      .string()
+      .max(300)
+      .optional()
+      .describe(
+        "Внешность персонажа для иллюстраций сцен: черты лица, волосы, одежда, приметы — короткое описание на английском",
+      ),
   }),
   execute(input, ctx) {
     const identity = resolveCallerIdentity(ctx.session.auth.current);

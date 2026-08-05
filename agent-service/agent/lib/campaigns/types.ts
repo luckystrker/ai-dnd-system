@@ -52,6 +52,8 @@ export interface CharacterSheet {
   stats: Record<string, number>;
   background?: string;
   motivation?: string;
+  /** Внешность персонажа для иллюстраций сцен (на английском). */
+  appearance?: string;
   dmNotes?: string;
   // Динамическое состояние персонажа (обновляется по ходу игры).
   hp?: number;

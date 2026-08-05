@@ -26,6 +26,7 @@ export interface NewCharacterInput {
   stats?: Record<string, number>;
   background?: string;
   motivation?: string;
+  appearance?: string;
 }
 
 export interface NewMemberInput {
@@ -253,6 +254,7 @@ export class MarkdownCampaignStore implements CampaignStore {
       stats: input.stats ?? {},
       background: input.background,
       motivation: input.motivation,
+      appearance: input.appearance,
       createdAt: new Date().toISOString(),
     };
     this.writeCharacter(campaign.slug, sheet);
@@ -445,6 +447,7 @@ function characterToFrontmatter(sheet: CharacterSheet): Record<string, unknown> 
     level: sheet.level,
     stats: sheet.stats,
     motivation: sheet.motivation,
+    appearance: sheet.appearance,
     hp: sheet.hp,
     maxHp: sheet.maxHp,
     conditions: sheet.conditions,
@@ -482,6 +485,7 @@ function docToCharacter(doc: string): CharacterSheet {
     stats,
     background: body || undefined,
     motivation: data.motivation ? asString(data.motivation) : undefined,
+    appearance: data.appearance ? asString(data.appearance) : undefined,
     hp: typeof data.hp === "number" ? data.hp : undefined,
     maxHp: typeof data.maxHp === "number" ? data.maxHp : undefined,
     conditions: asStringArray(data.conditions),

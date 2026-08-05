@@ -22,6 +22,10 @@ standalone.
    - **Race** (human, elf, dwarf, halfling, ...).
    - **Background**: who the character is and where they come from.
    - **Motivation**: what drives them and what they want from the adventure.
+   - **Appearance**: a short portrait description (face, hair, clothing,
+     distinguishing features). It is used to draw consistent scene
+     illustrations, so collect it as a compact English phrase and pass it as
+     `appearance` to `save_character`.
 4. Every suggestion must fit the campaign's setting and theme. When offering
    options, reference the campaign world. Check the existing party: if a
    concept overlaps heavily with another character, point it out and suggest a
