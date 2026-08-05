@@ -17,7 +17,8 @@ standalone.
    the already created characters.
 3. Interview the player, 1-2 questions per message:
    - **Name**.
-   - **Class** (D&D 5e: fighter, wizard, rogue, cleric, ranger, etc.).
+   - **Class** (D&D 5e: fighter, wizard, rogue, cleric, ranger, etc.) — see
+     the beginner guidance below.
    - **Race** (human, elf, dwarf, halfling, ...).
    - **Background**: who the character is and where they come from.
    - **Motivation**: what drives them and what they want from the adventure.
@@ -30,6 +31,20 @@ standalone.
    interview over numbers.
 6. When everything is collected, show a short summary of the sheet, then call
    `save_character`. Confirm that the character was saved into the campaign.
+
+## Beginner guidance and neutrality
+
+- If the player is new to D&D or has no preference, lead with the simple
+  classes — Воин (fighter), Варвар (barbarian), Плут (rogue), Жрец (cleric):
+  each has one or two core mechanics and little bookkeeping.
+- Classes with heavy resource management — Следопыт (ranger), Волшебник
+  (wizard), Друид (druid), Колдун (warlock), Бард (bard) — are fine to offer,
+  but always add a one-line complexity note (spells, slots, extra rules).
+- Present class options neutrally: no "отлично подходит для этой кампании",
+  no recommended option, no praising the pick. Confirm the choice with one
+  short neutral sentence and continue.
+- Give every option in any list (class, race, background, motivation) a
+  factual one-line description only; the player decides what fits.
 
 ## Rules
 

@@ -374,6 +374,58 @@ check("обновление NPC дописывает память, не зати
   if (npcStore.listNpcs(campaign.id).length !== 1) throw new Error("listNpcs вернул лишнее");
 });
 
+// --- Движок d20: маппинг навыков, характеристики, натуральные 20/1 ---
+
+const engine = await import("../agent/lib/engine/dnd5e.ts");
+
+check("resolveSkillAbility: английские и русские названия навыков", () => {
+  const cases: Array<[string, string]> = [
+    ["perception", "wis"],
+    ["Восприятие (Perception)", "wis"],
+    ["восприятие", "wis"],
+    ["расследование", "int"],
+    ["Выживание (Survival)", "wis"],
+    ["ловкость рук", "dex"],
+    ["sleight of hand", "dex"],
+    ["уход за животными", "wis"],
+    ["убеждение", "cha"],
+  ];
+  for (const [skill, expected] of cases) {
+    const actual = engine.resolveSkillAbility(skill);
+    if (actual !== expected) throw new Error(`"${skill}" -> ${actual}, ожидался ${expected}`);
+  }
+});
+
+check("skillCheck: модификатор из полных названий характеристик листа", () => {
+  // Детерминированный бросок: random()=0.5 -> d20 = floor(0.5*20)+1 = 11.
+  const result = engine.skillCheck({ dexterity: 15, intelligence: 8 }, "stealth", 12, null, () => 0.5);
+  if (result.ability !== "dex") throw new Error(`ability = ${result.ability}, ожидался dex`);
+  if (result.modifier !== 2) throw new Error(`modifier = ${result.modifier}, ожидался +2 (DEX 15)`);
+  if (result.roll !== 11 || result.total !== 13 || !result.success) throw new Error(`13 vs DC 12 должен быть успехом: ${JSON.stringify(result)}`);
+});
+
+check("skillCheck: проверка на русском берёт верную характеристику", () => {
+  // ИНТ 8 -> -1; 11 + (-1) = 10 vs DC 13 -> провал.
+  const result = engine.skillCheck({ intelligence: 8 }, "Расследование (Investigation)", 13, null, () => 0.5);
+  if (result.ability !== "int") throw new Error(`ability = ${result.ability}, ожидался int`);
+  if (result.modifier !== -1) throw new Error(`modifier = ${result.modifier}, ожидался -1 (INT 8)`);
+  if (result.success) throw new Error("10 vs DC 13 должен быть провалом");
+});
+
+check("skillCheck: натуральная 20 — успех всегда", () => {
+  // random()=0.9999 -> d20 = 20, даже против DC 30 и с отрицательным модификатором.
+  const result = engine.skillCheck({ wisdom: 5 }, "perception", 30, null, () => 0.9999);
+  if (result.roll !== 20) throw new Error(`roll = ${result.roll}, ожидалась 20`);
+  if (!result.success || !result.naturalSuccess) throw new Error("натуральная 20 обязана быть успехом");
+});
+
+check("skillCheck: натуральная 1 — провал всегда", () => {
+  // random()=0 -> d20 = 1, даже с модификатором +5 против DC 1.
+  const result = engine.skillCheck({ strength: 20 }, "athletics", 1, null, () => 0);
+  if (result.roll !== 1) throw new Error(`roll = ${result.roll}, ожидалась 1`);
+  if (result.success || !result.naturalFailure) throw new Error("натуральная 1 обязана быть провалом");
+});
+
 rmSync(root, { recursive: true, force: true });
 if (failures > 0) {
   console.error(`\n${failures} проверок провалено`);
