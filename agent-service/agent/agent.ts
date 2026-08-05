@@ -19,11 +19,11 @@ const model = llm(process.env.LLM_MODEL ?? "deepseek-v4-flash");
  * суммаризирует старые ходы; полный оригинал всегда остаётся в history/days/.
  */
 const CONTEXT_WINDOW_BY_LENGTH: Record<CampaignLength, number> = {
-  short: 64_000,
-  medium: 128_000,
-  long: 200_000,
+  short: 900_000,
+  medium: 900_000,
+  long: 900_000,
 };
-const DEFAULT_CONTEXT_WINDOW = 128_000;
+const DEFAULT_CONTEXT_WINDOW = 900_000;
 
 function contextWindowFor(auth: unknown): number {
   const identity = resolveCallerIdentity(auth);
