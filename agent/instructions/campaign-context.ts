@@ -23,6 +23,53 @@ const SUMMARY_CAP = 2000;
 const KEY_EVENTS_CAP = 2000;
 const DAY_TAIL_LINES = 30;
 const NPC_ROSTER_CAP = 20;
+const ACTIVE_QUESTS_CAP = 10;
+const OPEN_THREADS_CAP = 10;
+
+const ACTIVE_QUEST_STATUSES = new Set(["offered", "accepted", "active"]);
+
+const DIFFICULTY_LABEL: Record<string, string> = {
+  easy: "лёгкий",
+  medium: "средний",
+  hard: "сложный",
+};
+
+function activeQuestsSection(campaign: Campaign): string {
+  const quests = campaignStore
+    .listQuests(campaign.id)
+    .filter((quest) => ACTIVE_QUEST_STATUSES.has(quest.status))
+    .slice(0, ACTIVE_QUESTS_CAP);
+  if (quests.length === 0) return "### Активные квесты\n(нет активных квестов)";
+  const lines = quests.map((quest) => {
+    const parts = [
+      DIFFICULTY_LABEL[quest.difficulty] ?? quest.difficulty,
+      quest.giverNpcSlug ? `от: ${quest.giverNpcSlug}` : null,
+      quest.deadlineDay ? `дедлайн: день ${quest.deadlineDay}` : null,
+    ].filter(Boolean);
+    return `- ${quest.status}: «${quest.title}» — ${quest.objective}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`;
+  });
+  return "### Активные квесты\n" + lines.join("\n");
+}
+
+const THREAD_KIND_LABEL: Record<string, string> = {
+  promise: "обещание",
+  mystery: "тайна",
+  debt: "долг",
+  unresolved: "незавершённое",
+};
+
+function openThreadsSection(campaign: Campaign): string {
+  const threads = campaignStore
+    .listThreads(campaign.id)
+    .filter((thread) => thread.status === "open")
+    .slice(0, OPEN_THREADS_CAP);
+  if (threads.length === 0) return "### Открытые нити\n(нет)";
+  const lines = threads.map((thread) => {
+    const kind = THREAD_KIND_LABEL[thread.kind] ?? thread.kind;
+    return `- [${kind}] ${thread.text} (открыта в день ${thread.dayOpened})`;
+  });
+  return "### Открытые нити\n" + lines.join("\n");
+}
 
 function capTail(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -125,6 +172,9 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
     sections.push("### Ключевые события\n" + capTail(keyEvents, KEY_EVENTS_CAP));
   }
 
+  sections.push(activeQuestsSection(campaign));
+  sections.push(openThreadsSection(campaign));
+
   const currentDay = readDayTail(slug, day, DAY_TAIL_LINES);
   if (currentDay) {
     const dayParts = [`### Текущий день ${day}`];
@@ -141,6 +191,7 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
 
   sections.push(
     "Полный транскрипт дня — через read_day, карточка NPC — через get_npc. " +
+      "Квесты и нити — через list_quests / list_open_threads. " +
       "Изменения состояния фиксируй через update_character / upsert_npc; новый день — advance_day.",
   );
 

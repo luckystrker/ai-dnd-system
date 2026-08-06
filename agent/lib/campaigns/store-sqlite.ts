@@ -43,6 +43,15 @@ import {
   type CharacterSheet,
   type CharacterStatePatch,
   type MemberRole,
+  type NewQuestInput,
+  type NewThreadInput,
+  type OpenThread,
+  type Quest,
+  type QuestDifficulty,
+  type QuestPatch,
+  type QuestRewardPlan,
+  type QuestStatus,
+  type ThreadKind,
 } from "./types.ts";
 import type {
   CampaignStore,
@@ -103,6 +112,35 @@ interface CharacterRow {
   created_at: string;
 }
 
+interface QuestRow {
+  id: string;
+  campaign_id: string;
+  slug: string;
+  title: string;
+  giver_npc_slug: string | null;
+  objective: string;
+  difficulty: string;
+  reward_plan: string | null;
+  status: string;
+  deadline_day: number | null;
+  created_day: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+interface ThreadRow {
+  id: string;
+  campaign_id: string;
+  text: string;
+  kind: string;
+  status: string;
+  linked_quest_id: string | null;
+  day_opened: number;
+  day_closed: number | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS campaigns (
   id TEXT PRIMARY KEY,
@@ -159,6 +197,40 @@ CREATE TABLE IF NOT EXISTS characters (
   created_at TEXT NOT NULL,
   UNIQUE (campaign_id, slug)
 );
+
+CREATE TABLE IF NOT EXISTS quests (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  title TEXT NOT NULL,
+  giver_npc_slug TEXT,
+  objective TEXT NOT NULL,
+  difficulty TEXT NOT NULL DEFAULT 'medium',
+  reward_plan TEXT,
+  status TEXT NOT NULL DEFAULT 'offered',
+  deadline_day INTEGER,
+  created_day INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
+  UNIQUE (campaign_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_quests_status
+  ON quests (campaign_id, status);
+
+CREATE TABLE IF NOT EXISTS open_threads (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'unresolved',
+  status TEXT NOT NULL DEFAULT 'open',
+  linked_quest_id TEXT,
+  day_opened INTEGER NOT NULL DEFAULT 1,
+  day_closed INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_open_threads_status
+  ON open_threads (campaign_id, status);
 `;
 
 function parseJsonRecord(value: string | null): Record<string, number> {
@@ -204,6 +276,34 @@ function parseAbilityArray(value: string | null): CharacterAbility[] | undefined
       abilities.push(ability);
     }
     return abilities;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseQuestDifficulty(value: string): QuestDifficulty {
+  return value === "easy" || value === "hard" ? value : "medium";
+}
+
+function parseQuestStatus(value: string): QuestStatus {
+  const statuses: QuestStatus[] = ["offered", "accepted", "active", "completed", "failed", "abandoned"];
+  return statuses.includes(value as QuestStatus) ? (value as QuestStatus) : "offered";
+}
+
+function parseThreadKind(value: string): ThreadKind {
+  const kinds: ThreadKind[] = ["promise", "mystery", "debt", "unresolved"];
+  return kinds.includes(value as ThreadKind) ? (value as ThreadKind) : "unresolved";
+}
+
+function parseRewardPlan(value: string): QuestRewardPlan | undefined {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const plan: QuestRewardPlan = {};
+    if (typeof parsed.xp === "number") plan.xp = parsed.xp;
+    if (typeof parsed.gold === "number") plan.gold = parsed.gold;
+    if (Array.isArray(parsed.items)) plan.items = parsed.items.map((item) => String(item)).filter(Boolean);
+    if (typeof parsed.note === "string" && parsed.note.trim() !== "") plan.note = parsed.note;
+    return Object.keys(plan).length > 0 ? plan : undefined;
   } catch {
     return undefined;
   }
@@ -481,6 +581,146 @@ export class SqliteCampaignStore implements CampaignStore {
     return this.mustGetCampaign(campaignId);
   }
 
+  createQuest(campaignIdOrSlug: string, input: NewQuestInput): Quest {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    if (this.listQuests(campaign.id).some((quest) => quest.title.toLowerCase() === input.title.toLowerCase())) {
+      throw new StoreError(`Квест «${input.title}» уже есть в кампании.`, "duplicate");
+    }
+    const now = new Date().toISOString();
+    const quest: Quest = {
+      id: randomUUID(),
+      campaignId: campaign.id,
+      slug: this.uniqueQuestSlug(campaign.id, slugify(input.title)),
+      title: input.title,
+      giverNpcSlug: input.giverNpcSlug,
+      objective: input.objective,
+      difficulty: input.difficulty,
+      rewardPlan: input.rewardPlan,
+      status: input.status ?? "offered",
+      deadlineDay: input.deadlineDay,
+      createdDay: campaign.currentDay ?? 1,
+      createdAt: now,
+    };
+    this.insertQuest(quest);
+    return quest;
+  }
+
+  updateQuest(campaignIdOrSlug: string, questIdOrSlug: string, patch: QuestPatch): Quest {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const row = this.findQuestRow(campaign.id, questIdOrSlug);
+    const quest = this.questFromRow(row);
+    if (patch.status === "completed") {
+      throw new StoreError(
+        `Квест «${quest.title}» нельзя перевести в completed через update_quest — используй complete_quest: он выдаст награды.`,
+        "conflict",
+      );
+    }
+    if (patch.title !== undefined && patch.title.toLowerCase() !== quest.title.toLowerCase()) {
+      if (this.listQuests(campaign.id).some((other) => other.id !== quest.id && other.title.toLowerCase() === patch.title!.toLowerCase())) {
+        throw new StoreError(`Квест с названием «${patch.title}» уже есть в кампании.`, "duplicate");
+      }
+    }
+    const updated: Quest = { ...quest };
+    if (patch.title !== undefined) updated.title = patch.title;
+    if (patch.giverNpcSlug !== undefined) updated.giverNpcSlug = patch.giverNpcSlug;
+    if (patch.objective !== undefined) updated.objective = patch.objective;
+    if (patch.difficulty !== undefined) updated.difficulty = patch.difficulty;
+    if (patch.rewardPlan !== undefined) updated.rewardPlan = patch.rewardPlan;
+    if (patch.status !== undefined) updated.status = patch.status;
+    if (patch.deadlineDay !== undefined) updated.deadlineDay = patch.deadlineDay;
+    updated.updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE quests SET
+           title = ?, giver_npc_slug = ?, objective = ?, difficulty = ?,
+           reward_plan = ?, status = ?, deadline_day = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        updated.title,
+        updated.giverNpcSlug ?? null,
+        updated.objective,
+        updated.difficulty,
+        updated.rewardPlan !== undefined ? JSON.stringify(updated.rewardPlan) : row.reward_plan,
+        updated.status,
+        updated.deadlineDay ?? null,
+        updated.updatedAt,
+        row.id,
+      );
+    return this.mustGetQuest(row.id);
+  }
+
+  listQuests(campaignId: string): Quest[] {
+    const rows = this.db
+      .prepare("SELECT * FROM quests WHERE campaign_id = ? ORDER BY created_at DESC")
+      .all(campaignId) as QuestRow[];
+    return rows.map((row) => this.questFromRow(row));
+  }
+
+  appendThread(campaignIdOrSlug: string, input: NewThreadInput): OpenThread {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const now = new Date().toISOString();
+    const thread: OpenThread = {
+      id: randomUUID(),
+      campaignId: campaign.id,
+      text: input.text.trim(),
+      kind: input.kind ?? "unresolved",
+      status: "open",
+      linkedQuestId: input.linkedQuestId,
+      dayOpened: campaign.currentDay ?? 1,
+      createdAt: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO open_threads (
+           id, campaign_id, text, kind, status, linked_quest_id, day_opened, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        thread.id,
+        thread.campaignId,
+        thread.text,
+        thread.kind,
+        thread.status,
+        thread.linkedQuestId ?? null,
+        thread.dayOpened,
+        thread.createdAt,
+      );
+    return thread;
+  }
+
+  resolveThread(campaignIdOrSlug: string, threadIdOrText: string, day?: number): OpenThread {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const needle = threadIdOrText.toLowerCase();
+    const rows = this.db
+      .prepare("SELECT * FROM open_threads WHERE campaign_id = ? AND status = 'open'")
+      .all(campaign.id) as ThreadRow[];
+    const open = rows.filter(
+      (candidate) => candidate.id === threadIdOrText || candidate.text.toLowerCase().includes(needle),
+    );
+    if (open.length === 0) {
+      throw new StoreError(`Открытая нить «${threadIdOrText}» не найдена.`, "not_found");
+    }
+    if (open.length > 1) {
+      throw new StoreError(
+        `Фрагмент «${threadIdOrText}» подходит к нескольким нитям: ${open.map((row) => row.text).join("; ")}. Уточни текст или передай id.`,
+        "conflict",
+      );
+    }
+    const row = open[0];
+    this.db
+      .prepare("UPDATE open_threads SET status = 'resolved', day_closed = ?, updated_at = ? WHERE id = ?")
+      .run(day ?? campaign.currentDay ?? 1, new Date().toISOString(), row.id);
+    return this.mustGetThread(row.id);
+  }
+
+  listThreads(campaignId: string): OpenThread[] {
+    const rows = this.db
+      .prepare("SELECT * FROM open_threads WHERE campaign_id = ? ORDER BY created_at")
+      .all(campaignId) as ThreadRow[];
+    return rows.map((row) => this.threadFromRow(row));
+  }
+
   listCharacters(campaignId: string): CharacterSheet[] {
     return this.listCharacterRows(campaignId).map((row) => this.sheetFromRow(row));
   }
@@ -628,6 +868,109 @@ export class SqliteCampaignStore implements CampaignStore {
       updatedAt: row.updated_at ?? undefined,
       createdAt: row.created_at,
     };
+  }
+
+  private questFromRow(row: QuestRow): Quest {
+    return {
+      id: row.id,
+      campaignId: row.campaign_id,
+      slug: row.slug,
+      title: row.title,
+      giverNpcSlug: row.giver_npc_slug ?? undefined,
+      objective: row.objective,
+      difficulty: parseQuestDifficulty(row.difficulty),
+      rewardPlan: row.reward_plan ? parseRewardPlan(row.reward_plan) : undefined,
+      status: parseQuestStatus(row.status),
+      deadlineDay: row.deadline_day ?? undefined,
+      createdDay: row.created_day,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at ?? undefined,
+    };
+  }
+
+  private threadFromRow(row: ThreadRow): OpenThread {
+    return {
+      id: row.id,
+      campaignId: row.campaign_id,
+      text: row.text,
+      kind: parseThreadKind(row.kind),
+      status: row.status === "resolved" ? "resolved" : "open",
+      linkedQuestId: row.linked_quest_id ?? undefined,
+      dayOpened: row.day_opened,
+      dayClosed: row.day_closed ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at ?? undefined,
+    };
+  }
+
+  private mustGetQuest(questId: string): Quest {
+    const row = this.db.prepare("SELECT * FROM quests WHERE id = ?").get(questId) as QuestRow | undefined;
+    if (!row) {
+      throw new StoreError(`Квест не найден (id «${questId}»).`, "not_found");
+    }
+    return this.questFromRow(row);
+  }
+
+  private mustGetThread(threadId: string): OpenThread {
+    const row = this.db
+      .prepare("SELECT * FROM open_threads WHERE id = ?")
+      .get(threadId) as ThreadRow | undefined;
+    if (!row) {
+      throw new StoreError(`Нить не найдена (id «${threadId}»).`, "not_found");
+    }
+    return this.threadFromRow(row);
+  }
+
+  private findQuestRow(campaignId: string, questIdOrSlug: string): QuestRow {
+    const needle = questIdOrSlug.toLowerCase();
+    const rows = this.db
+      .prepare("SELECT * FROM quests WHERE campaign_id = ?")
+      .all(campaignId) as QuestRow[];
+    const row = rows.find(
+      (candidate) =>
+        candidate.id === questIdOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.title.toLowerCase() === needle,
+    );
+    if (!row) {
+      throw new StoreError(`Квест «${questIdOrSlug}» не найден в кампании.`, "not_found");
+    }
+    return row;
+  }
+
+  private insertQuest(quest: Quest): void {
+    this.db
+      .prepare(
+        `INSERT INTO quests (
+           id, campaign_id, slug, title, giver_npc_slug, objective, difficulty,
+           reward_plan, status, deadline_day, created_day, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        quest.id,
+        quest.campaignId,
+        quest.slug,
+        quest.title,
+        quest.giverNpcSlug ?? null,
+        quest.objective,
+        quest.difficulty,
+        quest.rewardPlan !== undefined ? JSON.stringify(quest.rewardPlan) : null,
+        quest.status,
+        quest.deadlineDay ?? null,
+        quest.createdDay,
+        quest.createdAt,
+      );
+  }
+
+  private uniqueQuestSlug(campaignId: string, base: string): string {
+    const probe = this.db.prepare("SELECT 1 FROM quests WHERE campaign_id = ? AND slug = ?");
+    let slug = base || "quest";
+    let counter = 2;
+    while (probe.get(campaignId, slug)) {
+      slug = `${base}-${counter}`;
+      counter += 1;
+    }
+    return slug;
   }
 
   private listCharacterRows(campaignId: string): CharacterRow[] {

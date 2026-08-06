@@ -323,6 +323,162 @@ const sqliteCampaign = runStoreSuite(sqliteStore, "sqlite", {
   setStatus: (campaignId, _slug, status) => sqliteSetStatus(campaignId, status),
 });
 
+// --- Квесты и открытые нити ---
+
+function runQuestSuite(store: CampaignStore, campaign: Campaign, label: string) {
+  const t = (name: string) => `[${label}] ${name}`;
+
+  check(t("создание квеста"), () => {
+    const quest = store.createQuest(campaign.id, {
+      title: "Амулет для кузнеца",
+      objective: "Найти амулет в развалинах Хмурого Холма",
+      difficulty: "medium",
+      giverNpcSlug: "Бренна Хмурый",
+      rewardPlan: { gold: 200, note: "кузнец отдаст долг" },
+    });
+    if (quest.slug !== "amulet-dlya-kuznetsa") throw new Error(`неожиданный slug: ${quest.slug}`);
+    if (quest.status !== "offered") throw new Error(`статус по умолчанию: ${quest.status}`);
+    if (quest.createdDay !== 2) throw new Error(`createdDay = ${quest.createdDay}, ожидался 2`);
+    if (quest.rewardPlan?.gold !== 200) throw new Error("rewardPlan потерян");
+  });
+
+  expectError(t("дубликат названия квеста отклоняется"), "duplicate", () =>
+    store.createQuest(campaign.id, {
+      title: "амулет для кузнеца",
+      objective: "другое",
+      difficulty: "easy",
+    }),
+  );
+
+  check(t("roundtrip квеста и listQuests"), () => {
+    const quests = store.listQuests(campaign.id);
+    if (quests.length !== 1) throw new Error(`квестов ${quests.length}, ожидался 1`);
+    const quest = quests[0];
+    if (quest.title !== "Амулет для кузнеца") throw new Error("title потерян");
+    if (quest.objective !== "Найти амулет в развалинах Хмурого Холма") throw new Error("objective потерян");
+    if (quest.difficulty !== "medium") throw new Error("difficulty потеряна");
+    if (quest.giverNpcSlug !== "Бренна Хмурый") throw new Error("giverNpcSlug потерян");
+    if (quest.rewardPlan?.note !== "кузнец отдаст долг") throw new Error("note награды потерян");
+  });
+
+  check(t("updateQuest меняет статус и дедлайн"), () => {
+    const updated = store.updateQuest(campaign.id, "amulet-dlya-kuznetsa", {
+      status: "active",
+      deadlineDay: 5,
+    });
+    if (updated.status !== "active") throw new Error("статус не обновился");
+    if (updated.deadlineDay !== 5) throw new Error("дедлайн не обновился");
+    const reread = store.listQuests(campaign.id)[0];
+    if (reread.status !== "active" || reread.deadlineDay !== 5) {
+      throw new Error("изменения не пережили roundtrip");
+    }
+  });
+
+  check(t("updateQuest находит квест по названию без регистра"), () => {
+    const updated = store.updateQuest(campaign.id, "АМУЛЕТ ДЛЯ КУЗНЕЦА", { status: "accepted" });
+    if (updated.status !== "accepted") throw new Error("поиск по названию не сработал");
+  });
+
+  expectError(t("updateQuest для неизвестного квеста"), "not_found", () =>
+    store.updateQuest(campaign.id, "кто-то-другой", { status: "active" }),
+  );
+
+  expectError(t("updateQuest в completed отклоняется (нужен complete_quest)"), "conflict", () =>
+    store.updateQuest(campaign.id, "amulet-dlya-kuznetsa", { status: "completed" }),
+  );
+
+  check(t("updateQuest с переименованием в дубликат отклоняется"), () => {
+    store.createQuest(campaign.id, {
+      title: "Другое задание",
+      objective: "Помочь в канализации",
+      difficulty: "easy",
+    });
+    try {
+      store.updateQuest(campaign.id, "Другое задание", { title: "Амулет для кузнеца" });
+      throw new Error("ожидался duplicate");
+    } catch (error) {
+      if (!(error instanceof StoreError) || error.code !== "duplicate") throw error;
+    }
+  });
+
+  check(t("roundtrip полного rewardPlan (xp/gold/items/note)"), () => {
+    const quest = store.createQuest(campaign.id, {
+      title: "Полная награда",
+      objective: "Собрать налоги",
+      difficulty: "hard",
+      rewardPlan: { xp: 500, gold: 1000, items: ["Кольцо власти", "Зелье лечения"], note: "должность капитана стражи" },
+    });
+    const reread = store.listQuests(campaign.id).find((entry) => entry.id === quest.id)!;
+    if (reread.rewardPlan?.xp !== 500) throw new Error("xp плана потерян");
+    if (reread.rewardPlan?.gold !== 1000) throw new Error("gold плана потерян");
+    if (reread.rewardPlan?.items?.length !== 2) throw new Error("items плана потеряны");
+    if (reread.rewardPlan?.note !== "должность капитана стражи") throw new Error("note плана потерян");
+  });
+
+  check(t("пустой rewardPlan после roundtrip становится undefined (MD и SQLite единообразно)"), () => {
+    const quest = store.createQuest(campaign.id, {
+      title: "Пустая награда",
+      objective: "Осмотреть маяк",
+      difficulty: "easy",
+      rewardPlan: {},
+    });
+    const reread = store.listQuests(campaign.id).find((entry) => entry.id === quest.id)!;
+    if (reread.rewardPlan !== undefined) {
+      throw new Error(`rewardPlan = ${JSON.stringify(reread.rewardPlan)}, ожидался undefined`);
+    }
+  });
+
+  check(t("appendThread создаёт открытую нить"), () => {
+    const thread = store.appendThread(campaign.id, {
+      text: "Партия пообещала старосте поговорить со стражей",
+      kind: "promise",
+    });
+    if (thread.status !== "open") throw new Error("статус нити не open");
+    if (thread.dayOpened !== 2) throw new Error(`dayOpened = ${thread.dayOpened}, ожидался 2`);
+    if (thread.kind !== "promise") throw new Error("kind потерян");
+  });
+
+  check(t("resolveThread по фрагменту текста"), () => {
+    const resolved = store.resolveThread(campaign.id, "пообещала старосте");
+    if (resolved.status !== "resolved") throw new Error("статус не resolved");
+    if (resolved.dayClosed !== 2) throw new Error("dayClosed не выставлен");
+  });
+
+  expectError(t("resolveThread повторно/для закрытой нити"), "not_found", () =>
+    store.resolveThread(campaign.id, "пообещала старосте"),
+  );
+
+  check(t("listThreads возвращает и закрытые, и открытые"), () => {
+    store.appendThread(campaign.id, { text: "Тайна капюшона", kind: "mystery" });
+    const threads = store.listThreads(campaign.id);
+    if (threads.length !== 2) throw new Error(`нитей ${threads.length}, ожидалось 2`);
+    const closed = threads.find((entry) => entry.status === "resolved");
+    if (!closed) throw new Error("закрытая нить не пережила roundtrip");
+    const open = threads.find((entry) => entry.kind === "mystery");
+    if (!open || open.status !== "open") throw new Error("открытая нить потеряна");
+  });
+
+  expectError(t("resolveThread при неоднозначном фрагменте — conflict"), "conflict", () => {
+    store.appendThread(campaign.id, { text: "Тайна капюшона и маска", kind: "mystery" });
+    store.resolveThread(campaign.id, "капюшон");
+  });
+
+  check(t("resolveThread по id закрывает точную нить"), () => {
+    const [thread] = store
+      .listThreads(campaign.id)
+      .filter((entry) => entry.status === "open" && entry.text.includes("и маска"));
+    const resolved = store.resolveThread(campaign.id, thread.id);
+    if (resolved.status !== "resolved") throw new Error("нить по id не закрылась");
+  });
+
+  expectError(t("resolveThread для неизвестной нити"), "not_found", () =>
+    store.resolveThread(campaign.id, "не существующая нить"),
+  );
+}
+
+runQuestSuite(store, campaign, "md");
+runQuestSuite(sqliteStore, sqliteCampaign, "sqlite");
+
 // --- Защита slug от path traversal ---
 
 check("assertCampaignSlug отклоняет path traversal", () => {
@@ -478,6 +634,60 @@ check("обновление NPC дописывает память, не зати
   if (!npc.memory.includes("Исчезла после ночёвки")) throw new Error("новая память не дописана");
   if (npc.status !== "unknown") throw new Error("status не обновился");
   if (npcStore.listNpcs(sqliteCampaign.id).length !== 1) throw new Error("listNpcs вернул лишнее");
+});
+
+// --- Таблицы наград и уровня ---
+
+const rewards = await import("../agent/lib/rewards.ts");
+
+check("levelForXp / xpForLevel согласованы", () => {
+  if (rewards.xpForLevel(1) !== 0) throw new Error("порог 1 уровня != 0");
+  if (rewards.xpForLevel(2) !== 300) throw new Error("порог 2 уровня != 300");
+  if (rewards.levelForXp(0) !== 1) throw new Error("0 XP должен давать 1 уровень");
+  if (rewards.levelForXp(299) !== 1) throw new Error("299 XP должен давать 1 уровень");
+  if (rewards.levelForXp(300) !== 2) throw new Error("300 XP должен давать 2 уровень");
+  if (rewards.levelForXp(1_000_000) !== 20) throw new Error("максимум 20 уровень");
+});
+
+check("questXpPerCharacter по сложности и уровню партии", () => {
+  // 1 уровень: до 2-го — 300 XP. medium = 25% = 75.
+  if (rewards.questXpPerCharacter("medium", 1) !== 75) {
+    throw new Error(`medium/1: ${rewards.questXpPerCharacter("medium", 1)}`);
+  }
+  if (rewards.questXpPerCharacter("easy", 1) !== 36) {
+    throw new Error(`easy/1: ${rewards.questXpPerCharacter("easy", 1)}`);
+  }
+  if (rewards.questXpPerCharacter("hard", 1) !== 120) {
+    throw new Error(`hard/1: ${rewards.questXpPerCharacter("hard", 1)}`);
+  }
+  // 3 уровень: до 4-го — 1800 XP. medium = 25% = 450.
+  if (rewards.questXpPerCharacter("medium", 3) !== 450) {
+    throw new Error(`medium/3: ${rewards.questXpPerCharacter("medium", 3)}`);
+  }
+  if (rewards.questXpPerCharacter("medium", 0) !== rewards.questXpPerCharacter("medium", 1)) {
+    throw new Error("уровень ниже 1 должен клампиться к 1");
+  }
+});
+
+check("questGoldRange растёт с уровнем, middleOf — середина", () => {
+  const easy = rewards.questGoldRange("easy", 1);
+  if (easy[0] !== 25 || easy[1] !== 75) throw new Error(`easy/1: ${JSON.stringify(easy)}`);
+  const medium3 = rewards.questGoldRange("medium", 3);
+  if (medium3[0] !== 150 || medium3[1] !== 450) throw new Error(`medium/3: ${JSON.stringify(medium3)}`);
+  if (rewards.middleOf([100, 300]) !== 200) throw new Error("middleOf неверен");
+});
+
+check("classHitDie: англ., русские классы и неизвестные", () => {
+  if (rewards.classHitDie("fighter") !== 10) throw new Error("fighter != d10");
+  if (rewards.classHitDie("Варвар") !== 12) throw new Error("Варвар != d12");
+  if (rewards.classHitDie("волшебник") !== 6) throw new Error("волшебник != d6");
+  if (rewards.classHitDie("something") !== 8) throw new Error("неизвестный класс должен давать d8");
+});
+
+check("statModifier: floor((stat-10)/2)", () => {
+  if (rewards.statModifier(10) !== 0) throw new Error("10 -> 0");
+  if (rewards.statModifier(15) !== 2) throw new Error("15 -> 2");
+  if (rewards.statModifier(8) !== -1) throw new Error("8 -> -1");
 });
 
 // --- Движок d20: маппинг навыков, характеристики, натуральные 20/1 ---

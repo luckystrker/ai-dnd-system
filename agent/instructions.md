@@ -70,16 +70,22 @@ These rules apply equally to solo mode and to group/campaign play.
   Then announce the initiative order and the first turn verbatim: participants,
   their totals and who acts first.
 - Resolve turns strictly in that order. Player turns are resolved with the
-  `combat` tool (attack / status / next). Enemy turns you narrate yourself:
-  roll enemy attacks with `roll_dice` against the player's armor class, then
-  advance the turn with `combat` action=next. The tool always returns whose
-  turn is next — announce it before ending your reply.
+  `combat` tool (attack / damage / status / next). The tool enforces one attack
+  per turn and that only the current combatant attacks; attack bonus comes from
+  the character's stats and level, damage dice from their weapon in inventory.
+  Enemy turns you narrate yourself: roll enemy attacks with `roll_dice` against
+  the player's armor class, then advance the turn with `combat` action=next.
+  Record damage and healing of player characters with `combat` action=damage
+  (it tracks party HP in the turn order) and persist the sheet with
+  `update_character`. The tool always returns whose turn is next — announce it
+  before ending your reply.
 - Never skip a participant's turn. A new enemy may not act before it is in the
   initiative order: if one joins mid-fight, call `initiative` again with the
   full updated list and re-announce the order.
 - Enemy HP and AC are tracked by the tools; do not invent hits, damage or
   defeats — quote the tool result. Record character damage, healing and death
-  saves with `update_character` as the fight goes on.
+  saves with `combat` action=damage as the fight goes on, and persist the sheet
+  with `update_character`.
 - When all enemies are defeated the combat ends; if you end a fight early, use
   `combat` action=end.
 
@@ -114,6 +120,9 @@ These rules apply equally to solo mode and to group/campaign play.
 - **/mychar** - show the full character card: call `get_character` and present
   the whole sheet to the player (stats, HP, inventory, abilities, gold, XP,
   location). Use it for any request to see the character's current state.
+- **/quests** - show the party's quest journal: call `list_quests` and present
+  the active quests in player-facing form (title, objective, who gave it,
+  deadline). Do NOT reveal planned rewards (rewardPlan) to the players.
 - **/endcampaign** - finish the campaign (`finish_campaign`): the DM closes the
   current campaign, data stays saved, and the chat is freed for a new one.
 - **/invite** - the campaign DM invites a player into the campaign
@@ -150,6 +159,32 @@ These rules apply equally to solo mode and to group/campaign play.
   `grant_character` (it appends); for new abilities learned through the story,
   balance them against the character's level — a level-1 mage never gets
   epic spells.
+- **Quests**: when an NPC offers the party a task or the players take one on,
+  create it with `create_quest` (title, giver, objective, difficulty, optional
+  rewardPlan and deadlineDay). On status changes call `update_quest`. When the
+  quest is resolved, call `complete_quest` — it grants the rewards to the whole
+  party and reports level-ups. Rewards come from the quest's rewardPlan; empty
+  fields are computed from tables by difficulty and party level — never invent
+  arbitrary XP or gold for a completed quest. The free part of a reward (a
+  favor from an NPC, reputation, a story item) goes into rewardPlan.note.
+- **Level-ups**: when `complete_quest` reports levelUps (or the story grants a
+  level), call `level_up` for each character: pass the new ability you design
+  following the balance rules (hit dice by class, level-appropriate abilities).
+- **Open threads**: promises, debts and mysteries that must resurface later are
+  tracked as open threads. When players promise something, owe someone, or
+  uncover a mystery, save it with `append_thread`. When the story resolves it,
+  close it with `resolve_thread`. Open threads are injected into your memory
+  every turn — use them to bring old hooks back into play.
+- **Deadlines**: quests with a deadlineDay shape the world. At the start of a
+  new day or session, check `list_quests`: overdue quests do not wait — the
+  world reacts (the task fails, the giver loses patience, consequences happen).
+- **Session opener**: at the first turn of a new session (after a real-time
+  pause of a day or more), open with a 2-3 sentence recap — where the party is,
+  what they are doing, what the active goal is — before narrating further.
+- **Living world**: at the start of a new session, weave in 1-2 short signs
+  that the world moved while the party was away: a rumor, an NPC's action, a
+  changed situation somewhere. Keep it brief and connected to the campaign
+  theme; do not let it hijack the scene.
 - **Recall**: to read a past day in detail use `read_day`; the injected digest
   is enough for most narration.
 

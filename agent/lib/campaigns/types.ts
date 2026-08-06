@@ -124,9 +124,92 @@ export interface NpcProfile {
   updatedAt?: string;
 }
 
+/** Статус квеста: предложен, принят, в работе, завершён, провален, брошен. */
+export type QuestStatus = "offered" | "accepted" | "active" | "completed" | "failed" | "abandoned";
+
+/** Сложность квеста — основа для расчёта наград по таблицам. */
+export type QuestDifficulty = "easy" | "medium" | "hard";
+
+/** Запланированная награда за квест: таблицы применяются для пустых полей. */
+export interface QuestRewardPlan {
+  /** XP каждому участнику за квест (без значения — таблица по сложности). */
+  xp?: number;
+  /** Золото на всю партию (без значения — таблица по сложности). */
+  gold?: number;
+  /** Предметы (выдаются каждому участнику партии). */
+  items?: string[];
+  /** Свободная часть: услуга NPC, репутация, сюжетный бонус. */
+  note?: string;
+}
+
+export interface Quest {
+  id: string;
+  campaignId: string;
+  slug: string;
+  title: string;
+  /** Слаг NPC-квестодателя (если квест выдал NPC). */
+  giverNpcSlug?: string;
+  objective: string;
+  difficulty: QuestDifficulty;
+  rewardPlan?: QuestRewardPlan;
+  status: QuestStatus;
+  /** Игровой день дедлайна: мир не ждёт. */
+  deadlineDay?: number;
+  /** День, когда квест появился. */
+  createdDay: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** Тип открытой нити: обещание, тайна, долг, незавершённое. */
+export type ThreadKind = "promise" | "mystery" | "debt" | "unresolved";
+
+export interface OpenThread {
+  id: string;
+  campaignId: string;
+  text: string;
+  kind: ThreadKind;
+  status: "open" | "resolved";
+  /** Квест, к которому относится нить (если применимо). */
+  linkedQuestId?: string;
+  dayOpened: number;
+  dayClosed?: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export const memberRoleSchema = z.enum(["dm", "player"]);
 export const campaignLengthSchema = z.enum(["short", "medium", "long"]);
 export const npcStatusSchema = z.enum(["alive", "dead", "unknown"]);
+
+/** Входные данные для создания квеста. */
+export interface NewQuestInput {
+  title: string;
+  giverNpcSlug?: string;
+  objective: string;
+  difficulty: QuestDifficulty;
+  rewardPlan?: QuestRewardPlan;
+  status?: QuestStatus;
+  deadlineDay?: number;
+}
+
+/** Патч квеста (для updateQuest). */
+export interface QuestPatch {
+  title?: string;
+  giverNpcSlug?: string;
+  objective?: string;
+  difficulty?: QuestDifficulty;
+  rewardPlan?: QuestRewardPlan;
+  status?: QuestStatus;
+  deadlineDay?: number;
+}
+
+/** Входные данные для открытой нити. */
+export interface NewThreadInput {
+  text: string;
+  kind?: ThreadKind;
+  linkedQuestId?: string;
+}
 
 /** Максимальный размер партии (используется и в lib/memory.ts). */
 export const MAX_PARTY = 6;

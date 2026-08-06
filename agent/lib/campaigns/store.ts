@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterAbility, type CharacterGrantPatch, type CharacterSheet, type CharacterStatePatch, type MemberRole } from "./types.ts";
+import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterAbility, type CharacterGrantPatch, type CharacterSheet, type CharacterStatePatch, type MemberRole, type NewQuestInput, type NewThreadInput, type OpenThread, type Quest, type QuestDifficulty, type QuestPatch, type QuestRewardPlan, type QuestStatus, type ThreadKind } from "./types.ts";
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
 import { SqliteCampaignStore } from "./store-sqlite.ts";
 
@@ -35,6 +35,13 @@ export interface NewCharacterInput {
   maxHp?: number;
   hp?: number;
 }
+
+/** Реэкспорт типов квестов/нитей: они живут в types.ts рядом с сущностями. */
+export type {
+  NewQuestInput,
+  QuestPatch,
+  NewThreadInput,
+} from "./types.ts";
 
 export interface NewMemberInput {
   userId: string;
@@ -72,6 +79,18 @@ export interface CampaignStore {
   grantCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterGrantPatch): CharacterSheet;
   /** Завершение кампании (только dm): статус finished, чат освобождается. Данные сохраняются. */
   finishCampaign(campaignId: string, actorUserId: string): Campaign;
+  /** Создание квеста (доступ проверяется в тулах через resolveCampaignForWrite). */
+  createQuest(campaignIdOrSlug: string, input: NewQuestInput): Quest;
+  /** Обновление квеста по id/slug/названию. */
+  updateQuest(campaignIdOrSlug: string, questIdOrSlug: string, patch: QuestPatch): Quest;
+  /** Квесты кампании (все статусы, от новых к старым). */
+  listQuests(campaignId: string): Quest[];
+  /** Открытая нить (обещание/тайна/долг) в журнал кампании. */
+  appendThread(campaignIdOrSlug: string, input: NewThreadInput): OpenThread;
+  /** Закрытие нити по id (или по совпадению текста). */
+  resolveThread(campaignIdOrSlug: string, threadIdOrText: string, day?: number): OpenThread;
+  /** Все нити кампании. */
+  listThreads(campaignId: string): OpenThread[];
 }
 
 const CYRILLIC_TO_LATIN: Record<string, string> = {
@@ -362,6 +381,124 @@ export class MarkdownCampaignStore implements CampaignStore {
     return campaign;
   }
 
+  createQuest(campaignIdOrSlug: string, input: NewQuestInput): Quest {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const existing = this.listQuests(campaign.id);
+    if (existing.some((quest) => quest.title.toLowerCase() === input.title.toLowerCase())) {
+      throw new StoreError(`Квест «${input.title}» уже есть в кампании.`, "duplicate");
+    }
+    const now = new Date().toISOString();
+    const quest: Quest = {
+      id: randomUUID(),
+      campaignId: campaign.id,
+      slug: this.uniqueQuestSlug(campaign.slug, slugify(input.title)),
+      title: input.title,
+      giverNpcSlug: input.giverNpcSlug,
+      objective: input.objective,
+      difficulty: input.difficulty,
+      rewardPlan: input.rewardPlan,
+      status: input.status ?? "offered",
+      deadlineDay: input.deadlineDay,
+      createdDay: campaign.currentDay ?? 1,
+      createdAt: now,
+    };
+    this.writeQuest(campaign.slug, quest);
+    return quest;
+  }
+
+  updateQuest(campaignIdOrSlug: string, questIdOrSlug: string, patch: QuestPatch): Quest {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const quest = this.findQuest(campaign.id, questIdOrSlug);
+    if (patch.status === "completed") {
+      throw new StoreError(
+        `Квест «${quest.title}» нельзя перевести в completed через update_quest — используй complete_quest: он выдаст награды.`,
+        "conflict",
+      );
+    }
+    if (patch.title !== undefined && patch.title.toLowerCase() !== quest.title.toLowerCase()) {
+      if (this.listQuests(campaign.id).some((other) => other.id !== quest.id && other.title.toLowerCase() === patch.title!.toLowerCase())) {
+        throw new StoreError(`Квест с названием «${patch.title}» уже есть в кампании.`, "duplicate");
+      }
+    }
+    const updated: Quest = { ...quest };
+    if (patch.title !== undefined) updated.title = patch.title;
+    if (patch.giverNpcSlug !== undefined) updated.giverNpcSlug = patch.giverNpcSlug;
+    if (patch.objective !== undefined) updated.objective = patch.objective;
+    if (patch.difficulty !== undefined) updated.difficulty = patch.difficulty;
+    if (patch.rewardPlan !== undefined) updated.rewardPlan = patch.rewardPlan;
+    if (patch.status !== undefined) updated.status = patch.status;
+    if (patch.deadlineDay !== undefined) updated.deadlineDay = patch.deadlineDay;
+    updated.updatedAt = new Date().toISOString();
+    this.writeQuest(campaign.slug, updated);
+    return updated;
+  }
+
+  listQuests(campaignId: string): Quest[] {
+    const campaign = this.mustGetCampaign(campaignId);
+    const dir = this.questsDir(campaign.slug);
+    if (!existsSync(dir)) return [];
+    const quests: Quest[] = [];
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".md")) continue;
+      try {
+        quests.push(docToQuest(readFileSync(join(dir, entry), "utf8")));
+      } catch {
+        // Повреждённую карточку квеста пропускаем.
+      }
+    }
+    return quests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  appendThread(campaignIdOrSlug: string, input: NewThreadInput): OpenThread {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const now = new Date().toISOString();
+    const thread: OpenThread = {
+      id: randomUUID(),
+      campaignId: campaign.id,
+      text: input.text.trim(),
+      kind: input.kind ?? "unresolved",
+      status: "open",
+      linkedQuestId: input.linkedQuestId,
+      dayOpened: campaign.currentDay ?? 1,
+      createdAt: now,
+    };
+    const threads = this.readThreads(campaign.slug);
+    threads.push(thread);
+    this.writeThreads(campaign.slug, threads);
+    return thread;
+  }
+
+  resolveThread(campaignIdOrSlug: string, threadIdOrText: string, day?: number): OpenThread {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const needle = threadIdOrText.toLowerCase();
+    const threads = this.readThreads(campaign.slug);
+    const open = threads.filter(
+      (entry) => entry.status === "open" && (entry.id === threadIdOrText || entry.text.toLowerCase().includes(needle)),
+    );
+    if (open.length === 0) {
+      throw new StoreError(`Открытая нить «${threadIdOrText}» не найдена.`, "not_found");
+    }
+    if (open.length > 1) {
+      throw new StoreError(
+        `Фрагмент «${threadIdOrText}» подходит к нескольким нитям: ${open.map((entry) => entry.text).join("; ")}. Уточни текст или передай id.`,
+        "conflict",
+      );
+    }
+    const thread = open[0];
+    thread.status = "resolved";
+    thread.dayClosed = day ?? campaign.currentDay ?? 1;
+    thread.updatedAt = new Date().toISOString();
+    this.writeThreads(campaign.slug, threads);
+    return thread;
+  }
+
+  listThreads(campaignId: string): OpenThread[] {
+    const campaign = this.mustGetCampaign(campaignId);
+    return this.readThreads(campaign.slug).sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt),
+    );
+  }
+
   listCharacters(campaignId: string): CharacterSheet[] {
     const campaign = this.mustGetCampaign(campaignId);
     const dir = this.charactersDir(campaign.slug);
@@ -407,6 +544,24 @@ export class MarkdownCampaignStore implements CampaignStore {
     return join(this.campaignDir(campaignSlug), "characters");
   }
 
+  private questsDir(campaignSlug: string): string {
+    return join(this.campaignDir(campaignSlug), "quests");
+  }
+
+  private findQuest(campaignId: string, questIdOrSlug: string): Quest {
+    const needle = questIdOrSlug.toLowerCase();
+    const quest = this.listQuests(campaignId).find(
+      (candidate) =>
+        candidate.id === questIdOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.title.toLowerCase() === needle,
+    );
+    if (!quest) {
+      throw new StoreError(`Квест «${questIdOrSlug}» не найден в кампании.`, "not_found");
+    }
+    return quest;
+  }
+
   private uniqueCampaignSlug(base: string): string {
     let slug = base;
     let counter = 2;
@@ -446,6 +601,41 @@ export class MarkdownCampaignStore implements CampaignStore {
     mkdirSync(dir, { recursive: true });
     const doc = buildDocument(characterToFrontmatter(sheet), sheet.background ?? "");
     writeFileSync(join(dir, `${sheet.slug}.md`), doc, "utf8");
+  }
+
+  private uniqueQuestSlug(campaignSlug: string, base: string): string {
+    const dir = this.questsDir(campaignSlug);
+    let slug = base || "quest";
+    let counter = 2;
+    while (existsSync(join(dir, `${slug}.md`))) {
+      slug = `${base}-${counter}`;
+      counter += 1;
+    }
+    return slug;
+  }
+
+  private writeQuest(campaignSlug: string, quest: Quest): void {
+    const dir = this.questsDir(campaignSlug);
+    mkdirSync(dir, { recursive: true });
+    const doc = buildDocument(questToFrontmatter(quest), quest.objective);
+    writeFileSync(join(dir, `${quest.slug}.md`), doc, "utf8");
+  }
+
+  private threadsPath(campaignSlug: string): string {
+    return join(this.campaignDir(campaignSlug), "threads.md");
+  }
+
+  private readThreads(campaignSlug: string): OpenThread[] {
+    const path = this.threadsPath(campaignSlug);
+    if (!existsSync(path)) return [];
+    return docToThreads(readFileSync(path, "utf8"));
+  }
+
+  private writeThreads(campaignSlug: string, threads: OpenThread[]): void {
+    const dir = this.campaignDir(campaignSlug);
+    mkdirSync(dir, { recursive: true });
+    const doc = buildDocument({ threads: threads.map(threadToFrontmatter) }, "");
+    writeFileSync(this.threadsPath(campaignSlug), doc, "utf8");
   }
 }
 
@@ -536,6 +726,104 @@ function characterToFrontmatter(sheet: CharacterSheet): Record<string, unknown> 
     updatedAt: sheet.updatedAt,
     createdAt: sheet.createdAt,
   };
+}
+
+function questToFrontmatter(quest: Quest): Record<string, unknown> {
+  return {
+    id: quest.id,
+    campaignId: quest.campaignId,
+    title: quest.title,
+    slug: quest.slug,
+    giverNpcSlug: quest.giverNpcSlug,
+    objective: quest.objective,
+    difficulty: quest.difficulty,
+    rewardPlan: quest.rewardPlan,
+    status: quest.status,
+    deadlineDay: quest.deadlineDay,
+    createdDay: quest.createdDay,
+    createdAt: quest.createdAt,
+    updatedAt: quest.updatedAt,
+  };
+}
+
+function docToQuest(doc: string): Quest {
+  const { data } = splitFrontmatter(doc);
+  const difficulty =
+    data.difficulty === "easy" || data.difficulty === "hard" ? data.difficulty : "medium";
+  const status = questStatusOf(data.status);
+  return {
+    id: asString(data.id),
+    campaignId: asString(data.campaignId),
+    title: asString(data.title),
+    slug: asString(data.slug),
+    giverNpcSlug: data.giverNpcSlug ? asString(data.giverNpcSlug) : undefined,
+    objective: asString(data.objective),
+    difficulty,
+    rewardPlan: data.rewardPlan && typeof data.rewardPlan === "object"
+      ? asRewardPlan(data.rewardPlan as Record<string, unknown>)
+      : undefined,
+    status,
+    deadlineDay: typeof data.deadlineDay === "number" ? data.deadlineDay : undefined,
+    createdDay: typeof data.createdDay === "number" ? data.createdDay : 1,
+    createdAt: asString(data.createdAt),
+    updatedAt: data.updatedAt ? asString(data.updatedAt) : undefined,
+  };
+}
+
+function asRewardPlan(value: Record<string, unknown>): QuestRewardPlan | undefined {
+  const plan: QuestRewardPlan = {};
+  if (typeof value.xp === "number") plan.xp = value.xp;
+  if (typeof value.gold === "number") plan.gold = value.gold;
+  if (Array.isArray(value.items)) plan.items = value.items.map((item) => asString(item)).filter(Boolean);
+  if (typeof value.note === "string" && value.note.trim() !== "") plan.note = value.note;
+  return Object.keys(plan).length > 0 ? plan : undefined;
+}
+
+function questStatusOf(value: unknown): QuestStatus {
+  const statuses: QuestStatus[] = ["offered", "accepted", "active", "completed", "failed", "abandoned"];
+  return statuses.includes(value as QuestStatus) ? (value as QuestStatus) : "offered";
+}
+
+function threadToFrontmatter(thread: OpenThread): Record<string, unknown> {
+  return {
+    id: thread.id,
+    campaignId: thread.campaignId,
+    text: thread.text,
+    kind: thread.kind,
+    status: thread.status,
+    linkedQuestId: thread.linkedQuestId,
+    dayOpened: thread.dayOpened,
+    dayClosed: thread.dayClosed,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+  };
+}
+
+function docToThreads(doc: string): OpenThread[] {
+  const { data } = splitFrontmatter(doc);
+  if (!Array.isArray(data.threads)) return [];
+  const threads: OpenThread[] = [];
+  for (const item of data.threads) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const kinds: ThreadKind[] = ["promise", "mystery", "debt", "unresolved"];
+    const kind = kinds.includes(record.kind as ThreadKind)
+      ? (record.kind as ThreadKind)
+      : "unresolved";
+    threads.push({
+      id: asString(record.id),
+      campaignId: asString(record.campaignId),
+      text: asString(record.text),
+      kind,
+      status: record.status === "resolved" ? "resolved" : "open",
+      linkedQuestId: record.linkedQuestId ? asString(record.linkedQuestId) : undefined,
+      dayOpened: typeof record.dayOpened === "number" ? record.dayOpened : 1,
+      dayClosed: typeof record.dayClosed === "number" ? record.dayClosed : undefined,
+      createdAt: asString(record.createdAt),
+      updatedAt: record.updatedAt ? asString(record.updatedAt) : undefined,
+    });
+  }
+  return threads;
 }
 
 function asStringArray(value: unknown): string[] | undefined {
