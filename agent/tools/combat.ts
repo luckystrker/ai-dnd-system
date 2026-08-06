@@ -2,8 +2,8 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 
 import { canActForCharacter } from "../lib/campaigns/access.ts";
-import { rollDice } from "../lib/engine/dnd5e";
-import { gameState } from "../lib/memory";
+import { rollDice } from "../lib/engine/dnd5e.ts";
+import { gameState } from "../lib/memory.ts";
 
 function parseDice(spec: string): { count: number; sides: number } {
   const match = /^(\d+)d(\d+)$/i.exec(spec.trim());

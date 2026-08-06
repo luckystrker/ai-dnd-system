@@ -1,19 +1,12 @@
-# Node
-node_modules/
-
-# Environment
-.env
-.env.*
+node_modules
+.env*
 !.env.example
-
-# eve runtime state
-.eve/
-.output/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
+.eve
+data
+.vercel
+.next
+.output
+.nitro
+dist
 .DS_Store
-Thumbs.db
+*.tsbuildinfo

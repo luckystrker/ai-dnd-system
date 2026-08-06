@@ -3,8 +3,8 @@ import { z } from "zod";
 
 import { canActForCharacter } from "../lib/campaigns/access.ts";
 import type { ToolSessionContext } from "../lib/campaigns/session.ts";
-import { skillCheck } from "../lib/engine/dnd5e";
-import { gameState } from "../lib/memory";
+import { skillCheck } from "../lib/engine/dnd5e.ts";
+import { gameState } from "../lib/memory.ts";
 
 function sessionStats(ctx: ToolSessionContext): Record<string, unknown> {
   const auth = ctx.session.auth.current ?? ctx.session.auth.initiator;
