@@ -29,6 +29,17 @@ export default defineTool({
       .max(100)
       .optional()
       .describe("Полный новый список снаряжения и ценных предметов."),
+    abilities: z
+      .array(
+        z.object({
+          name: z.string().min(1).max(80),
+          description: z.string().min(1).max(300),
+          level: z.number().int().min(1).max(20).optional(),
+        }),
+      )
+      .max(20)
+      .optional()
+      .describe("Полный новый список способностей и заклинаний персонажа."),
     gold: z.number().int().min(0).max(1_000_000).optional().describe("Золото."),
     xp: z.number().int().min(0).max(10_000_000).optional().describe("Опыт."),
     location: z.string().max(200).optional().describe("Где сейчас персонаж."),
@@ -47,6 +58,7 @@ export default defineTool({
           maxHp: sheet.maxHp ?? null,
           conditions: sheet.conditions ?? [],
           inventory: sheet.inventory ?? [],
+          abilities: sheet.abilities ?? [],
           gold: sheet.gold ?? null,
           xp: sheet.xp ?? null,
           location: sheet.location ?? null,

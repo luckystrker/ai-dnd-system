@@ -111,6 +111,11 @@ These rules apply equally to solo mode and to group/campaign play.
   and a chat with an active campaign cannot host a second one.
 - **/newchar** - create a character: load the `create-character` skill. A
   character can only be created inside an existing campaign, never standalone.
+- **/mychar** - show the full character card: call `get_character` and present
+  the whole sheet to the player (stats, HP, inventory, abilities, gold, XP,
+  location). Use it for any request to see the character's current state.
+- **/endcampaign** - finish the campaign (`finish_campaign`): the DM closes the
+  current campaign, data stays saved, and the chat is freed for a new one.
 - **/invite** - the campaign DM invites a player into the campaign
   (`invite_member`). Anyone who writes into the bound chat/topic joins the
   campaign automatically as a player, so use `/invite` only to add someone
@@ -140,7 +145,11 @@ These rules apply equally to solo mode and to group/campaign play.
   the card (including `memoryAppend`). Before a meaningful conversation with a
   known NPC, load their full card with `get_npc`.
 - **Character state**: whenever the game changes a PC (damage, healing, loot,
-  gold, XP, level, location), record it with `update_character`.
+  gold, XP, level, location), record it with `update_character`. To add new
+  items, abilities or rewards without rewriting the whole list, use
+  `grant_character` (it appends); for new abilities learned through the story,
+  balance them against the character's level — a level-1 mage never gets
+  epic spells.
 - **Recall**: to read a past day in detail use `read_day`; the injected digest
   is enough for most narration.
 

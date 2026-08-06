@@ -285,11 +285,103 @@ describe("MarkdownCampaignStore", () => {
       );
     });
 
+    test("saveCharacter stores starting equipment, abilities, gold and hp", () => {
+      const sheet = store.saveCharacter(campaign.id, "u-player", {
+        ...characterInput,
+        equipment: ["короткий меч", "кожаная броня", "верёвка"],
+        abilities: [
+          { name: "Скрытность", description: "Можно прятаться в тени как бонусное действие." },
+          { name: "Хитрый удар", description: "1к6 дополнительного урона при преимуществе." },
+        ],
+        gold: 25,
+        maxHp: 10,
+      });
+      assert.deepEqual(sheet.inventory, ["короткий меч", "кожаная броня", "верёвка"]);
+      assert.equal(sheet.abilities?.length, 2);
+      assert.equal(sheet.abilities?.[0].name, "Скрытность");
+      assert.equal(sheet.gold, 25);
+      assert.equal(sheet.maxHp, 10);
+      assert.equal(sheet.hp, 10);
+      const reloaded = store.listCharacters(campaign.id)[0];
+      assert.deepEqual(reloaded.inventory, ["короткий меч", "кожаная броня", "верёвка"]);
+      assert.deepEqual(reloaded.abilities, sheet.abilities);
+      assert.equal(reloaded.maxHp, 10);
+      assert.equal(reloaded.gold, 25);
+    });
+
+    test("grantCharacter appends items, abilities, gold, xp and conditions", () => {
+      store.saveCharacter(campaign.id, "u-player", characterInput);
+      const granted = store.grantCharacter(campaign.id, "Ария", {
+        inventory: ["зелье лечения", "амулет"],
+        abilities: [{ name: "Скрытность", description: "Дубликат, должен игнорироваться." }, { name: "Мастер ключей", description: "Открывает замки без отмычек." }],
+        gold: 100,
+        xp: 300,
+        conditions: ["поранен"],
+      });
+      assert.deepEqual(granted.inventory, ["зелье лечения", "амулет"]);
+      assert.equal(granted.gold, 100);
+      assert.equal(granted.xp, 300);
+      assert.deepEqual(granted.conditions, ["поранен"]);
+      assert.deepEqual(
+        granted.abilities?.map((a) => a.name),
+        ["Скрытность", "Мастер ключей"],
+      );
+      const again = store.grantCharacter(campaign.id, "Ария", { gold: 50, inventory: ["кинжал"] });
+      assert.deepEqual(again.inventory, ["зелье лечения", "амулет", "кинжал"]);
+      assert.equal(again.gold, 150);
+    });
+
+    test("updateCharacter replaces abilities", () => {
+      store.saveCharacter(campaign.id, "u-player", {
+        ...characterInput,
+        abilities: [{ name: "Старая", description: "Была раньше." }],
+      });
+      const updated = store.updateCharacter(campaign.id, "Ария", {
+        abilities: [{ name: "Новая", description: "Получена на новом уровне." }],
+      });
+      assert.deepEqual(updated.abilities?.map((a) => a.name), ["Новая"]);
+    });
+
     test("listCharacters orders by creation", () => {
       store.saveCharacter(campaign.id, "u-player", characterInput);
       store.saveCharacter(campaign.id, "u-player", { ...characterInput, name: "Борин" });
       const names = store.listCharacters(campaign.id).map((c) => c.name);
       assert.deepEqual(names, ["Ария", "Борин"]);
+    });
+  });
+
+  describe("finishCampaign", () => {
+    test("dm can finish a campaign: status finished, chat freed, data kept", () => {
+      const campaign = createCampaign("Финал");
+      const boundChat = chat();
+      store.bindAndActivate(campaign.id, "u-dm", boundChat);
+      const finished = store.finishCampaign(campaign.id, "u-dm");
+      assert.equal(finished.status, "finished");
+      assert.equal(finished.boundChat, undefined);
+      assert.ok(!store.findByBoundChat(boundChat.chatId, boundChat.messageThreadId));
+      const saved = store.getCampaign(campaign.id);
+      assert.equal(saved?.status, "finished");
+      const replacement = createCampaign("Новая кампания");
+      const rebound = store.bindAndActivate(replacement.id, "u-dm", boundChat);
+      assert.equal(rebound.status, "active");
+    });
+
+    test("finishCampaign requires the dm role", () => {
+      const campaign = createCampaign("Финал права");
+      store.addMember(campaign.id, "u-dm", { userId: "u-player" });
+      assert.throws(
+        () => store.finishCampaign(campaign.id, "u-player"),
+        (err: StoreError) => err.code === "access_denied",
+      );
+    });
+
+    test("finishing twice is rejected", () => {
+      const campaign = createCampaign("Двойной финал");
+      store.finishCampaign(campaign.id, "u-dm");
+      assert.throws(
+        () => store.finishCampaign(campaign.id, "u-dm"),
+        (err: StoreError) => err.code === "conflict",
+      );
     });
   });
 });

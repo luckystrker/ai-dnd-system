@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterSheet, type CharacterStatePatch, type MemberRole } from "./types.ts";
+import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterAbility, type CharacterGrantPatch, type CharacterSheet, type CharacterStatePatch, type MemberRole } from "./types.ts";
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
 import { SqliteCampaignStore } from "./store-sqlite.ts";
 
@@ -28,6 +28,12 @@ export interface NewCharacterInput {
   background?: string;
   motivation?: string;
   appearance?: string;
+  /** Стартовое снаряжение (сохраняется в inventory). */
+  equipment?: string[];
+  abilities?: CharacterAbility[];
+  gold?: number;
+  maxHp?: number;
+  hp?: number;
 }
 
 export interface NewMemberInput {
@@ -62,6 +68,10 @@ export interface CampaignStore {
   saveCharacter(campaignId: string, actorUserId: string, input: NewCharacterInput): CharacterSheet;
   updateCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterStatePatch): CharacterSheet;
   listCharacters(campaignId: string): CharacterSheet[];
+  /** Аддитивное изменение персонажа: предметы/способности/золото/XP добавляются, а не заменяются. */
+  grantCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterGrantPatch): CharacterSheet;
+  /** Завершение кампании (только dm): статус finished, чат освобождается. Данные сохраняются. */
+  finishCampaign(campaignId: string, actorUserId: string): Campaign;
 }
 
 const CYRILLIC_TO_LATIN: Record<string, string> = {
@@ -269,6 +279,11 @@ export class MarkdownCampaignStore implements CampaignStore {
       background: input.background,
       motivation: input.motivation,
       appearance: input.appearance,
+      maxHp: input.maxHp,
+      hp: input.hp ?? input.maxHp,
+      inventory: input.equipment && input.equipment.length > 0 ? input.equipment : undefined,
+      abilities: input.abilities && input.abilities.length > 0 ? input.abilities : undefined,
+      gold: input.gold,
       createdAt: new Date().toISOString(),
     };
     this.writeCharacter(campaign.slug, sheet);
@@ -292,12 +307,59 @@ export class MarkdownCampaignStore implements CampaignStore {
     if (patch.maxHp !== undefined) sheet.maxHp = patch.maxHp;
     if (patch.conditions !== undefined) sheet.conditions = patch.conditions;
     if (patch.inventory !== undefined) sheet.inventory = patch.inventory;
+    if (patch.abilities !== undefined) sheet.abilities = patch.abilities;
     if (patch.gold !== undefined) sheet.gold = patch.gold;
     if (patch.xp !== undefined) sheet.xp = patch.xp;
     if (patch.location !== undefined) sheet.location = patch.location;
     sheet.updatedAt = new Date().toISOString();
     this.writeCharacter(campaign.slug, sheet);
     return sheet;
+  }
+
+  grantCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterGrantPatch): CharacterSheet {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const needle = nameOrSlug.toLowerCase();
+    const sheet = this.listCharacters(campaign.id).find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+    if (!sheet) {
+      throw new StoreError(`Персонаж «${nameOrSlug}» не найден в кампании.`, "not_found");
+    }
+    const result: CharacterSheet = { ...sheet };
+    if (patch.inventory && patch.inventory.length > 0) {
+      const existing = result.inventory ?? [];
+      result.inventory = [...existing, ...patch.inventory];
+    }
+    if (patch.abilities && patch.abilities.length > 0) {
+      const existing = result.abilities ?? [];
+      const known = new Set(existing.map((ability) => ability.name.toLowerCase()));
+      const fresh = patch.abilities.filter((ability) => !known.has(ability.name.toLowerCase()));
+      result.abilities = [...existing, ...fresh];
+    }
+    if (patch.gold !== undefined) result.gold = (result.gold ?? 0) + patch.gold;
+    if (patch.xp !== undefined) result.xp = (result.xp ?? 0) + patch.xp;
+    if (patch.conditions && patch.conditions.length > 0) {
+      const existing = result.conditions ?? [];
+      result.conditions = [...new Set([...existing, ...patch.conditions])];
+    }
+    result.updatedAt = new Date().toISOString();
+    this.writeCharacter(campaign.slug, result);
+    return result;
+  }
+
+  finishCampaign(campaignId: string, actorUserId: string): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    this.requireRole(campaign, actorUserId, "dm");
+    if (campaign.status !== "active" && campaign.status !== "setup") {
+      throw new StoreError(`Кампания «${campaign.title}» уже завершена.`, "conflict");
+    }
+    campaign.status = "finished";
+    campaign.boundChat = undefined;
+    this.writeCampaign(campaign, this.readDescription(campaign));
+    return campaign;
   }
 
   listCharacters(campaignId: string): CharacterSheet[] {
@@ -467,6 +529,7 @@ function characterToFrontmatter(sheet: CharacterSheet): Record<string, unknown> 
     maxHp: sheet.maxHp,
     conditions: sheet.conditions,
     inventory: sheet.inventory,
+    abilities: sheet.abilities,
     gold: sheet.gold,
     xp: sheet.xp,
     location: sheet.location,
@@ -478,6 +541,22 @@ function characterToFrontmatter(sheet: CharacterSheet): Record<string, unknown> 
 function asStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.map((item) => asString(item));
+}
+
+function asAbilityArray(value: unknown): CharacterAbility[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const abilities: CharacterAbility[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const name = asString(record.name);
+    const description = asString(record.description);
+    if (!name || !description) continue;
+    const ability: CharacterAbility = { name, description };
+    if (typeof record.level === "number") ability.level = record.level;
+    abilities.push(ability);
+  }
+  return abilities.length > 0 ? abilities : undefined;
 }
 
 function docToCharacter(doc: string): CharacterSheet {
@@ -505,6 +584,7 @@ function docToCharacter(doc: string): CharacterSheet {
     maxHp: typeof data.maxHp === "number" ? data.maxHp : undefined,
     conditions: asStringArray(data.conditions),
     inventory: asStringArray(data.inventory),
+    abilities: asAbilityArray(data.abilities),
     gold: typeof data.gold === "number" ? data.gold : undefined,
     xp: typeof data.xp === "number" ? data.xp : undefined,
     location: data.location ? asString(data.location) : undefined,

@@ -38,6 +38,8 @@ import {
   type Campaign,
   type CampaignLength,
   type CampaignMember,
+  type CharacterAbility,
+  type CharacterGrantPatch,
   type CharacterSheet,
   type CharacterStatePatch,
   type MemberRole,
@@ -93,6 +95,7 @@ interface CharacterRow {
   max_hp: number | null;
   conditions: string | null;
   inventory: string | null;
+  abilities: string | null;
   gold: number | null;
   xp: number | null;
   location: string | null;
@@ -148,6 +151,7 @@ CREATE TABLE IF NOT EXISTS characters (
   max_hp INTEGER,
   conditions TEXT,
   inventory TEXT,
+  abilities TEXT,
   gold INTEGER,
   xp INTEGER,
   location TEXT,
@@ -183,6 +187,28 @@ function parseStringArray(value: string | null): string[] | undefined {
   }
 }
 
+function parseAbilityArray(value: string | null): CharacterAbility[] | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return undefined;
+    const abilities: CharacterAbility[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? record.name : "";
+      const description = typeof record.description === "string" ? record.description : "";
+      if (!name || !description) continue;
+      const ability: CharacterAbility = { name, description };
+      if (typeof record.level === "number") ability.level = record.level;
+      abilities.push(ability);
+    }
+    return abilities;
+  } catch {
+    return undefined;
+  }
+}
+
 export class SqliteCampaignStore implements CampaignStore {
   private readonly db: BetterSqlite3.Database;
 
@@ -192,6 +218,15 @@ export class SqliteCampaignStore implements CampaignStore {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Лёгкие миграции для БД, созданных до добавления новых колонок. */
+  private migrate(): void {
+    const columns = this.db.prepare("PRAGMA table_info(characters)").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "abilities")) {
+      this.db.exec("ALTER TABLE characters ADD COLUMN abilities TEXT");
+    }
   }
 
   createCampaign(input: NewCampaignInput, owner: NewOwnerInput): Campaign {
@@ -342,6 +377,11 @@ export class SqliteCampaignStore implements CampaignStore {
       background: input.background,
       motivation: input.motivation,
       appearance: input.appearance,
+      maxHp: input.maxHp,
+      hp: input.hp ?? input.maxHp,
+      inventory: input.equipment && input.equipment.length > 0 ? input.equipment : undefined,
+      abilities: input.abilities && input.abilities.length > 0 ? input.abilities : undefined,
+      gold: input.gold,
       createdAt: new Date().toISOString(),
     };
     this.insertCharacter(sheet);
@@ -365,7 +405,7 @@ export class SqliteCampaignStore implements CampaignStore {
       .prepare(
         `UPDATE characters SET
            level = ?, hp = ?, max_hp = ?, conditions = ?, inventory = ?,
-           gold = ?, xp = ?, location = ?, updated_at = ?
+           abilities = ?, gold = ?, xp = ?, location = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -374,6 +414,7 @@ export class SqliteCampaignStore implements CampaignStore {
         patch.maxHp ?? row.max_hp,
         patch.conditions !== undefined ? JSON.stringify(patch.conditions) : row.conditions,
         patch.inventory !== undefined ? JSON.stringify(patch.inventory) : row.inventory,
+        patch.abilities !== undefined ? JSON.stringify(patch.abilities) : row.abilities,
         patch.gold ?? row.gold,
         patch.xp ?? row.xp,
         patch.location ?? row.location,
@@ -381,6 +422,63 @@ export class SqliteCampaignStore implements CampaignStore {
         row.id,
       );
     return this.mustGetCharacter(row.id);
+  }
+
+  grantCharacter(campaignIdOrSlug: string, nameOrSlug: string, patch: CharacterGrantPatch): CharacterSheet {
+    const campaign = this.mustGetCampaign(campaignIdOrSlug);
+    const needle = nameOrSlug.toLowerCase();
+    const row = this.listCharacterRows(campaign.id).find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+    if (!row) {
+      throw new StoreError(`Персонаж «${nameOrSlug}» не найден в кампании.`, "not_found");
+    }
+    const inventory = parseStringArray(row.inventory) ?? [];
+    const abilities = parseAbilityArray(row.abilities) ?? [];
+    const conditions = parseStringArray(row.conditions) ?? [];
+    if (patch.inventory) inventory.push(...patch.inventory);
+    if (patch.abilities) {
+      const known = new Set(abilities.map((ability) => ability.name.toLowerCase()));
+      for (const ability of patch.abilities) {
+        if (!known.has(ability.name.toLowerCase())) {
+          abilities.push(ability);
+          known.add(ability.name.toLowerCase());
+        }
+      }
+    }
+    if (patch.conditions) conditions.push(...patch.conditions.filter((entry) => !conditions.includes(entry)));
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE characters SET
+           inventory = ?, abilities = ?, conditions = ?, gold = ?, xp = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        JSON.stringify(inventory),
+        JSON.stringify(abilities),
+        JSON.stringify(conditions),
+        (row.gold ?? 0) + (patch.gold ?? 0),
+        (row.xp ?? 0) + (patch.xp ?? 0),
+        updatedAt,
+        row.id,
+      );
+    return this.mustGetCharacter(row.id);
+  }
+
+  finishCampaign(campaignId: string, actorUserId: string): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    this.requireRole(campaign, actorUserId, "dm");
+    if (campaign.status !== "active" && campaign.status !== "setup") {
+      throw new StoreError(`Кампания «${campaign.title}» уже завершена.`, "conflict");
+    }
+    this.db
+      .prepare("UPDATE campaigns SET status = 'finished', bound_chat_id = NULL, bound_thread_id = NULL WHERE id = ?")
+      .run(campaign.id);
+    return this.mustGetCampaign(campaignId);
   }
 
   listCharacters(campaignId: string): CharacterSheet[] {
@@ -523,6 +621,7 @@ export class SqliteCampaignStore implements CampaignStore {
       maxHp: row.max_hp ?? undefined,
       conditions: parseStringArray(row.conditions),
       inventory: parseStringArray(row.inventory),
+      abilities: parseAbilityArray(row.abilities),
       gold: row.gold ?? undefined,
       xp: row.xp ?? undefined,
       location: row.location ?? undefined,
@@ -584,16 +683,16 @@ export class SqliteCampaignStore implements CampaignStore {
            level = excluded.level, stats = excluded.stats, background = excluded.background,
            motivation = excluded.motivation, appearance = excluded.appearance, hp = excluded.hp,
            max_hp = excluded.max_hp, conditions = excluded.conditions, inventory = excluded.inventory,
-           gold = excluded.gold, xp = excluded.xp, location = excluded.location,
-           updated_at = excluded.updated_at, created_at = excluded.created_at`
+           abilities = excluded.abilities, gold = excluded.gold, xp = excluded.xp,
+           location = excluded.location, updated_at = excluded.updated_at, created_at = excluded.created_at`
       : "";
     this.db
       .prepare(
         `INSERT INTO characters (
            id, campaign_id, slug, name, owner_user_id, class, race, level, stats, background,
-           motivation, appearance, hp, max_hp, conditions, inventory, gold, xp, location,
+           motivation, appearance, hp, max_hp, conditions, inventory, abilities, gold, xp, location,
            updated_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ${conflict}`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ${conflict}`,
       )
       .run(
         sheet.id,
@@ -612,6 +711,7 @@ export class SqliteCampaignStore implements CampaignStore {
         sheet.maxHp ?? null,
         sheet.conditions !== undefined ? JSON.stringify(sheet.conditions) : null,
         sheet.inventory !== undefined ? JSON.stringify(sheet.inventory) : null,
+        sheet.abilities !== undefined ? JSON.stringify(sheet.abilities) : null,
         sheet.gold ?? null,
         sheet.xp ?? null,
         sheet.location ?? null,

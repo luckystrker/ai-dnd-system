@@ -40,6 +40,14 @@ export interface Campaign {
   createdAt: string;
 }
 
+/** Способность/заклинание персонажа: имя, описание, уровень получения. */
+export interface CharacterAbility {
+  name: string;
+  description: string;
+  /** Минимальный уровень персонажа для использования (у 1-го уровня — 1). */
+  level?: number;
+}
+
 export interface CharacterSheet {
   id: string;
   campaignId: string;
@@ -60,6 +68,7 @@ export interface CharacterSheet {
   maxHp?: number;
   conditions?: string[];
   inventory?: string[];
+  abilities?: CharacterAbility[];
   gold?: number;
   xp?: number;
   location?: string;
@@ -74,9 +83,19 @@ export interface CharacterStatePatch {
   maxHp?: number;
   conditions?: string[];
   inventory?: string[];
+  abilities?: CharacterAbility[];
   gold?: number;
   xp?: number;
   location?: string;
+}
+
+/** Аддитивный патч для grantCharacter: значения прибавляются, а не заменяются. */
+export interface CharacterGrantPatch {
+  inventory?: string[];
+  abilities?: CharacterAbility[];
+  gold?: number;
+  xp?: number;
+  conditions?: string[];
 }
 
 /** Статус NPC в мире кампании. */

@@ -102,6 +102,60 @@ describe("SqliteCampaignStore", () => {
     assert.deepEqual(reloaded.stats, { dex: 18 });
   });
 
+  test("saveCharacter stores abilities, equipment, gold and hp; grantCharacter appends", () => {
+    const campaign = createCampaign("Персонажи старт");
+    store.addMember(campaign.id, "u-dm", { userId: "u-player" });
+    const sheet = store.saveCharacter(campaign.id, "u-player", {
+      name: "Мирин",
+      characterClass: "волшебник",
+      race: "человек",
+      equipment: ["посох", "гримуар", "фонарь"],
+      abilities: [
+        { name: "Огненный снаряд", description: "1к10 урона огнём на дистанции." },
+        { name: "Волшебная стрела", description: "3 снаряда, гарантированное попадание.", level: 1 },
+      ],
+      gold: 15,
+      maxHp: 7,
+    });
+    assert.deepEqual(sheet.inventory, ["посох", "гримуар", "фонарь"]);
+    assert.equal(sheet.abilities?.length, 2);
+    assert.equal(sheet.abilities?.[1].level, 1);
+    assert.equal(sheet.gold, 15);
+    assert.equal(sheet.hp, 7);
+    assert.equal(sheet.maxHp, 7);
+
+    const granted = store.grantCharacter(campaign.id, "Мирин", {
+      inventory: ["зелье лечения"],
+      abilities: [{ name: "Щит", description: "Реакция: +2 к КД до конца хода." }],
+      gold: 40,
+      xp: 250,
+    });
+    assert.deepEqual(granted.inventory, ["посох", "гримуар", "фонарь", "зелье лечения"]);
+    assert.equal(granted.abilities?.length, 3);
+    assert.equal(granted.gold, 55);
+    assert.equal(granted.xp, 250);
+
+    const reloaded = store.listCharacters(campaign.id)[0];
+    assert.deepEqual(reloaded.abilities, granted.abilities);
+    assert.equal(reloaded.gold, 55);
+  });
+
+  test("finishCampaign frees the chat for a new campaign", () => {
+    const campaign = createCampaign("Финал");
+    store.bindAndActivate(campaign.id, "u-dm", { chatId: "-99" });
+    const finished = store.finishCampaign(campaign.id, "u-dm");
+    assert.equal(finished.status, "finished");
+    assert.equal(finished.boundChat, undefined);
+    assert.equal(store.findByBoundChat("-99"), undefined);
+    const replacement = createCampaign("Следующая");
+    const rebound = store.bindAndActivate(replacement.id, "u-dm", { chatId: "-99" });
+    assert.equal(rebound.status, "active");
+    assert.throws(
+      () => store.finishCampaign(campaign.id, "u-player"),
+      (err: StoreError) => err.code === "access_denied",
+    );
+  });
+
   test("upsertCampaign and upsertCharacter are idempotent (migration path)", () => {
     const campaign = createCampaign("Миграция");
     store.upsertCampaign(campaign, "описание");
