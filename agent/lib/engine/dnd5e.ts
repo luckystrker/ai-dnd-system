@@ -107,6 +107,21 @@ export function abilityScore(stats: Record<string, unknown>, ability: string): n
   return undefined;
 }
 
+/**
+ * Модификатор характеристики (D&D 5e): floor((score - 10) / 2).
+ * Без значения характеристики — 0 (эквивалент счёта 10).
+ */
+export function abilityModifier(stats: Record<string, unknown>, ability: string): number {
+  const score = abilityScore(stats, ability) ?? 10;
+  return Math.floor((score - 10) / 2);
+}
+
+/** Бонус мастерства по уровню (D&D 5e): +2 на 1-4, +3 на 5-8, +4 на 9-12, +5 на 13-16, +6 на 17-20. */
+export function proficiencyBonus(level: number): number {
+  const clamped = Number.isFinite(level) ? Math.max(1, Math.floor(level)) : 1;
+  return Math.floor((clamped - 1) / 4) + 2;
+}
+
 export type RandomSource = () => number;
 
 function randomInt(sides: number, random: RandomSource): number {
@@ -139,8 +154,7 @@ export function skillCheck(
   random: RandomSource = Math.random,
 ): CheckResult {
   const ability = resolveSkillAbility(skill);
-  const score = abilityScore(stats, ability) ?? 10;
-  const modifier = Math.floor((score - 10) / 2);
+  const modifier = abilityModifier(stats, ability);
   const firstRoll = randomInt(20, random);
   const secondRoll = randomInt(20, random);
   const roll = advantage === true

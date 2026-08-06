@@ -25,6 +25,7 @@ export interface CombatantEntry {
   roll: number;
   total: number;
   hp?: number;
+  maxHp?: number;
   ac?: number;
 }
 
@@ -33,11 +34,13 @@ export interface CombatOrder {
   round: number;
   /** Индекс текущего участника в order; -1, пока бой не начат. */
   current: number;
+  /** Текущий участник уже совершил атаку в этом ходу (одна атака за ход). */
+  acted: boolean;
   order: CombatantEntry[];
 }
 
 export function emptyCombatOrder(): CombatOrder {
-  return { started: false, round: 1, current: -1, order: [] };
+  return { started: false, round: 1, current: -1, acted: false, order: [] };
 }
 
 /** Бросает инициативу каждому участнику и сортирует по убыванию (ничьи — по имени). */
@@ -67,6 +70,7 @@ export type AliveCheck = (entry: CombatantEntry) => boolean;
 /**
  * Передвигает указатель на следующего живого участника. При замыкании круга
  * (переход на индекс 0 после уже идущего боя) номер раунда увеличивается.
+ * Сброшенный флаг acted разрешает следующему участнику атаковать.
  * Если живых не осталось — возвращает порядок без изменений.
  */
 export function nextCombatant(order: CombatOrder, alive: AliveCheck): CombatOrder {
@@ -78,9 +82,27 @@ export function nextCombatant(order: CombatOrder, alive: AliveCheck): CombatOrde
       return {
         ...order,
         current: index,
+        acted: false,
         round: order.current >= 0 && index === 0 ? order.round + 1 : order.round,
       };
     }
   }
   return order;
+}
+
+const DICE_SPEC = /(\d{1,2})d(4|6|8|10|12)/i;
+
+/**
+ * Ищет спецификацию урона в тексте предметов инвентаря: "короткий меч (1d6)"
+ * → "1d6". Если передан weapon, ищет только в предметах, содержащих это имя;
+ * иначе — по всему инвентарю.
+ */
+export function weaponDamageDice(items: readonly string[] | undefined, weapon?: string): string | undefined {
+  const needle = weapon?.trim().toLowerCase();
+  const candidates = needle ? (items ?? []).filter((item) => item.toLowerCase().includes(needle)) : (items ?? []);
+  for (const item of candidates) {
+    const match = DICE_SPEC.exec(item);
+    if (match) return `${match[1]}d${match[2]}`;
+  }
+  return undefined;
 }

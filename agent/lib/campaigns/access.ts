@@ -7,7 +7,7 @@
  */
 import { resolveCallerIdentity, type CallerIdentity, type ToolSessionContext, resolveToolCallerIdentity } from "./session.ts";
 import { campaignStore } from "./store.ts";
-import { StoreError, type Campaign } from "./types.ts";
+import { StoreError, type Campaign, type CharacterSheet } from "./types.ts";
 
 /**
  * Кампания по личности: точное совпадение чата/топика, а для обычных реплаев
@@ -25,29 +25,41 @@ export function findCampaignForIdentity(identity: CallerIdentity): Campaign | un
 
 /** Кампания по явному id/slug либо по чату, привязанному к звонящему. */
 export function resolveCampaign(auth: unknown, idOrSlug?: string): Campaign | undefined {
-  if (idOrSlug) return campaignStore.getCampaign(idOrSlug);
   const identity = resolveCallerIdentity(auth);
-  if (!identity) return undefined;
-  return findCampaignForIdentity(identity);
+  const campaign = idOrSlug
+    ? campaignStore.getCampaign(idOrSlug)
+    : identity
+      ? findCampaignForIdentity(identity)
+      : undefined;
+  if (!campaign || !identity) return campaign;
+  const member = campaign.members.find((entry) => entry.userId === identity.userId);
+  if (!member) {
+    throw new StoreError("Вы не участник этой кампании.", "access_denied");
+  }
+  return campaign;
 }
 
 /** Кампания для записи: явный slug доверенной автоматизации или роль dm по auth. */
 export function resolveCampaignForWrite(auth: unknown, explicitIdOrSlug?: string): Campaign {
-  if (explicitIdOrSlug) {
-    const campaign = campaignStore.getCampaign(explicitIdOrSlug);
-    if (!campaign) {
+  const identity = resolveCallerIdentity(auth);
+  const campaign = explicitIdOrSlug
+    ? campaignStore.getCampaign(explicitIdOrSlug)
+    : identity
+      ? findCampaignForIdentity(identity)
+      : undefined;
+  if (!campaign) {
+    if (explicitIdOrSlug) {
       throw new StoreError(`Кампания «${explicitIdOrSlug}» не найдена.`, "not_found");
     }
-    return campaign;
+    throw new StoreError(
+      identity ? "В этом чате нет привязанной кампании." : "Не удалось определить, кто вы.",
+      identity ? "not_found" : "access_denied",
+    );
   }
-  const identity = resolveCallerIdentity(auth);
-  if (!identity) {
-    throw new StoreError("Не удалось определить, кто вы.", "access_denied");
-  }
-  const campaign = resolveCampaign(auth);
-  if (!campaign) {
-    throw new StoreError("В этом чате нет привязанной кампании.", "not_found");
-  }
+  // Без личности (автоматизация — субагент-летописец) явный slug доверяется
+  // как есть. Интерактивный вызов проверяется всегда: роль dm в кампании,
+  // которая резолвится по явному slug или по чату.
+  if (!identity) return campaign;
   const member = campaign.members.find((entry) => entry.userId === identity.userId);
   if (!member || member.role !== "dm") {
     throw new StoreError("Это действие доступно только администратору (dm) кампании.", "access_denied");
@@ -62,6 +74,24 @@ export function requireIdentity(auth: unknown): CallerIdentity {
     throw new StoreError("Не удалось определить, кто вы.", "access_denied");
   }
   return identity;
+}
+
+/**
+ * Свежий лист персонажа из стора кампании звонящего (для боя): статистика,
+ * уровень, HP и инвентарь. Без личности или привязанной кампании — undefined.
+ */
+export function characterSheetFor(
+  ctx: ToolSessionContext | undefined,
+  characterName: string,
+): CharacterSheet | undefined {
+  const identity = resolveToolCallerIdentity(ctx);
+  if (!identity) return undefined;
+  const campaign = findCampaignForIdentity(identity);
+  if (!campaign) return undefined;
+  const needle = characterName.trim().toLowerCase();
+  return campaignStore.listCharacters(campaign.id).find(
+    (candidate) => candidate.name.trim().toLowerCase() === needle,
+  );
 }
 
 export interface CharacterActionAccess {

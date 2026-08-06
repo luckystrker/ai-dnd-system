@@ -64,6 +64,22 @@ describe("resolveCampaign", () => {
   test("returns undefined without chat identity", () => {
     assert.equal(resolveCampaign({ attributes: { user_id: "u-x" } }), undefined);
   });
+
+  test("member can read by explicit slug", () => {
+    assert.equal(resolveCampaign(playerAuth(), campaign.slug)?.id, campaign.id);
+  });
+
+  test("stranger is denied read by explicit slug", () => {
+    const stranger = { attributes: { user_id: "u-stranger", chat_id: "-777" } };
+    assert.throws(
+      () => resolveCampaign(stranger, campaign.slug),
+      (err: StoreError) => err.code === "access_denied",
+    );
+  });
+
+  test("automation without identity can read by explicit slug", () => {
+    assert.equal(resolveCampaign({}, campaign.slug)?.id, campaign.id);
+  });
 });
 
 describe("findCampaignForIdentity", () => {
@@ -102,6 +118,25 @@ describe("resolveCampaignForWrite", () => {
   test("player is denied write access", () => {
     assert.throws(
       () => resolveCampaignForWrite(playerAuth()),
+      (err: StoreError) => err.code === "access_denied",
+    );
+  });
+
+  test("dm can write by explicit slug", () => {
+    assert.equal(resolveCampaignForWrite(dmAuth(), campaign.slug).id, campaign.id);
+  });
+
+  test("player is denied write by explicit slug (IDOR)", () => {
+    assert.throws(
+      () => resolveCampaignForWrite(playerAuth(), campaign.slug),
+      (err: StoreError) => err.code === "access_denied",
+    );
+  });
+
+  test("stranger is denied write by explicit slug (IDOR)", () => {
+    const stranger = { attributes: { user_id: "u-stranger", chat_id: "-777" } };
+    assert.throws(
+      () => resolveCampaignForWrite(stranger, campaign.slug),
       (err: StoreError) => err.code === "access_denied",
     );
   });

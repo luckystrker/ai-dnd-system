@@ -11,6 +11,10 @@ export interface PlayerCharacter {
   /** Telegram userId владельца персонажа (из листа, если известен). */
   ownerUserId?: string;
   stats: Record<string, number>;
+  /** Уровень и хиты — из листа при гидратации; HP обновляется в бою. */
+  level?: number;
+  hp?: number;
+  maxHp?: number;
 }
 
 export interface Enemy {

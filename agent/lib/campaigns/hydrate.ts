@@ -16,6 +16,9 @@ export function hydrateGameState(campaign: Campaign, characters: CharacterSheet[
       name: sheet.name,
       ownerUserId: sheet.ownerUserId,
       stats: sheet.stats,
+      level: sheet.level,
+      hp: sheet.hp,
+      maxHp: sheet.maxHp,
     })),
   }));
 }

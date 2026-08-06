@@ -5,6 +5,7 @@ import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
 import { hydrateGameState } from "../lib/campaigns/hydrate.ts";
 import { resolveCallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
+import { StoreError } from "../lib/campaigns/types.ts";
 
 export default defineTool({
   description:
@@ -20,52 +21,61 @@ export default defineTool({
     if (!identity) {
       return { ok: false, error: "Не удалось определить, кто вы." };
     }
-    const campaign = campaignId
-      ? campaignStore.getCampaign(campaignId)
-      : identity.chatId
-        ? findCampaignForIdentity(identity)
-        : undefined;
-    if (!campaign) {
+    try {
+      const campaign = campaignId
+        ? campaignStore.getCampaign(campaignId)
+        : identity.chatId
+          ? findCampaignForIdentity(identity)
+          : undefined;
+      if (!campaign) {
+        return {
+          ok: true,
+          campaign: null,
+          note: "В этом чате нет привязанной кампании. Можно создать новую (/newcampaign) или запустить существующую (/startcampaign).",
+        };
+      }
+      const member = campaign.members.find((entry) => entry.userId === identity.userId);
+      if (!member) {
+        return { ok: false, error: "Вы не участник этой кампании." };
+      }
+      const characters = campaignStore.listCharacters(campaign.id);
+      if (campaign.status === "active") {
+        hydrateGameState(campaign, characters);
+      }
       return {
         ok: true,
-        campaign: null,
-        note: "В этом чате нет привязанной кампании. Можно создать новую (/newcampaign) или запустить существующую (/startcampaign).",
-      };
-    }
-    const characters = campaignStore.listCharacters(campaign.id);
-    if (campaign.status === "active") {
-      hydrateGameState(campaign, characters);
-    }
-    return {
-      ok: true,
-      campaign: {
-        id: campaign.id,
-        slug: campaign.slug,
-        title: campaign.title,
-        status: campaign.status,
-        length: campaign.length,
-        setting: campaign.setting,
-        theme: campaign.theme,
-        goal: campaign.goal ?? null,
-        tone: campaign.tone ?? null,
-        openingScene: campaign.openingScene ?? null,
-        members: campaign.members.map((member) => ({
-          userId: member.userId,
-          name: member.name ?? member.username ?? member.userId,
-          role: member.role,
+        campaign: {
+          id: campaign.id,
+          slug: campaign.slug,
+          title: campaign.title,
+          status: campaign.status,
+          length: campaign.length,
+          setting: campaign.setting,
+          theme: campaign.theme,
+          goal: campaign.goal ?? null,
+          tone: campaign.tone ?? null,
+          openingScene: campaign.openingScene ?? null,
+          members: campaign.members.map((member) => ({
+            userId: member.userId,
+            name: member.name ?? member.username ?? member.userId,
+            role: member.role,
+          })),
+        },
+        characters: characters.map((sheet) => ({
+          id: sheet.id,
+          name: sheet.name,
+          ownerUserId: sheet.ownerUserId,
+          characterClass: sheet.characterClass,
+          race: sheet.race,
+          level: sheet.level,
+          stats: sheet.stats,
+          motivation: sheet.motivation ?? null,
+          background: sheet.background ?? null,
         })),
-      },
-      characters: characters.map((sheet) => ({
-        id: sheet.id,
-        name: sheet.name,
-        ownerUserId: sheet.ownerUserId,
-        characterClass: sheet.characterClass,
-        race: sheet.race,
-        level: sheet.level,
-        stats: sheet.stats,
-        motivation: sheet.motivation ?? null,
-        background: sheet.background ?? null,
-      })),
-    };
+      };
+    } catch (error) {
+      if (error instanceof StoreError) return { ok: false, error: error.message };
+      throw error;
+    }
   },
 });

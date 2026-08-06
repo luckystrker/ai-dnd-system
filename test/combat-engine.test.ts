@@ -5,6 +5,7 @@ import {
   emptyCombatOrder,
   nextCombatant,
   rollInitiative,
+  weaponDamageDice,
   type CombatOrder,
 } from "../agent/lib/engine/combat.ts";
 
@@ -62,6 +63,7 @@ describe("nextCombatant", () => {
     started: true,
     round: 1,
     current: 0,
+    acted: true,
     order: [
       { name: "Тварь", side: "enemy", bonus: 4, roll: 16, total: 20 },
       { name: "Микроб", side: "party", bonus: 2, roll: 8, total: 10 },
@@ -73,6 +75,11 @@ describe("nextCombatant", () => {
     const next = nextCombatant(order, () => true);
     assert.equal(next.current, 1);
     assert.equal(next.round, 1);
+  });
+
+  test("resets the acted flag for the next combatant", () => {
+    const next = nextCombatant(order, () => true);
+    assert.equal(next.acted, false);
   });
 
   test("increments round when wrapping past the last combatant", () => {
@@ -91,6 +98,14 @@ describe("nextCombatant", () => {
     assert.equal(next.round, 2);
   });
 
+  test("skips party members at zero hp", () => {
+    const next = nextCombatant(
+      { ...order, current: 0, order: [...order.order, { name: "Труп", side: "party", hp: 0, bonus: 0, roll: 1, total: 1 }] },
+      (entry) => entry.hp === undefined || entry.hp > 0,
+    );
+    assert.equal(next.current, 1);
+  });
+
   test("leaves the order unchanged when nobody is alive", () => {
     const next = nextCombatant({ ...order, current: 0 }, () => false);
     assert.equal(next.current, 0);
@@ -102,5 +117,39 @@ describe("nextCombatant", () => {
     const next = nextCombatant(idle, () => true);
     assert.equal(next.current, -1);
     assert.equal(next.started, false);
+  });
+});
+
+describe("emptyCombatOrder", () => {
+  test("starts without an acted flag", () => {
+    assert.equal(emptyCombatOrder().acted, false);
+  });
+});
+
+describe("weaponDamageDice", () => {
+  const inventory = ["короткий меч (1d6)", "факел", "лук длинный (1d8)", "зелье лечения (1d4)"];
+  const weaponless = ["факел", "верёвка"];
+
+  test("finds dice inside a named weapon", () => {
+    assert.equal(weaponDamageDice(inventory, "меч"), "1d6");
+    assert.equal(weaponDamageDice(inventory, "лук"), "1d8");
+  });
+
+  test("scans the whole inventory without a weapon name", () => {
+    assert.equal(weaponDamageDice(inventory), "1d6");
+  });
+
+  test("ignores the weapon name when it has no dice spec", () => {
+    assert.equal(weaponDamageDice(["магическая палочка"], "палочка"), undefined);
+  });
+
+  test("falls back to undefined without dice specs", () => {
+    assert.equal(weaponDamageDice(weaponless), undefined);
+    assert.equal(weaponDamageDice(undefined), undefined);
+    assert.equal(weaponDamageDice(inventory, "нет такого"), undefined);
+  });
+
+  test("matches case-insensitively", () => {
+    assert.equal(weaponDamageDice(["Короткий Меч (1d6)"], "меч"), "1d6");
   });
 });

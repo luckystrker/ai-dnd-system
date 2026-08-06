@@ -2,7 +2,9 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  abilityModifier,
   abilityScore,
+  proficiencyBonus,
   resolveSkillAbility,
   rollDice,
   skillCheck,
@@ -169,5 +171,35 @@ describe("abilityScore", () => {
 
   test("truncates fractional values", () => {
     assert.equal(abilityScore({ str: 15.7 }, "str"), 15);
+  });
+});
+
+describe("abilityModifier", () => {
+  test("computes the 5e modifier from the ability score", () => {
+    assert.equal(abilityModifier({ strength: 15 }, "str"), 2);
+    assert.equal(abilityModifier({ strength: 10 }, "str"), 0);
+    assert.equal(abilityModifier({ strength: 8 }, "str"), -1);
+    assert.equal(abilityModifier({ dexterity: 20 }, "dex"), 5);
+  });
+
+  test("defaults to a score of 10 when missing", () => {
+    assert.equal(abilityModifier({}, "str"), 0);
+  });
+});
+
+describe("proficiencyBonus", () => {
+  test("follows the 5e progression", () => {
+    assert.equal(proficiencyBonus(1), 2);
+    assert.equal(proficiencyBonus(4), 2);
+    assert.equal(proficiencyBonus(5), 3);
+    assert.equal(proficiencyBonus(9), 4);
+    assert.equal(proficiencyBonus(13), 5);
+    assert.equal(proficiencyBonus(17), 6);
+    assert.equal(proficiencyBonus(20), 6);
+  });
+
+  test("handles invalid levels", () => {
+    assert.equal(proficiencyBonus(0), 2);
+    assert.equal(proficiencyBonus(NaN), 2);
   });
 });
