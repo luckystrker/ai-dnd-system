@@ -12,6 +12,7 @@
     "poll": "node --env-file=.env scripts/telegram-poll.ts",
     "smoke": "node scripts/smoke-campaigns.ts",
     "start": "eve start",
+    "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc"
   },
   "dependencies": {
@@ -19,6 +20,7 @@
     "ai": "^7.0.38",
     "better-sqlite3": "^13.0.3",
     "eve": "0.29.5",
+    "just-bash": "^3.2.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

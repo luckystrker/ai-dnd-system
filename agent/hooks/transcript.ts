@@ -12,6 +12,7 @@
 import { defineHook } from "eve/hooks";
 import { toolResultFrom } from "eve/tools";
 
+import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
 import { resolveCallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
 import type { Campaign } from "../lib/campaigns/types.ts";
@@ -26,7 +27,9 @@ import skillCheckTool from "../tools/skill_check.ts";
 function campaignForInbound(auth: unknown): Campaign | undefined {
   const identity = resolveCallerIdentity(auth);
   if (!identity?.chatId) return undefined;
-  return campaignStore.findByBoundChat(identity.chatId, identity.messageThreadId);
+  // Откат к кампании без топика: реплаи в супергруппе несут message_thread_id
+  // = id сообщения, на которое ответили, хотя форум-топика у чата нет.
+  return findCampaignForIdentity(identity);
 }
 
 /** Кампания для событий хода: по campaignId из durable-состояния сессии. */

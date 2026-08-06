@@ -21,11 +21,11 @@ const model = llm(process.env.LLM_MODEL ?? "deepseek-v4-flash");
  * раньше и расход токенов заметно ниже.
  */
 const CONTEXT_WINDOW_BY_LENGTH: Record<CampaignLength, number> = {
-  short: 64_000,
-  medium: 256_000,
+  short: 256_000,
+  medium: 512_000,
   long: 900_000,
 };
-const DEFAULT_CONTEXT_WINDOW = 256_000;
+const DEFAULT_CONTEXT_WINDOW = 512_000;
 
 function contextWindowFor(auth: unknown): number {
   const identity = resolveCallerIdentity(auth);

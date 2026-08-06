@@ -1,5 +1,6 @@
 import { defineState } from "eve/context";
 
+import { emptyCombatOrder, type CombatOrder } from "./engine/combat.ts";
 import { MAX_PARTY } from "./campaigns/types.ts";
 
 export { MAX_PARTY };
@@ -24,8 +25,10 @@ export interface GameState {
   campaignId?: string;
   scene: string;
   party: PlayerCharacter[];
+  /** Активные враги боя (имена живых врагов из combat.order). */
   enemies: Enemy[];
-  turn: number;
+  /** Порядок ходов боя: инициатива, текущий ход, раунд. */
+  combat: CombatOrder;
   journal: string[];
 }
 
@@ -36,7 +39,7 @@ export const gameState = defineState("ttrpg.game", (): GameState => ({
   scene: "",
   party: [],
   enemies: [],
-  turn: 0,
+  combat: emptyCombatOrder(),
   journal: [],
 }));
 

@@ -8,6 +8,7 @@
  */
 import { defineDynamic, defineInstructions } from "eve/instructions";
 
+import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
 import {
   readCampaignSummary,
   readDayTail,
@@ -151,9 +152,10 @@ export default defineDynamic({
     "turn.started": (_event, ctx) => {
       try {
         const identity = resolveCallerIdentity(ctx.session.auth.current);
-        const campaign = identity?.chatId
-          ? campaignStore.findByBoundChat(identity.chatId, identity.messageThreadId)
-          : undefined;
+        // findCampaignForIdentity делает точный матч чата/топика и откат к
+        // кампании без топика: Telegram ставит message_thread_id любому
+        // реплаю в супергруппе (= id сообщения, на которое ответили).
+        const campaign = identity?.chatId ? findCampaignForIdentity(identity) : undefined;
         if (!identity || !campaign) return null;
         return defineInstructions({ markdown: buildMemoryBlock(campaign, identity) });
       } catch {

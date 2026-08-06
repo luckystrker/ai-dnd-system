@@ -1,6 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
+import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
 import { hydrateGameState } from "../lib/campaigns/hydrate.ts";
 import { resolveCallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
@@ -22,7 +23,7 @@ export default defineTool({
     const campaign = campaignId
       ? campaignStore.getCampaign(campaignId)
       : identity.chatId
-        ? campaignStore.findByBoundChat(identity.chatId, identity.messageThreadId)
+        ? findCampaignForIdentity(identity)
         : undefined;
     if (!campaign) {
       return {

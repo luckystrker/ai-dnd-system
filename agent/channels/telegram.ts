@@ -30,7 +30,7 @@ import {
   type TelegramUser,
 } from "eve/channels/telegram";
 
-import { appendTranscriptEntry } from "../lib/campaigns/journal.ts";
+import { telegramChatQueue } from "../lib/chat-queue.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
 import { MAX_PARTY } from "../lib/campaigns/types.ts";
 import { telegramLimiter, TELEGRAM_RATE_LIMITS } from "../lib/rate-limit.ts";
@@ -69,6 +69,27 @@ function continuationTokenFor(message: TelegramMessage): string {
  */
 function topicOf(message: TelegramMessage): number | undefined {
   return message.raw?.is_topic_message === true ? message.messageThreadId : undefined;
+}
+
+/**
+ * Auth для сессии. defaultTelegramAuth из eve копирует в attributes сырой
+ * message_thread_id из update. Telegram ставит его ЛЮБОМУ реплаю в супергруппе
+ * (= id корневого сообщения тред-реплая), а не только форум-топикам. Такой
+ * «топик» ломает поиск кампании по привязанному чату: bound_thread_id NULL не
+ * совпадает с id реплая, и память кампании в группах не подгружалась.
+ * Приводим message_thread_id к настоящему топику форума (topicOf).
+ */
+function sessionAuth(message: TelegramMessage): ReturnType<typeof defaultTelegramAuth> {
+  const auth = defaultTelegramAuth(message);
+  if (!auth) return null;
+  const topic = topicOf(message);
+  const attributes: Record<string, string | readonly string[]> = {};
+  for (const [key, value] of Object.entries(auth.attributes)) {
+    if (key === "message_thread_id") continue;
+    attributes[key] = value;
+  }
+  if (topic !== undefined) attributes.message_thread_id = String(topic);
+  return { ...auth, attributes };
 }
 
 function isBotCommand(text: string, botUsername: string | undefined): boolean {
@@ -129,54 +150,16 @@ function displayName(user: TelegramUser): string | undefined {
 }
 
 /**
- * Наблюдение за всем трафиком группы в чате/топике, привязанном к кампании
- * (статус кампании не важен).
- *
- * Сообщения НЕ в адрес бота дополнительно пишутся в транскрипт дня, чтобы DM
- * видел диалоги игроков между собой; ход агента при этом не запускается —
- * пока игроки общаются сами, бот молчит. Сообщения, проходящие shouldDispatch,
- * в транскрипт здесь не дублируются: их запишет transcript-хук.
- *
- * Регистрация участников здесь НЕ происходит: игрок вступает явно командой
- * /join (handleJoinCampaign) или по приглашению DM (invite_member) — так
- * случайные участники группы не становятся игроками кампании.
- */
-function observeCampaignTraffic(message: TelegramMessage): void {
-  try {
-    if (message.chat.type === "private" || message.chat.type === "channel") return;
-    if (!message.from || message.from.isBot) return;
-    const campaign = campaignStore.findByBoundChat(message.chat.id, topicOf(message), { anyStatus: true });
-    if (!campaign) return;
-
-    if (shouldDispatch(message)) return;
-    const text = message.text || message.caption;
-    if (!text.trim()) return;
-    appendTranscriptEntry(campaign.slug, campaign.currentDay ?? 1, {
-      kind: "player",
-      author: message.from.username ?? displayName(message.from) ?? message.from.id,
-      text,
-      eventId: `tg-${message.chat.id}-${message.messageId}`,
-    });
-  } catch (error) {
-    // Наблюдение не должно ломать обработку самого сообщения.
-    console.error("telegram channel: campaign observation failed", error);
-  }
-}
-
-/**
- * Правила диспетчеризации как у встроенного канала: личка — всё; группы —
- * только команды, @упоминания и реплаи на сообщения бота.
+ * Правила диспетчеризации: боту уходит каждое осмысленное сообщение любого
+ * чата — лички, группы и форумы без ограничений. В группах бот видит и
+ * сообщения без @упоминания/реплая (переписку игроков между собой), чтобы
+ * не терять контекст: правила ведения таких разговоров заданы в
+ * instructions.md. В транскрипт сообщения пишет transcript-хук.
  */
 function shouldDispatch(message: TelegramMessage): boolean {
   if (message.from?.isBot || message.chat.type === "channel") return false;
   const text = message.text || message.caption;
-  if (!text.trim() && message.attachments.length === 0) return false;
-  if (message.chat.type === "private") return true;
-  return (
-    message.replyToMessage?.from?.isBot === true ||
-    isBotCommand(text, BOT_USERNAME) ||
-    (BOT_USERNAME !== undefined && text.toLowerCase().includes(`@${BOT_USERNAME.toLowerCase()}`))
-  );
+  return text.trim().length > 0 || message.attachments.length > 0;
 }
 
 async function startTyping(state: TelegramState): Promise<void> {
@@ -275,9 +258,12 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
         }
       }
 
+      // Апдейты одного чата обрабатываем строго по очереди: два send() одного
+      // чата одновременно (два быстрых сообщения подряд) — это два параллельных
+      // workflow-рана одной сессии, и второй падает с HookConflictError, теряя
+      // сообщение. См. PerChatQueue.
       if (handleJoinCampaign(message)) return new Response("ok");
 
-      observeCampaignTraffic(message);
       if (!shouldDispatch(message)) return new Response("ok");
 
       const state: TelegramState = {
@@ -306,12 +292,12 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
       );
 
       waitUntil(
-        (async () => {
+        telegramChatQueue.enqueue(chatKey, async () => {
           try {
             await send(
               { message: turnMessage, context: [contextBlock] },
               {
-                auth: defaultTelegramAuth(message),
+                auth: sessionAuth(message),
                 continuationToken: continuationTokenFor(message),
                 state,
               },
@@ -319,7 +305,7 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
           } catch (error) {
             console.error("telegram channel: message delivery failed", error);
           }
-        })(),
+        }),
       );
 
       return new Response("ok");
