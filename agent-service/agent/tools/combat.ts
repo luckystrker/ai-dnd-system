@@ -1,6 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
+import { canActForCharacter } from "../lib/campaigns/access.ts";
 import { rollDice } from "../lib/engine/dnd5e";
 import { gameState } from "../lib/memory";
 
@@ -13,18 +14,36 @@ function parseDice(spec: string): { count: number; sides: number } {
 export default defineTool({
   description:
     "Resolve an action in turn-based combat: attack a named enemy or end combat. " +
-    "Tracks enemy HP and AC in the current session. Use only together with the game state.",
-  inputSchema: z.object({
-    action: z.enum(["attack", "end"]),
-    attacker: z.string().min(1).max(100),
-    enemy: z.string().min(1).max(100),
-    bonus: z.number().int().min(-10).max(20).default(0),
-    damage_dice: z.string().min(1).max(20).default("1d8"),
-  }),
-  execute({ action, attacker, enemy, bonus, damage_dice }) {
+    "Tracks enemy HP and AC in the current session. Use only together with the game state. " +
+    "`enemy` is required only for action=attack; omit it when ending combat.",
+  inputSchema: z
+    .object({
+      action: z.enum(["attack", "end"]),
+      attacker: z.string().min(1).max(100),
+      enemy: z.string().min(1).max(100).optional(),
+      bonus: z.number().int().min(-10).max(20).default(0),
+      damage_dice: z.string().min(1).max(20).default("1d8"),
+    })
+    .refine((value) => value.action !== "attack" || Boolean(value.enemy), {
+      message: "enemy is required when action is attack",
+      path: ["enemy"],
+    }),
+  execute({ action, attacker, enemy, bonus, damage_dice }, ctx) {
     const state = gameState.get();
     if (state.enemies.length === 0) {
       return "No combat is in progress. Narrate an encounter first to start one.";
+    }
+
+    const partyMember = state.party.find(
+      (entry) => entry.name.trim().toLowerCase() === attacker.trim().toLowerCase(),
+    );
+    if (!partyMember) {
+      const party = state.party.map((entry) => entry.name).join(", ") || "(партия пуста)";
+      return `Персонаж «${attacker}» не найден в партии. Участники партии: ${party}.`;
+    }
+    const access = canActForCharacter(ctx, attacker);
+    if (!access.allowed) {
+      return access.reason ?? "Действие от имени этого персонажа запрещено.";
     }
 
     if (action === "end") {
@@ -33,7 +52,7 @@ export default defineTool({
     }
 
     const target = state.enemies.find(
-      (e) => e.name.toLowerCase() === enemy.toLowerCase(),
+      (e) => e.name.toLowerCase() === enemy!.toLowerCase(),
     );
     if (!target) {
       const active = state.enemies

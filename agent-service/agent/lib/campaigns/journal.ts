@@ -11,7 +11,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { join } from "node:path";
 
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
-import { campaignDataRoot } from "./store.ts";
+import { assertCampaignSlug, campaignDataRoot } from "./store.ts";
 
 /** Одна запись транскрипта. */
 export interface TranscriptEntry {
@@ -34,6 +34,7 @@ export interface DayRecord {
 }
 
 function historyDir(campaignSlug: string): string {
+  assertCampaignSlug(campaignSlug);
   return join(campaignDataRoot(), campaignSlug, "history");
 }
 

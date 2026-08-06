@@ -14,6 +14,7 @@ export function hydrateGameState(campaign: Campaign, characters: CharacterSheet[
     party: characters.map((sheet) => ({
       id: sheet.id,
       name: sheet.name,
+      ownerUserId: sheet.ownerUserId,
       stats: sheet.stats,
     })),
   }));

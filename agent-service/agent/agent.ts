@@ -1,8 +1,8 @@
 import { defineAgent, defineDynamic } from "eve";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
+import { findCampaignForIdentity } from "./lib/campaigns/access.ts";
 import { resolveCallerIdentity } from "./lib/campaigns/session.ts";
-import { campaignStore } from "./lib/campaigns/store.ts";
 import type { CampaignLength } from "./lib/campaigns/types.ts";
 
 const llm = createOpenAICompatible({
@@ -17,19 +17,19 @@ const model = llm(process.env.LLM_MODEL ?? "deepseek-v4-flash");
  * Sliding window: чем длиннее кампания, тем больше последних сообщений
  * держится в контексте. При приближении к окну встроенный compaction eve
  * суммаризирует старые ходы; полный оригинал всегда остаётся в history/days/.
+ * Коротким кампаниям большое окно не нужно — так compaction срабатывает
+ * раньше и расход токенов заметно ниже.
  */
 const CONTEXT_WINDOW_BY_LENGTH: Record<CampaignLength, number> = {
-  short: 900_000,
-  medium: 900_000,
+  short: 64_000,
+  medium: 256_000,
   long: 900_000,
 };
-const DEFAULT_CONTEXT_WINDOW = 900_000;
+const DEFAULT_CONTEXT_WINDOW = 256_000;
 
 function contextWindowFor(auth: unknown): number {
   const identity = resolveCallerIdentity(auth);
-  const campaign = identity?.chatId
-    ? campaignStore.findByBoundChat(identity.chatId, identity.messageThreadId)
-    : undefined;
+  const campaign = identity ? findCampaignForIdentity(identity) : undefined;
   if (!campaign) return DEFAULT_CONTEXT_WINDOW;
   return CONTEXT_WINDOW_BY_LENGTH[campaign.length] ?? DEFAULT_CONTEXT_WINDOW;
 }
@@ -52,5 +52,10 @@ export default defineAgent({
   },
   limits: {
     sessionTimeoutMs: false,
+  },
+  build: {
+    // Нативный аддон: бандлинг ломает поиск .node-бинарника, поэтому пакет
+    // остаётся внешним и резолвится обычным Node.js-способом.
+    externalDependencies: ["better-sqlite3"],
   },
 });

@@ -46,3 +46,19 @@ export function resolveCallerIdentity(auth: unknown): CallerIdentity | undefined
     messageThreadId: Number.isFinite(messageThreadId) ? messageThreadId : undefined,
   };
 }
+
+/** Минимальная форма контекста тула eve с session auth (current/initiator). */
+export interface ToolSessionContext {
+  session: {
+    auth: {
+      current: { attributes: Readonly<Record<string, string | readonly string[]>> } | null;
+      initiator: { attributes: Readonly<Record<string, string | readonly string[]>> } | null;
+    };
+  };
+}
+
+/** Личность звонящего из контекста тула: current, иначе initiator. */
+export function resolveToolCallerIdentity(ctx: ToolSessionContext | undefined): CallerIdentity | undefined {
+  const auth = ctx?.session.auth.current ?? ctx?.session.auth.initiator;
+  return resolveCallerIdentity(auth);
+}

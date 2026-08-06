@@ -2,9 +2,13 @@
  * Разовый e2e-прогон: синтетический Telegram webhook -> eve -> save_campaign.
  * Требует запущенный `npm run dev` и .env с TELEGRAM_WEBHOOK_SECRET_TOKEN.
  * Запуск: node --env-file=.env scripts/e2e-webhook.ts
+ *
+ * Кампания проверяется через активный CampaignStore (по умолчанию SQLite),
+ * поэтому прогон работает независимо от выбора CAMPAIGN_STORE.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+const { campaignStore } = await import("../agent/lib/campaigns/store.ts");
 
 const SECRET = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
 if (!SECRET) throw new Error("TELEGRAM_WEBHOOK_SECRET_TOKEN is required");
@@ -42,31 +46,29 @@ if (!res.ok) {
   process.exit(1);
 }
 
-const dataRoot = process.env.CAMPAIGN_DATA_DIR ?? "data/campaigns";
 const deadline = Date.now() + 180_000;
-let found: string | undefined;
+let campaign: import("../agent/lib/campaigns/types.ts").Campaign | undefined;
 while (Date.now() < deadline) {
-  if (existsSync(dataRoot)) {
-    found = readdirSync(dataRoot).find((dir) => dir.includes("testovyy") || dir.includes("test"));
-    if (found) break;
-  }
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  campaign = campaignStore
+    .listCampaigns()
+    .find((c) => c.slug.includes("testovyy") || c.slug.includes("test"));
+  if (campaign) break;
+  await sleep(3000);
 }
 
-if (!found) {
-  console.error(`FAIL: кампания не появилась в ${dataRoot} за 180 секунд`);
+if (!campaign) {
+  console.error("FAIL: кампания не появилась в хранилище за 180 секунд");
   process.exit(1);
 }
 
-const doc = readFileSync(join(dataRoot, found, "campaign.md"), "utf8");
-console.log(`\n--- ${found}/campaign.md ---\n${doc}`);
+console.log(`\n--- кампания ${campaign.slug} (${campaign.title}) ---`);
+console.log(JSON.stringify(campaign, null, 2));
 const checks: Array<[string, boolean]> = [
-  ["есть frontmatter", doc.startsWith("---")],
-  ["создатель = dm", doc.includes('role: "dm"')],
-  ["userId сохранён", doc.includes(`userId: "${USER_ID}"`)],
-  ["length short", doc.includes('length: "short"')],
-  ["status active после start_campaign", doc.includes('status: "active"')],
-  ["привязана к чату", doc.includes(`chatId: "${CHAT_ID}"`)],
+  ["создатель = dm", campaign.members.some((m) => m.role === "dm")],
+  ["userId сохранён", campaign.members.some((m) => m.userId === String(USER_ID))],
+  ["length short", campaign.length === "short"],
+  ["status active после start_campaign", campaign.status === "active"],
+  ["привязана к чату", campaign.boundChat?.chatId === String(CHAT_ID)],
 ];
 let failed = 0;
 for (const [name, ok] of checks) {

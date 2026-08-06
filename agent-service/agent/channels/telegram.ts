@@ -32,8 +32,17 @@ import {
 
 import { appendTranscriptEntry } from "../lib/campaigns/journal.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
+import { MAX_PARTY } from "../lib/campaigns/types.ts";
+import { telegramLimiter, TELEGRAM_RATE_LIMITS } from "../lib/rate-limit.ts";
 
 const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
+
+/** Максимальный размер входящего update от Telegram (защита от аномальных payload). */
+const MAX_UPDATE_BYTES = (() => {
+  const raw = process.env.TELEGRAM_MAX_UPDATE_BYTES;
+  const value = raw ? Number(raw) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : 1024 * 1024;
+})();
 
 /** Та же политика вложений, что по умолчанию у встроенного канала. */
 const UPLOAD_POLICY = { allowedMediaTypes: "*", maxBytes: 25 * 1024 * 1024 } as const;
@@ -69,6 +78,50 @@ function isBotCommand(text: string, botUsername: string | undefined): boolean {
   return target === undefined || (botUsername !== undefined && target.toLowerCase() === botUsername.toLowerCase());
 }
 
+/** Команда /join (в т.ч. /join@bot) — явное вступление в кампанию чата. */
+function isJoinCommand(text: string): boolean {
+  return /^\/join(?:@[A-Za-z0-9_]+)?(?:\s|$)/iu.test(text);
+}
+
+/**
+ * Обработка /join: регистрирует автора как игрока кампании, привязанной
+ * к чату/топику. Возвращает true, если команда обработана и ход агента
+ * запускать не нужно.
+ */
+function handleJoinCampaign(message: TelegramMessage): boolean {
+  const text = (message.text || message.caption) ?? "";
+  if (!isBotCommand(text, BOT_USERNAME) || !isJoinCommand(text)) return false;
+  if (!message.from || message.from.isBot) return true;
+
+  const state: TelegramState = {
+    chatId: message.chat.id,
+    chatType: message.chat.type,
+    messageThreadId: topicOf(message) ?? null,
+  };
+  const campaign = campaignStore.findByBoundChat(message.chat.id, topicOf(message), { anyStatus: true });
+  if (!campaign) {
+    void postText(state, "В этом чате нет кампании, к которой можно присоединиться.");
+    return true;
+  }
+  const before = campaign.members.some((member) => member.userId === message.from!.id);
+  const updated = campaignStore.autoRegister(campaign.id, {
+    userId: message.from.id,
+    name: displayName(message.from),
+    username: message.from.username,
+  });
+  const after = updated.members.some((member) => member.userId === message.from!.id);
+  let reply: string;
+  if (before) {
+    reply = `Ты уже участвуешь в кампании «${campaign.title}».`;
+  } else if (after) {
+    reply = `Ты присоединился к кампании «${campaign.title}»! Теперь можно создать персонажа.`;
+  } else {
+    reply = `Партия кампании «${campaign.title}» заполнена (максимум ${MAX_PARTY} игроков).`;
+  }
+  void postText(state, reply);
+  return true;
+}
+
 /** Имя пользователя для транскрипта/регистрации, если нет username. */
 function displayName(user: TelegramUser): string | undefined {
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
@@ -77,13 +130,16 @@ function displayName(user: TelegramUser): string | undefined {
 
 /**
  * Наблюдение за всем трафиком группы в чате/топике, привязанном к кампании
- * (статус кампании не важен — авто-вступление работает в любой момент).
+ * (статус кампании не важен).
  *
- * Каждый написавший автоматически становится игроком кампании. Сообщения НЕ
- * в адрес бота дополнительно пишутся в транскрипт дня, чтобы DM видел
- * диалоги игроков между собой; ход агента при этом не запускается — пока
- * игроки общаются сами, бот молчит. Сообщения, проходящие shouldDispatch,
+ * Сообщения НЕ в адрес бота дополнительно пишутся в транскрипт дня, чтобы DM
+ * видел диалоги игроков между собой; ход агента при этом не запускается —
+ * пока игроки общаются сами, бот молчит. Сообщения, проходящие shouldDispatch,
  * в транскрипт здесь не дублируются: их запишет transcript-хук.
+ *
+ * Регистрация участников здесь НЕ происходит: игрок вступает явно командой
+ * /join (handleJoinCampaign) или по приглашению DM (invite_member) — так
+ * случайные участники группы не становятся игроками кампании.
  */
 function observeCampaignTraffic(message: TelegramMessage): void {
   try {
@@ -91,12 +147,6 @@ function observeCampaignTraffic(message: TelegramMessage): void {
     if (!message.from || message.from.isBot) return;
     const campaign = campaignStore.findByBoundChat(message.chat.id, topicOf(message), { anyStatus: true });
     if (!campaign) return;
-
-    campaignStore.autoRegister(campaign.id, {
-      userId: message.from.id,
-      name: displayName(message.from),
-      username: message.from.username,
-    });
 
     if (shouldDispatch(message)) return;
     const text = message.text || message.caption;
@@ -186,6 +236,10 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
         return new Response("unauthorized", { status: 401 });
       }
 
+      if (Buffer.byteLength(raw, "utf8") > MAX_UPDATE_BYTES) {
+        return new Response("payload too large", { status: 413 });
+      }
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw);
@@ -207,6 +261,22 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
       }
 
       const message = update.message;
+
+      // Защита от флуда: превышение лимита молча игнорируем (ответ "ok"),
+      // чтобы Telegram не ретраил запрос и не усиливал нагрузку.
+      const chatKey = `chat:${message.chat.id}:${topicOf(message) ?? ""}`;
+      if (!telegramLimiter.allow(chatKey, TELEGRAM_RATE_LIMITS.chatPerMinute, TELEGRAM_RATE_LIMITS.windowMs)) {
+        return new Response("ok");
+      }
+      if (message.from && !message.from.isBot) {
+        const userKey = `user:${message.from.id}`;
+        if (!telegramLimiter.allow(userKey, TELEGRAM_RATE_LIMITS.userPerMinute, TELEGRAM_RATE_LIMITS.windowMs)) {
+          return new Response("ok");
+        }
+      }
+
+      if (handleJoinCampaign(message)) return new Response("ok");
+
       observeCampaignTraffic(message);
       if (!shouldDispatch(message)) return new Response("ok");
 
@@ -224,7 +294,9 @@ export default defineChannel<TelegramState, TelegramChannelContext>({
         chatTitle: message.chat.title,
         chatType: message.chat.type,
         messageId: message.messageId,
-        messageThreadId: message.messageThreadId,
+        // Тот же topic, что и в state.messageThreadId: сырой message_thread_id
+        // у обычных реплаев — это id сообщения-родителя, а не форум-топик.
+        messageThreadId: topicOf(message),
         userId: message.from?.id,
         username: message.from?.username,
       });

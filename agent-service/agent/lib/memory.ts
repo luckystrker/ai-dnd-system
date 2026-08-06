@@ -7,6 +7,8 @@ export { MAX_PARTY };
 export interface PlayerCharacter {
   id: string;
   name: string;
+  /** Telegram userId владельца персонажа (из листа, если известен). */
+  ownerUserId?: string;
   stats: Record<string, number>;
 }
 

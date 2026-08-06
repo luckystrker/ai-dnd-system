@@ -1,17 +1,10 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
+import { canActForCharacter } from "../lib/campaigns/access.ts";
+import type { ToolSessionContext } from "../lib/campaigns/session.ts";
 import { skillCheck } from "../lib/engine/dnd5e";
 import { gameState } from "../lib/memory";
-
-interface ToolSessionContext {
-  session: {
-    auth: {
-      current: { attributes: Readonly<Record<string, string | readonly string[]>> } | null;
-      initiator: { attributes: Readonly<Record<string, string | readonly string[]>> } | null;
-    };
-  };
-}
 
 function sessionStats(ctx: ToolSessionContext): Record<string, unknown> {
   const auth = ctx.session.auth.current ?? ctx.session.auth.initiator;
@@ -61,6 +54,10 @@ export default defineTool({
     advantage: z.boolean().nullable().default(null),
   }),
   execute({ character_name, skill, difficulty, advantage }, ctx) {
+    const access = canActForCharacter(ctx, character_name);
+    if (!access.allowed) {
+      return access.reason ?? "Проверка за этого персонажа запрещена.";
+    }
     const stats = partyStats(character_name) ?? sessionStats(ctx);
     const result = skillCheck(stats, skill, difficulty, advantage);
     const abilityLabel = ABILITY_LABELS[result.ability] ?? result.ability.toUpperCase();

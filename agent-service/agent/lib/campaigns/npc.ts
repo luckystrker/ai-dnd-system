@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
-import { campaignDataRoot, campaignStore, slugify } from "./store.ts";
+import { assertCampaignSlug, campaignDataRoot, campaignStore, slugify } from "./store.ts";
 import { StoreError, type NpcProfile, type NpcRelationship, type NpcStatus } from "./types.ts";
 
 /** Входные данные для создания/обновления NPC. */
@@ -116,6 +116,7 @@ export class MarkdownNpcStore {
   }
 
   private npcsDir(campaignSlug: string): string {
+    assertCampaignSlug(campaignSlug);
     return join(this.root, campaignSlug, "npcs");
   }
 

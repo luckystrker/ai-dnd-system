@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterSheet, type CharacterStatePatch, type MemberRole } from "./types.ts";
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
+import { SqliteCampaignStore } from "./store-sqlite.ts";
 
 /** Входные данные для создания кампании (после опросника). */
 export interface NewCampaignInput {
@@ -82,6 +83,19 @@ export function slugify(text: string): string {
     .slice(0, 60)
     .replace(/-+$/g, "");
   return slug || "untitled";
+}
+
+/** Допустимый slug кампании/персонажа: только [a-z0-9], дефисы между сегментами. */
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Защита от path traversal: любой slug, используемый для построения путей ФС
+ * (в т.ч. пришедший как idOrSlug от LLM-тула), должен быть безопасным.
+ */
+export function assertCampaignSlug(slug: string): void {
+  if (typeof slug !== "string" || slug.length === 0 || slug.length > 60 || !SLUG_PATTERN.test(slug)) {
+    throw new StoreError(`Недопустимый slug «${slug}».`, "not_found");
+  }
 }
 
 export class MarkdownCampaignStore implements CampaignStore {
@@ -323,6 +337,7 @@ export class MarkdownCampaignStore implements CampaignStore {
   }
 
   private campaignDir(slug: string): string {
+    assertCampaignSlug(slug);
     return join(this.root, slug);
   }
 
@@ -503,4 +518,39 @@ export function campaignDataRoot(): string {
   return resolve(process.cwd(), process.env.CAMPAIGN_DATA_DIR ?? "data/campaigns");
 }
 
-export const campaignStore: CampaignStore = new MarkdownCampaignStore(campaignDataRoot());
+/** Путь к SQLite-базе кампаний (переопределяется CAMPAIGN_DB_PATH). */
+export function campaignDbPath(): string {
+  return resolve(process.cwd(), process.env.CAMPAIGN_DB_PATH ?? "data/campaigns.db");
+}
+
+/**
+ * Активное хранилище кампаний: SQLite по умолчанию, Markdown как откат
+ * (CAMPAIGN_STORE=markdown) и источник данных для миграции.
+ */
+export function createCampaignStore(): CampaignStore {
+  const kind = (process.env.CAMPAIGN_STORE ?? "sqlite").trim().toLowerCase();
+  return kind === "markdown"
+    ? new MarkdownCampaignStore(campaignDataRoot())
+    : new SqliteCampaignStore(campaignDbPath());
+}
+
+/**
+ * Единая точка доступа к хранилищу. Создаётся лениво — при первом обращении,
+ * а не при импорте модуля: SQLite-стор в конструкторе сразу открывает БД,
+ * а eve-рантайм вычисляет модули тулов в изолированном снапшоте на этапе
+ * компиляции, где такое открытие падает. Markdown-стор конструктором ФС не
+ * трогал, поэтому раньше этой проблемы не было.
+ */
+let campaignStoreInstance: CampaignStore | undefined;
+
+function realizedStore(): CampaignStore {
+  if (!campaignStoreInstance) campaignStoreInstance = createCampaignStore();
+  return campaignStoreInstance;
+}
+
+export const campaignStore: CampaignStore = new Proxy({} as CampaignStore, {
+  get(_target, prop, receiver) {
+    const value = Reflect.get(realizedStore(), prop, receiver);
+    return typeof value === "function" ? value.bind(realizedStore()) : value;
+  },
+});

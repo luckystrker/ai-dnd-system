@@ -8,6 +8,7 @@
   "scripts": {
     "build": "eve build",
     "dev": "eve dev",
+    "migrate:sqlite": "node scripts/migrate-md-to-sqlite.ts",
     "poll": "node --env-file=.env scripts/telegram-poll.ts",
     "smoke": "node scripts/smoke-campaigns.ts",
     "start": "eve start",
@@ -16,10 +17,12 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.20",
     "ai": "^7.0.38",
+    "better-sqlite3": "^13.0.3",
     "eve": "0.29.5",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "24.x",
     "typescript": "7.0.2"
   },
