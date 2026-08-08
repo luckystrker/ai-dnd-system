@@ -9,16 +9,19 @@
 import { defineDynamic, defineInstructions } from "eve/instructions";
 
 import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
+import { factionStore } from "../lib/campaigns/factions.ts";
 import {
   listDayHeadlines,
   readCampaignSummary,
   readDayTail,
   splitKeyEvents,
 } from "../lib/campaigns/journal.ts";
+import { locationStore } from "../lib/campaigns/locations.ts";
 import { npcStore } from "../lib/campaigns/npc.ts";
 import { resolveCallerIdentity, type CallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
-import type { Campaign, CampaignMember, CharacterSheet, NpcProfile } from "../lib/campaigns/types.ts";
+import type { Campaign, CampaignMember, CharacterSheet, NpcProfile, TimeOfDay } from "../lib/campaigns/types.ts";
+import { renderWorldState } from "../lib/campaigns/world-state.ts";
 
 const SUMMARY_CAP = 2000;
 const KEY_EVENTS_CAP = 2000;
@@ -28,6 +31,9 @@ const DAY_TAIL_LINES = 30;
 const NPC_ROSTER_CAP = 20;
 const ACTIVE_QUESTS_CAP = 10;
 const OPEN_THREADS_CAP = 10;
+const WORLD_STATE_CAP = 1500;
+const FACTION_ROSTER_CAP = 15;
+const MAP_CONNECTIONS_CAP = 10;
 
 const ACTIVE_QUEST_STATUSES = new Set(["offered", "accepted", "active"]);
 
@@ -154,6 +160,63 @@ function partyState(campaign: Campaign, characters: CharacterSheet[]): string {
     .join("\n");
 }
 
+const TIME_OF_DAY_LABEL: Record<TimeOfDay, string> = {
+  morning: "утро",
+  day: "день",
+  evening: "вечер",
+  night: "ночь",
+};
+
+/** Строка игрового времени/окружения (C2) — в заголовок блока. */
+function environmentLine(campaign: Campaign): string | undefined {
+  const parts: string[] = [];
+  if (campaign.timeOfDay) parts.push(TIME_OF_DAY_LABEL[campaign.timeOfDay]);
+  const date = campaign.inGameDate ?? `день ${campaign.currentDay ?? 1}`;
+  parts.push(date);
+  if (campaign.weather) parts.push(campaign.weather);
+  return parts.length > 0 ? `Игровое время: ${parts.join(", ")}` : undefined;
+}
+
+/** Секция карты (C1): текущая локация + куда можно пойти. */
+function mapSection(campaign: Campaign): string | undefined {
+  const current = locationStore.currentLocation(campaign.id);
+  if (!current) return undefined;
+  const lines = [`Сейчас: ${current.name}`];
+  const connections = current.connections.slice(0, MAP_CONNECTIONS_CAP);
+  if (connections.length > 0) {
+    const conns = connections.map((conn) => {
+      const via = conn.via ? ` через ${conn.via}` : "";
+      return `${conn.to}${via}`;
+    });
+    lines.push(`Отсюда можно пройти: ${conns.join("; ")}`);
+  }
+  if (current.connections.length > MAP_CONNECTIONS_CAP) {
+    lines.push(`…и ещё ${current.connections.length - MAP_CONNECTIONS_CAP} (list_locations)`);
+  }
+  return `### Карта\n${lines.join("\n")}`;
+}
+
+/** Секция состояния мира (C5): перезаписываемые актуальные факты. */
+function worldStateSection(slug: string): string | undefined {
+  const rendered = renderWorldState(slug);
+  if (!rendered) return undefined;
+  return `### Состояние мира\n${capTail(rendered, WORLD_STATE_CAP)}`;
+}
+
+/** Секция фракций (C4): список с текущим standing. */
+function factionsSection(campaign: Campaign): string | undefined {
+  const factions = factionStore.listFactions(campaign.id);
+  if (factions.length === 0) return undefined;
+  const lines = factions.slice(0, FACTION_ROSTER_CAP).map((faction) => {
+    const standing = faction.standing > 0 ? `+${faction.standing}` : `${faction.standing}`;
+    return `- ${faction.name} — репутация ${standing}`;
+  });
+  if (factions.length > FACTION_ROSTER_CAP) {
+    lines.push(`- …и ещё ${factions.length - FACTION_ROSTER_CAP}`);
+  }
+  return `### Фракции\n${lines.join("\n")}`;
+}
+
 /**
  * Кто пишет сейчас и кому принадлежат персонажи — якорь агентности:
  * модель не должна говорить и решать за чужих персонажей. Только для групп.
@@ -188,6 +251,7 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
       `Тема: ${campaign.theme}`,
       campaign.goal ? `Цель: ${campaign.goal}` : null,
       campaign.tone ? `Тон: ${campaign.tone}` : null,
+      environmentLine(campaign),
     ]
       .filter(Boolean)
       .join("; "),
@@ -208,8 +272,20 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
   const keyEvents = keyEventsSection(slug);
   if (keyEvents) sections.push(keyEvents);
 
+  // C5: актуальное состояние мира (перезаписываемое) — грузится целиком, с капом.
+  const worldState = worldStateSection(slug);
+  if (worldState) sections.push(worldState);
+
   sections.push(activeQuestsSection(campaign));
   sections.push(openThreadsSection(campaign));
+
+  // C4: фракции с текущим standing.
+  const factions = factionsSection(campaign);
+  if (factions) sections.push(factions);
+
+  // C1: текущая локация и известные связи.
+  const map = mapSection(campaign);
+  if (map) sections.push(map);
 
   const currentDay = readDayTail(slug, day, DAY_TAIL_LINES);
   if (currentDay) {
@@ -229,8 +305,12 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
   sections.push(
     "Полный транскрипт дня — через read_day, карточка NPC — через get_npc. " +
       "Квесты и нити — через list_quests / list_open_threads. " +
+      "Локации — list_locations, факты мира — list_world_state, " +
+      "журнал лута — list_ledger. " +
       "Если нужен факт из прошлого, а день неизвестен — search_memory по ключевым словам. " +
-      "Изменения состояния фиксируй через update_character / upsert_npc; новый день — advance_day.",
+      "Изменения состояния фиксируй через update_character / upsert_npc; новый день — advance_day; " +
+      "время суток — advance_time; погода — set_weather; " +
+      "перемещение партии — move_party; фракции — upsert_faction / adjust_standing.",
   );
 
   return sections.join("\n\n");

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { resolveCampaignForWrite } from "../lib/campaigns/access.ts";
 import { npcStore } from "../lib/campaigns/npc.ts";
 import { npcStatusSchema, StoreError } from "../lib/campaigns/types.ts";
+import { upsertWorldChange } from "../lib/campaigns/world-state.ts";
 
 const relationshipSchema = z.object({
   attitude: z
@@ -47,7 +48,23 @@ export default defineTool({
     try {
       const campaign = resolveCampaignForWrite(ctx.session.auth.current, input.campaignSlug);
       const { campaignSlug: _slug, ...npcInput } = input;
+
+      // C5: если NPC становится dead (и не был dead ранее), дублируем факт в
+      // состояние мира — чтобы бот последовательно помнил, кто погиб.
+      const previous = npcStore.getNpc(campaign.id, input.name);
+      const becomingDead = input.status === "dead" && previous?.status !== "dead";
+
       const npc = npcStore.upsertNpc(campaign.id, npcInput);
+
+      if (becomingDead) {
+        const day = campaign.currentDay ?? previous?.lastSeenDay;
+        upsertWorldChange(campaign.slug, {
+          category: "Погибшие",
+          text: `${npc.name}${npc.location ? ` (${npc.location})` : ""}${npc.role ? ` — ${npc.role}` : ""}`,
+          day,
+        });
+      }
+
       return {
         ok: true,
         npc: {

@@ -37,9 +37,15 @@ on Node 24. Tests use temp dirs (`test/helpers.ts`), need no `.env` or DB.
   MD fallback — then quests/threads also move to MD). The always-MD layer, in
   any store, lives in the campaign folder: transcripts (`history/days/`), day
   summaries + headlines, campaign summary, key events, NPC cards
-  (`agent/lib/campaigns/journal.ts`/`npc.ts`). Combat state snapshot
+  (`agent/lib/campaigns/journal.ts`/`npc.ts`); loot ledger (`history/ledger.md`,
+  `journal.ts`) and overwriteable world-state (`history/world-state.md`,
+  `world-state.ts`); location and faction cards (`locations/`, `factions/` —
+  `locations.ts`/`factions.ts`, same MD pattern as NPC). Combat state snapshot
   (`combat.md`) is also always-MD, written by `agent/hooks/combat-autosave.ts`
-  so an in-progress fight survives a session restart.
+  so an in-progress fight survives a session restart. In-game time/weather
+  (`timeOfDay`/`inGameDate`/`weather`) live on `Campaign` itself — stored both
+  in SQLite and MD frontmatter — so the engine can read them for mechanical
+  modifiers (night/fog/storm in `dnd5e.ts`).
 - `agent/lib/engine/dnd5e.ts` — the only place dice/check rules live; the LLM
   must quote tool results, never invent rolls.
 

@@ -11,7 +11,7 @@ import {
   type CombatOrder,
   type CombatantEntry,
 } from "../lib/engine/combat.ts";
-import { abilityModifier, proficiencyBonus, rollDice } from "../lib/engine/dnd5e.ts";
+import { abilityModifier, combineAdvantage, environmentModifiersForAttack, proficiencyBonus, rollDice } from "../lib/engine/dnd5e.ts";
 import { gameState, type Enemy, type GameState, type PlayerCharacter } from "../lib/memory.ts";
 
 /** Допустимые кости урона: до 3 костей, грани 4/6/8/10/12. */
@@ -26,6 +26,17 @@ function parseDamageDice(spec: string): { count: number; sides: number } {
     throw new Error(`Недопустимый урон "${spec}": максимум 3 кости, грани 4/6/8/10/12.`);
   }
   return { count, sides };
+}
+
+/** Эвристика дальнего оружия по названию: луки, арбалеты, пращи, дротики. */
+const RANGED_WEAPON_HINTS = [
+  "лук", "арбалет", "праща", "дротик", "bow", "crossbow", "sling", "dart", "blowgun",
+];
+
+function isRangedWeapon(weapon?: string): boolean {
+  if (!weapon) return false;
+  const w = weapon.toLowerCase();
+  return RANGED_WEAPON_HINTS.some((hint) => w.includes(hint));
 }
 
 function combatOf(state: GameState): CombatOrder {
@@ -337,7 +348,19 @@ export default defineTool({
     const modifier = abilityModifier(stats, attack_stat);
     const proficiency = proficiencyBonus(level);
 
-    const roll = rollDice(20, 1).total;
+    // Влияние окружения (C2): сильный ветер/шторм → помеха на дальние атаки.
+    const isRanged = isRangedWeapon(weapon);
+    const campaign = campaignSlugOf(state)
+      ? campaignStore.getCampaign(campaignSlugOf(state)!)
+      : undefined;
+    const env = environmentModifiersForAttack(
+      { timeOfDay: campaign?.timeOfDay, weather: campaign?.weather },
+      isRanged ? "ranged" : "melee",
+    );
+    const attackAdvantage = combineAdvantage(env.advantage);
+
+    const rollResult = rollDice(20, 1, Math.random, attackAdvantage);
+    const roll = rollResult.total;
     const isCrit = roll === 20;
     const isFumble = roll === 1;
     const totalBonus = modifier + proficiency + bonus;
@@ -347,6 +370,8 @@ export default defineTool({
     const { count, sides } = parseDamageDice(dice.spec);
     const damage = hit ? (isCrit ? 2 : 1) * rollDice(sides, count).total : 0;
 
+    const advMark = attackAdvantage === false ? " (помеха)" : attackAdvantage === true ? " (преимущество)" : "";
+    const envNote = env.reasons.length > 0 ? ` [${env.reasons.join("; ")}]` : "";
     let resultLine: string;
     let defeated = false;
     if (hit) {
@@ -356,10 +381,10 @@ export default defineTool({
         ? `${target.name} повержен!`
         : `У ${target.name} осталось ${remaining} HP.`;
       const critMark = isCrit ? " — КРИТ!" : "";
-      resultLine = `${attacker} атакует ${target.name}${dice.source !== "указано" ? ` (${dice.spec}, ${dice.source})` : ` (${dice.spec})`}: d20 = ${roll}${critMark} + ${totalBonus} против КД ${target.ac} → попадание, урон ${damage}. ${hpNote}`;
+      resultLine = `${attacker} атакует ${target.name}${dice.source !== "указано" ? ` (${dice.spec}, ${dice.source})` : ` (${dice.spec})`}${advMark}: d20 = ${roll}${critMark} + ${totalBonus} против КД ${target.ac} → попадание, урон ${damage}. ${hpNote}${envNote}`;
     } else {
       const fumbleMark = isFumble ? " (натуральная 1)" : "";
-      resultLine = `${attacker} атакует ${target.name}: d20 = ${roll} + ${totalBonus} против КД ${target.ac} → промах${fumbleMark}.`;
+      resultLine = `${attacker} атакует ${target.name}${advMark}: d20 = ${roll} + ${totalBonus} против КД ${target.ac} → промах${fumbleMark}.${envNote}`;
     }
 
     let nextEnemies = state.enemies;

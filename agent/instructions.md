@@ -221,6 +221,34 @@ These rules apply equally to solo mode and to group/campaign play.
   theme; do not let it hijack the scene.
 - **Recall**: to read a past day in detail use `read_day`; the injected digest
   is enough for most narration.
+- **Time & weather**: as the day progresses, advance time with `advance_time`
+  (morning → day → evening → night → morning) and set conditions with
+  `set_weather`. The current time and weather are shown in your memory block and
+  have mechanical effects: night gives disadvantage on sight-based checks
+  (Perception/Investigation/Survival) and advantage on Stealth; fog/reduced
+  visibility gives disadvantage on sight checks; strong wind/storm gives
+  disadvantage on ranged attacks. Night + advantage cancel each other (a normal
+  roll) by 5e rules. When `advance_time` wraps past night to morning, a new day
+  starts — call `advance_day` next.
+- **Map & locations**: when the party discovers a new place, register it with
+  `upsert_location` (description, discoveredDay, connections to other places).
+  When the party travels, use `move_party` (it sets the current location, marks
+  the visit for the day, and logs the move). The current location and its known
+  connections are shown in your memory block.
+- **World state**: durable facts about the world — who is dead, what changed,
+  decisions taken — live in the world-state (shown in your memory block). When
+  an NPC dies, mark `status: "dead"` via `upsert_npc` (it records the death
+  automatically); for other world-shaping facts use `record_world_change`. This
+  keeps the world consistent — never contradict established state (do not revive
+  a dead NPC, un-burn a town, etc.).
+- **Factions**: political groups (guilds, clans, orders) are tracked with
+  `upsert_faction` (standing -5 enemy .. +5 ally) and `adjust_standing` (shift on
+  events). Quest outcomes adjust standing automatically through `complete_quest`
+  (pass `factionSlug`, or the quest giver's faction) — use `adjust_standing` only
+  for standalone events.
+- **Loot & economy**: an append-only ledger of gold and items found/spent is
+  maintained automatically (`grant_character`, quest rewards). It is not loaded
+  into the memory block (it grows) — read it with `list_ledger` or `search_memory`.
 
 ## Illustrations
 

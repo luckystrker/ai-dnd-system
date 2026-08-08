@@ -21,6 +21,9 @@ export interface BoundChat {
   messageThreadId?: number;
 }
 
+/** Время суток в игре. Влияет на механику: ночь — помехи на зрительные проверки. */
+export type TimeOfDay = "morning" | "day" | "evening" | "night";
+
 export interface Campaign {
   id: string;
   title: string;
@@ -36,6 +39,12 @@ export interface Campaign {
   boundChat?: BoundChat;
   /** Текущий игровой день (1 после старта кампании). */
   currentDay?: number;
+  /** Время суток (C2). Сбрасывается в morning при advance_day. */
+  timeOfDay?: TimeOfDay;
+  /** Дата в календаре мира — свободная строка (напр. «3 день Месяца Туманов»). */
+  inGameDate?: string;
+  /** Погода/окружение — свободная строка (напр. «ясно», «туман», «шторм»). Влияет на механику. */
+  weather?: string;
   members: CampaignMember[];
   createdAt: string;
 }
@@ -181,6 +190,7 @@ export interface OpenThread {
 export const memberRoleSchema = z.enum(["dm", "player"]);
 export const campaignLengthSchema = z.enum(["short", "medium", "long"]);
 export const npcStatusSchema = z.enum(["alive", "dead", "unknown"]);
+export const timeOfDaySchema = z.enum(["morning", "day", "evening", "night"]);
 
 /** Входные данные для создания квеста. */
 export interface NewQuestInput {
@@ -229,4 +239,82 @@ export class StoreError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+// --- C1. Локации / карта ---
+
+/** Связь между локациями: куда ведёт, через что, когда обнаружена. */
+export interface LocationConnection {
+  to: string;
+  via?: string;
+  discoveredDay?: number;
+}
+
+export interface Location {
+  id: string;
+  campaignId: string;
+  name: string;
+  slug: string;
+  description?: string;
+  connections: LocationConnection[];
+  /** День, когда локация впервые обнаружена. */
+  discoveredDay?: number;
+  /** Дни, когда партия посещала локацию. */
+  visitedDays: number[];
+  /** true, если партия находится там сейчас (одна на кампанию). */
+  current?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** Входные данные для создания/обновления локации (partial-merge). */
+export interface UpsertLocationInput {
+  name?: string;
+  description?: string;
+  connections?: LocationConnection[];
+  discoveredDay?: number;
+  current?: boolean;
+}
+
+// --- C4. Фракции ---
+
+export interface Faction {
+  id: string;
+  campaignId: string;
+  name: string;
+  slug: string;
+  description?: string;
+  /** Репутация партии у фракции: шкала -5 (враг) .. +5 (союзник). */
+  standing: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** Входные данные для создания/обновления фракции (partial-merge). */
+export interface UpsertFactionInput {
+  name?: string;
+  description?: string;
+  standing?: number;
+}
+
+// --- C3. Лут / журнал экономики ---
+
+export type LedgerType = "found" | "spent";
+
+export interface LedgerRow {
+  day: number;
+  type: LedgerType;
+  /** Что найдено/потрачено: предмет или сумма золота («50 золотых»). */
+  itemOrGold: string;
+  /** Кто нашёл/потратил (имя персонажа). */
+  by?: string;
+  note?: string;
+}
+
+// --- C5. Состояние мира ---
+
+export interface WorldChange {
+  category: string;
+  text: string;
+  day?: number;
 }

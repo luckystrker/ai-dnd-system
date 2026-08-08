@@ -510,3 +510,105 @@ export function skillCheck(
     naturalFailure,
   };
 }
+
+// --- Окружение (C2): механические влияния времени суток и погоды ---
+
+/** Контекст окружения: фрагмент Campaign, влияющий на броски. */
+export interface Environment {
+  timeOfDay?: string;
+  weather?: string;
+}
+
+/** Модификаторы окружения для конкретного броска. */
+export interface EnvironmentModifiers {
+  /** Результирующее преимущество/помеха от окружения (null — нет влияния). */
+  advantage: boolean | null;
+  /** Человекочитаемые причины (для показа игроку). */
+  reasons: string[];
+}
+
+/** Навыки, опирающиеся на зрение: ночь и плохая видимость дают по ним помеху. */
+const VISUAL_SKILLS = new Set(["perception", "investigation", "survival"]);
+
+/** Нормализует произвольное название навыка в английский ключ (perception, stealth ...). */
+function normalizeSkillKey(skill: string): string {
+  const name = skill.trim().toLowerCase();
+  const paren = /\(([^)]+)\)/.exec(name);
+  if (paren) {
+    const inner = paren[1].trim().replace(/[\s-]+/g, "_");
+    if (SKILL_ABILITY_MAP[inner]) return inner;
+  }
+  const underscored = name.replace(/[\s-]+/g, "_");
+  if (SKILL_ABILITY_MAP[underscored]) return underscored;
+  return SKILL_RU_ALIASES[name] ?? SKILL_RU_ALIASES[underscored] ?? underscored;
+}
+
+/** Проверяет, содержит ли строка погоды любой из шаблонов (нижний регистр). */
+function weatherMatches(weather: string, patterns: string[]): boolean {
+  const w = weather.toLowerCase();
+  return patterns.some((pattern) => w.includes(pattern));
+}
+
+/** Плохая видимость: туман, дым, метель — мешают зрению. */
+const REDUCED_VISIBILITY = [
+  "туман", "мгла", "дым", "пелена", "метель", "fog", "mist", "haze", "smoke", "blizzard",
+];
+/** Сильный ветер/шторм: мешают дальнему бою. */
+const STRONG_WIND = [
+  "ветер", "ветр", "шторм", "буря", "ураган", "storm", "wind", "gale", "hurricane",
+];
+
+/**
+ * Правило 5e: если есть хотя бы один источник преимущества и хотя бы один помехи —
+ * они взаимно отменяются (обычный бросок). Иначе берётся единственное влияние.
+ * undefined/null слои игнорируются.
+ */
+export function combineAdvantage(...layers: (boolean | null | undefined)[]): boolean | null {
+  const clean = layers.filter((value): value is boolean => typeof value === "boolean");
+  if (clean.length === 0) return null;
+  const hasAdvantage = clean.some((value) => value === true);
+  const hasDisadvantage = clean.some((value) => value === false);
+  if (hasAdvantage && hasDisadvantage) return null;
+  return hasAdvantage ? true : hasDisadvantage ? false : null;
+}
+
+/**
+ * Влияние окружения на проверку навыка. Ночью — помеха на зрительные проверки
+ * (Perception/Investigation/Survival) и преимущество на скрытность. Плохая
+ * видимость (туман и т.п.) — помеха на зрительные проверки.
+ */
+export function environmentModifiersForCheck(env: Environment, skill: string): EnvironmentModifiers {
+  const result: EnvironmentModifiers = { advantage: null, reasons: [] };
+  const key = normalizeSkillKey(skill);
+  const isVisual = VISUAL_SKILLS.has(key);
+
+  if (env.timeOfDay === "night") {
+    if (isVisual) {
+      result.advantage = combineAdvantage(result.advantage, false);
+      result.reasons.push("ночь: помеха на зрительную проверку");
+    }
+    if (key === "stealth") {
+      result.advantage = combineAdvantage(result.advantage, true);
+      result.reasons.push("ночь: преимущество на скрытность");
+    }
+  }
+
+  if (isVisual && env.weather && weatherMatches(env.weather, REDUCED_VISIBILITY)) {
+    result.advantage = combineAdvantage(result.advantage, false);
+    result.reasons.push(`${env.weather}: плохая видимость, помеха на зрительную проверку`);
+  }
+
+  return result;
+}
+
+/**
+ * Влияние окружения на атаку. Сильный ветер/шторм — помеха на дальние атаки.
+ */
+export function environmentModifiersForAttack(env: Environment, attackType: "melee" | "ranged"): EnvironmentModifiers {
+  const result: EnvironmentModifiers = { advantage: null, reasons: [] };
+  if (attackType === "ranged" && env.weather && weatherMatches(env.weather, STRONG_WIND)) {
+    result.advantage = false;
+    result.reasons.push(`${env.weather}: сильный ветер, помеха на дальнюю атаку`);
+  }
+  return result;
+}

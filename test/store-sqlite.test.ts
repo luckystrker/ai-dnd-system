@@ -66,6 +66,40 @@ describe("SqliteCampaignStore", () => {
     assert.equal(store.advanceDay(campaign.id, "u-dm").currentDay, 2);
   });
 
+  test("setEnvironment writes time/weather/date and round-trips", () => {
+    const campaign = createCampaign("Окружение");
+    const updated = store.setEnvironment(campaign.id, {
+      timeOfDay: "evening",
+      weather: "дождь",
+      inGameDate: "7 Месяца Туманов",
+    });
+    assert.equal(updated.timeOfDay, "evening");
+    assert.equal(updated.weather, "дождь");
+    assert.equal(updated.inGameDate, "7 Месяца Туманов");
+    const reloaded = store.getCampaign(campaign.id)!;
+    assert.equal(reloaded.timeOfDay, "evening");
+    assert.equal(reloaded.weather, "дождь");
+    assert.equal(reloaded.inGameDate, "7 Месяца Туманов");
+  });
+
+  test("advanceDay resets timeOfDay to morning", () => {
+    const campaign = createCampaign("Смена суток");
+    store.bindAndActivate(campaign.id, "u-dm", { chatId: "-2" });
+    store.setEnvironment(campaign.id, { timeOfDay: "night" });
+    assert.equal(store.getCampaign(campaign.id)?.timeOfDay, "night");
+    const advanced = store.advanceDay(campaign.id, "u-dm");
+    assert.equal(advanced.currentDay, 2);
+    assert.equal(advanced.timeOfDay, "morning");
+  });
+
+  test("environment columns survive migration on a fresh DB", () => {
+    // Свежая БД создаётся с колонками C2 из CREATE TABLE; проверяем, что
+    // migrate() (добавляющая колонки для старых БД) не падает и поля читаются.
+    const campaign = createCampaign("Миграция");
+    store.setEnvironment(campaign.id, { weather: "метель" });
+    assert.equal(store.getCampaign(campaign.id)?.weather, "метель");
+  });
+
   test("addMember and autoRegister behave like the markdown store", () => {
     const campaign = createCampaign("Участники");
     store.addMember(campaign.id, "u-dm", { userId: "u1" });

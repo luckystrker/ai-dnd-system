@@ -2,9 +2,10 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 
 import { resolveCampaignForWrite } from "../lib/campaigns/access.ts";
-import { appendKeyEvent, appendTranscriptEntry } from "../lib/campaigns/journal.ts";
+import { factionStore } from "../lib/campaigns/factions.ts";
+import { appendKeyEvent, appendLedgerRow, appendTranscriptEntry } from "../lib/campaigns/journal.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
-import { StoreError, type CharacterSheet, type Quest } from "../lib/campaigns/types.ts";
+import { StoreError, type CharacterSheet, type Quest, type QuestDifficulty } from "../lib/campaigns/types.ts";
 import {
   levelForXp,
   middleOf,
@@ -32,6 +33,13 @@ function partyLevel(characters: CharacterSheet[]): number {
   return Math.max(1, Math.round(sum / characters.length));
 }
 
+/** Дельта репутации фракции за итог квеста по сложности. */
+function factionStandingDelta(difficulty: QuestDifficulty, result: string): number {
+  if (result === "completed") return difficulty === "hard" ? 2 : 1;
+  if (result === "failed" || result === "abandoned") return difficulty === "hard" ? -2 : -1;
+  return 0;
+}
+
 export default defineTool({
   description:
     "Complete (or fail/abandon) a quest: closes the quest, grants the rewards to the whole party " +
@@ -47,6 +55,12 @@ export default defineTool({
     result: z
       .enum(["completed", "failed", "abandoned"])
       .describe("Итог квеста: completed — с наградами; failed/abandoned — без."),
+    factionSlug: z
+      .string()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Фракция-квестодатель: итог квеста скорректирует её репутацию (completed → рост, failed/abandoned → падение)."),
     rewardPlan: z
       .object({
         xp: z.number().int().min(0).max(10_000_000).optional().describe("XP каждому участнику (перекрывает план)."),
@@ -65,6 +79,7 @@ export default defineTool({
     try {
       const campaign = resolveCampaignForWrite(ctx.session.auth.current, input.campaignSlug);
       const quest = findQuest(campaign.id, input.quest);
+      const factionSlug = input.factionSlug ?? quest.giverNpcSlug;
       if (quest.status === "completed") {
         throw new StoreError(
           `Квест «${quest.title}» уже завершён — награды выданы, повторное завершение невозможно.`,
@@ -104,9 +119,34 @@ export default defineTool({
             newLevel: nextLevel > (sheet.level ?? 1) ? nextLevel : null,
           });
         }
+
+        // C3: запись в журнал экономики за квестовую награду.
+        const rewardParts: string[] = [];
+        if (totalGold > 0) rewardParts.push(`${totalGold} золотых`);
+        if (rewards.items.length > 0) rewardParts.push(rewards.items.join(", "));
+        if (rewardParts.length > 0) {
+          appendLedgerRow(campaign.slug, {
+            day,
+            type: "found",
+            itemOrGold: rewardParts.join(", "),
+            note: `награда за квест «${quest.title}»`,
+          }, `quest:${quest.id}:reward:${day}`);
+        }
       }
 
       campaignStore.updateQuest(campaign.id, quest.id, { status: input.result });
+
+      // C4: корректировка репутации фракции-квестодателя (если она заведена).
+      const factionDelta = factionSlug ? factionStandingDelta(quest.difficulty, input.result) : 0;
+      let factionChange: { faction: string; standing: number; delta: number } | undefined;
+      if (factionSlug && factionDelta !== 0) {
+        try {
+          const faction = factionStore.adjustStanding(campaign.id, factionSlug, factionDelta);
+          factionChange = { faction: faction.name, standing: faction.standing, delta: factionDelta };
+        } catch {
+          // Фракция не заведена — корректировку пропускаем (это не ошибка закрытия квеста).
+        }
+      }
 
       const label = input.result === "completed" ? "завершён" : input.result === "failed" ? "провален" : "брошен";
       appendKeyEvent(
@@ -135,6 +175,7 @@ export default defineTool({
         granted,
         totalGold,
         levelUps,
+        factionChange: factionChange ?? null,
         note:
           input.result === "completed"
             ? granted.length === 0

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { characterCard } from "../lib/campaigns/card.ts";
 import { resolveCampaignForWrite } from "../lib/campaigns/access.ts";
+import { appendLedgerRow } from "../lib/campaigns/journal.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
 import { StoreError } from "../lib/campaigns/types.ts";
 
@@ -46,6 +47,26 @@ export default defineTool({
       const campaign = resolveCampaignForWrite(ctx.session.auth.current, input.campaignSlug);
       const { campaignSlug: _slug, character, ...patch } = input;
       const sheet = campaignStore.grantCharacter(campaign.id, character, patch);
+
+      // C3: детерминированная запись в журнал экономики (без отдельного вызова).
+      const day = campaign.currentDay ?? 1;
+      if (patch.gold !== undefined && patch.gold > 0) {
+        appendLedgerRow(campaign.slug, {
+          day,
+          type: "found",
+          itemOrGold: `${patch.gold} золотых`,
+          by: character,
+        }, `grant:${character}:gold:${day}:${patch.gold}`);
+      }
+      if (patch.items && patch.items.length > 0) {
+        appendLedgerRow(campaign.slug, {
+          day,
+          type: "found",
+          itemOrGold: patch.items.join(", "),
+          by: character,
+        }, `grant:${character}:items:${day}:${patch.items.length}`);
+      }
+
       return {
         ok: true,
         character: characterCard(sheet),

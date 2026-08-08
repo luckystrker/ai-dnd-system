@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterAbility, type CharacterGrantPatch, type CharacterSheet, type CharacterStatePatch, type MemberRole, type NewQuestInput, type NewThreadInput, type OpenThread, type Quest, type QuestDifficulty, type QuestPatch, type QuestRewardPlan, type QuestStatus, type ThreadKind } from "./types.ts";
+import { MAX_PARTY, StoreError, type BoundChat, type Campaign, type CampaignLength, type CampaignMember, type CharacterAbility, type CharacterGrantPatch, type CharacterSheet, type CharacterStatePatch, type MemberRole, type NewQuestInput, type NewThreadInput, type OpenThread, type Quest, type QuestDifficulty, type QuestPatch, type QuestRewardPlan, type QuestStatus, type ThreadKind, type TimeOfDay } from "./types.ts";
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
 import { SqliteCampaignStore } from "./store-sqlite.ts";
 
@@ -57,6 +57,13 @@ export interface NewOwnerInput {
   username?: string;
 }
 
+/** Патч игрового времени/окружения (C2): все поля опциональны. */
+export interface EnvironmentPatch {
+  timeOfDay?: TimeOfDay;
+  inGameDate?: string;
+  weather?: string;
+}
+
 /**
  * Абстракция хранилища кампаний. Сейчас реализована на MD-файлах
  * (MarkdownCampaignStore); позже заменяется на SQLite/Postgres
@@ -70,6 +77,8 @@ export interface CampaignStore {
   findByBoundChat(chatId: string, messageThreadId?: number, options?: { anyStatus?: boolean }): Campaign | undefined;
   bindAndActivate(campaignId: string, actorUserId: string, chat: BoundChat): Campaign;
   advanceDay(campaignId: string, actorUserId: string): Campaign;
+  /** Обновляет игровое время/окружение (C2). */
+  setEnvironment(campaignId: string, patch: EnvironmentPatch): Campaign;
   addMember(campaignId: string, inviterUserId: string, member: NewMemberInput): Campaign;
   autoRegister(campaignId: string, user: NewMemberInput): Campaign;
   saveCharacter(campaignId: string, actorUserId: string, input: NewCharacterInput): CharacterSheet;
@@ -219,6 +228,16 @@ export class MarkdownCampaignStore implements CampaignStore {
       throw new StoreError("Игровые дни можно двигать только в активной кампании.", "conflict");
     }
     campaign.currentDay = (campaign.currentDay ?? 1) + 1;
+    campaign.timeOfDay = "morning";
+    this.writeCampaign(campaign, this.readDescription(campaign));
+    return campaign;
+  }
+
+  setEnvironment(campaignId: string, patch: EnvironmentPatch): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    if (patch.timeOfDay !== undefined) campaign.timeOfDay = patch.timeOfDay;
+    if (patch.inGameDate !== undefined) campaign.inGameDate = patch.inGameDate;
+    if (patch.weather !== undefined) campaign.weather = patch.weather;
     this.writeCampaign(campaign, this.readDescription(campaign));
     return campaign;
   }
@@ -654,9 +673,19 @@ function campaignToFrontmatter(campaign: Campaign): Record<string, unknown> {
     openingScene: campaign.openingScene,
     boundChat: campaign.boundChat,
     currentDay: campaign.currentDay,
+    timeOfDay: campaign.timeOfDay,
+    inGameDate: campaign.inGameDate,
+    weather: campaign.weather,
     members: campaign.members,
     createdAt: campaign.createdAt,
   };
+}
+
+const TIME_OF_DAY_VALUES: TimeOfDay[] = ["morning", "day", "evening", "night"];
+function parseTimeOfDay(value: unknown): TimeOfDay | undefined {
+  return typeof value === "string" && (TIME_OF_DAY_VALUES as string[]).includes(value)
+    ? (value as TimeOfDay)
+    : undefined;
 }
 
 function asString(value: unknown): string {
@@ -697,6 +726,9 @@ function docToCampaign(doc: string): Campaign {
         }
       : undefined,
     currentDay: typeof data.currentDay === "number" ? data.currentDay : undefined,
+    timeOfDay: parseTimeOfDay(data.timeOfDay),
+    inGameDate: data.inGameDate ? asString(data.inGameDate) : undefined,
+    weather: data.weather ? asString(data.weather) : undefined,
     members,
     createdAt: asString(data.createdAt),
   };

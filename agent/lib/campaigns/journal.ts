@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
 import { assertCampaignSlug, campaignDataRoot } from "./store.ts";
+import type { LedgerRow, LedgerType } from "./types.ts";
 
 /** Одна запись транскрипта. */
 export interface TranscriptEntry {
@@ -246,4 +247,63 @@ export function buildDayDigest(entries: readonly string[], maxSentences = 5): st
     .filter((text) => text.length > 0);
   if (cleaned.length === 0) return "";
   return `${AUTO_DIGEST_MARK} ${cleaned.join(" ")}`;
+}
+
+// --- C3. Журнал лута / экономики ---
+
+const LEDGER_VERB: Record<LedgerType, string> = {
+  found: "найдено",
+  spent: "потрачено",
+};
+
+/**
+ * Добавляет запись в журнал экономики (history/ledger.md, append-only).
+ * Дедуп по eventId-маркеру (идиома из appendKeyEvent). Записи пишутся
+ * детерминированно из тулов grant_character / complete_quest — без отдельного
+ * LLM-вызова.
+ */
+export function appendLedgerRow(campaignSlug: string, row: LedgerRow, eventId?: string): void {
+  const dir = historyDir(campaignSlug);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "ledger.md");
+  const marker = eventId ? `evt:${eventId}` : undefined;
+  if (marker && existsSync(path) && readFileSync(path, "utf8").includes(marker)) return;
+  const item = row.itemOrGold.replace(/\s*\n\s*/g, " ").trim();
+  if (!item) return;
+  const verb = LEDGER_VERB[row.type] ?? row.type;
+  const by = row.by ? ` (${row.by})` : "";
+  const note = row.note ? ` — ${row.note.replace(/\s*\n\s*/g, " ").trim()}` : "";
+  let line = `- [День ${row.day}] ${verb}: ${item}${by}${note}`;
+  if (marker) line += ` <!-- ${marker} -->`;
+  appendFileSync(path, `${line}\n`, "utf8");
+}
+
+/** Читает журнал экономики (сырой текст). */
+export function readLedgerRaw(campaignSlug: string): string {
+  const path = join(historyDir(campaignSlug), "ledger.md");
+  if (!existsSync(path)) return "";
+  return readFileSync(path, "utf8").trim();
+}
+
+/** Считывает журнал экономики, опционально с фильтром по дню/типу; последние maxLines записей. */
+export function readLedger(
+  campaignSlug: string,
+  filter?: { day?: number; type?: LedgerType },
+  maxLines = Number.POSITIVE_INFINITY,
+): string[] {
+  const raw = readLedgerRaw(campaignSlug);
+  if (!raw) return [];
+  const lines = raw.split("\n").filter((line) => line.startsWith("- "));
+  const filtered = lines.filter((line) => {
+    if (filter?.day !== undefined) {
+      const match = /\[День (\d+)\]/.exec(line);
+      if (!match || Number(match[1]) !== filter.day) return false;
+    }
+    if (filter?.type !== undefined) {
+      const verb = LEDGER_VERB[filter.type];
+      if (!line.includes(`${verb}:`)) return false;
+    }
+    return true;
+  });
+  return filtered.slice(-Math.max(0, Math.floor(maxLines)));
 }

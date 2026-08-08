@@ -171,6 +171,32 @@ describe("MarkdownCampaignStore", () => {
     );
   });
 
+  test("setEnvironment writes time/weather/date and round-trips through frontmatter", () => {
+    const campaign = createCampaign("Окружение MD");
+    const updated = store.setEnvironment(campaign.id, {
+      timeOfDay: "night",
+      weather: "туман",
+      inGameDate: "3 день Месяца Туманов",
+    });
+    assert.equal(updated.timeOfDay, "night");
+    assert.equal(updated.weather, "туман");
+    assert.equal(updated.inGameDate, "3 день Месяца Туманов");
+    const reloaded = store.getCampaign(campaign.id)!;
+    assert.equal(reloaded.timeOfDay, "night");
+    assert.equal(reloaded.weather, "туман");
+    assert.equal(reloaded.inGameDate, "3 день Месяца Туманов");
+  });
+
+  test("advanceDay resets timeOfDay to morning", () => {
+    const campaign = createCampaign("Смена суток MD");
+    store.bindAndActivate(campaign.id, "u-dm", chat());
+    store.setEnvironment(campaign.id, { timeOfDay: "night" });
+    assert.equal(store.getCampaign(campaign.id)?.timeOfDay, "night");
+    const advanced = store.advanceDay(campaign.id, "u-dm");
+    assert.equal(advanced.currentDay, 2);
+    assert.equal(advanced.timeOfDay, "morning");
+  });
+
   test("addMember adds players and rejects duplicates", () => {
     const campaign = createCampaign("Участники");
     const updated = store.addMember(campaign.id, "u-dm", { userId: "u1", name: "Игрок" });

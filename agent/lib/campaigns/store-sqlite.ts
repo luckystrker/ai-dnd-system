@@ -52,9 +52,11 @@ import {
   type QuestRewardPlan,
   type QuestStatus,
   type ThreadKind,
+  type TimeOfDay,
 } from "./types.ts";
 import type {
   CampaignStore,
+  EnvironmentPatch,
   NewCampaignInput,
   NewCharacterInput,
   NewMemberInput,
@@ -77,6 +79,9 @@ interface CampaignRow {
   bound_chat_id: string | null;
   bound_thread_id: number | null;
   current_day: number | null;
+  time_of_day: string | null;
+  in_game_date: string | null;
+  weather: string | null;
   created_at: string;
 }
 
@@ -158,6 +163,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   bound_chat_id TEXT,
   bound_thread_id INTEGER,
   current_day INTEGER,
+  time_of_day TEXT,
+  in_game_date TEXT,
+  weather TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_bound_chat
@@ -295,6 +303,12 @@ function parseThreadKind(value: string): ThreadKind {
   return kinds.includes(value as ThreadKind) ? (value as ThreadKind) : "unresolved";
 }
 
+function parseTimeOfDay(value: string | null): TimeOfDay | undefined {
+  if (!value) return undefined;
+  const times: TimeOfDay[] = ["morning", "day", "evening", "night"];
+  return (times as string[]).includes(value) ? (value as TimeOfDay) : undefined;
+}
+
 function parseRewardPlan(value: string): QuestRewardPlan | undefined {
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
@@ -323,9 +337,20 @@ export class SqliteCampaignStore implements CampaignStore {
 
   /** Лёгкие миграции для БД, созданных до добавления новых колонок. */
   private migrate(): void {
-    const columns = this.db.prepare("PRAGMA table_info(characters)").all() as { name: string }[];
-    if (!columns.some((column) => column.name === "abilities")) {
+    const charColumns = this.db.prepare("PRAGMA table_info(characters)").all() as { name: string }[];
+    if (!charColumns.some((column) => column.name === "abilities")) {
       this.db.exec("ALTER TABLE characters ADD COLUMN abilities TEXT");
+    }
+    // C2: поля игрового времени/окружения на кампании.
+    const campaignColumns = this.db.prepare("PRAGMA table_info(campaigns)").all() as { name: string }[];
+    if (!campaignColumns.some((column) => column.name === "time_of_day")) {
+      this.db.exec("ALTER TABLE campaigns ADD COLUMN time_of_day TEXT");
+    }
+    if (!campaignColumns.some((column) => column.name === "in_game_date")) {
+      this.db.exec("ALTER TABLE campaigns ADD COLUMN in_game_date TEXT");
+    }
+    if (!campaignColumns.some((column) => column.name === "weather")) {
+      this.db.exec("ALTER TABLE campaigns ADD COLUMN weather TEXT");
     }
   }
 
@@ -409,9 +434,33 @@ export class SqliteCampaignStore implements CampaignStore {
     if (campaign.status !== "active") {
       throw new StoreError("Игровые дни можно двигать только в активной кампании.", "conflict");
     }
+    // Новый день начинается утром.
     this.db
-      .prepare("UPDATE campaigns SET current_day = COALESCE(current_day, 1) + 1 WHERE id = ?")
+      .prepare("UPDATE campaigns SET current_day = COALESCE(current_day, 1) + 1, time_of_day = 'morning' WHERE id = ?")
       .run(campaign.id);
+    return this.mustGetCampaign(campaignId);
+  }
+
+  setEnvironment(campaignId: string, patch: EnvironmentPatch): Campaign {
+    const campaign = this.mustGetCampaign(campaignId);
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    if (patch.timeOfDay !== undefined) {
+      sets.push("time_of_day = ?");
+      values.push(patch.timeOfDay);
+    }
+    if (patch.inGameDate !== undefined) {
+      sets.push("in_game_date = ?");
+      values.push(patch.inGameDate || null);
+    }
+    if (patch.weather !== undefined) {
+      sets.push("weather = ?");
+      values.push(patch.weather || null);
+    }
+    if (sets.length > 0) {
+      values.push(campaign.id);
+      this.db.prepare(`UPDATE campaigns SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
     return this.mustGetCampaign(campaignId);
   }
 
@@ -740,8 +789,9 @@ export class SqliteCampaignStore implements CampaignStore {
       .prepare(
         `INSERT INTO campaigns (
            id, slug, title, status, owner_user_id, length, setting, theme, goal, tone,
-           opening_scene, description, bound_chat_id, bound_thread_id, current_day, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           opening_scene, description, bound_chat_id, bound_thread_id, current_day,
+           time_of_day, in_game_date, weather, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            slug = excluded.slug, title = excluded.title, status = excluded.status,
            owner_user_id = excluded.owner_user_id, length = excluded.length,
@@ -749,7 +799,8 @@ export class SqliteCampaignStore implements CampaignStore {
            tone = excluded.tone, opening_scene = excluded.opening_scene,
            description = excluded.description, bound_chat_id = excluded.bound_chat_id,
            bound_thread_id = excluded.bound_thread_id, current_day = excluded.current_day,
-           created_at = excluded.created_at`,
+           time_of_day = excluded.time_of_day, in_game_date = excluded.in_game_date,
+           weather = excluded.weather, created_at = excluded.created_at`,
       )
       .run(
         campaign.id,
@@ -767,6 +818,9 @@ export class SqliteCampaignStore implements CampaignStore {
         campaign.boundChat?.chatId ?? null,
         campaign.boundChat?.messageThreadId ?? null,
         campaign.currentDay ?? null,
+        campaign.timeOfDay ?? null,
+        campaign.inGameDate ?? null,
+        campaign.weather ?? null,
         campaign.createdAt,
       );
     this.db.prepare("DELETE FROM campaign_members WHERE campaign_id = ?").run(campaign.id);
@@ -833,6 +887,9 @@ export class SqliteCampaignStore implements CampaignStore {
         ? { chatId: row.bound_chat_id, messageThreadId: row.bound_thread_id ?? undefined }
         : undefined,
       currentDay: row.current_day ?? undefined,
+      timeOfDay: parseTimeOfDay(row.time_of_day),
+      inGameDate: row.in_game_date ?? undefined,
+      weather: row.weather ?? undefined,
       members: memberRows.map((member) => ({
         userId: member.user_id,
         name: member.name ?? undefined,
@@ -984,8 +1041,9 @@ export class SqliteCampaignStore implements CampaignStore {
       .prepare(
         `INSERT INTO campaigns (
            id, slug, title, status, owner_user_id, length, setting, theme, goal, tone,
-           opening_scene, description, bound_chat_id, bound_thread_id, current_day, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           opening_scene, description, bound_chat_id, bound_thread_id, current_day,
+           time_of_day, in_game_date, weather, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         campaign.id,
@@ -1003,6 +1061,9 @@ export class SqliteCampaignStore implements CampaignStore {
         campaign.boundChat?.chatId ?? null,
         campaign.boundChat?.messageThreadId ?? null,
         campaign.currentDay ?? null,
+        campaign.timeOfDay ?? null,
+        campaign.inGameDate ?? null,
+        campaign.weather ?? null,
         campaign.createdAt,
       );
     for (const member of campaign.members) {
