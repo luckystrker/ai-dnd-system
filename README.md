@@ -128,6 +128,84 @@ Disable`, либо добавьте бота администратором гр
 mode Telegram доставляет боту только команды, @упоминания и реплаи на его
 сообщения — запись диалогов работать не будет.
 
+## Деплой на VPS
+
+Стек: bare metal + systemd (supervisor) + Caddy (reverse proxy с авто-TLS).
+Скрипты и конфиги лежат в `deploy/`, подробный ops-референс — в
+[`deploy/README.md`](deploy/README.md).
+
+### Пререквизиты
+
+- VPS на Ubuntu/Debian (x86_64/arm64), порты 80 и 443 открыты.
+- Домен с A-записью, указывающей на IP сервера (нужен для TLS-сертификата).
+- Токен бота Telegram, LLM API-ключ (`LLM_*`), секрет webhook'а.
+
+### 1. Первичная установка
+
+```bash
+ssh root@your-vps
+git clone https://github.com/luckystrker/ai-dnd-system.git /tmp/repo
+cp -r /tmp/repo/deploy /tmp/deploy-bundle
+# либо, если репо уже на сервере — просто:
+cd /opt/ai-dnd-system   # ещё не существует — setup.sh создаст
+sudo bash deploy/setup.sh
+```
+
+`setup.sh` ставит Node 24 и Caddy, создаёт пользователя `ai-dnd`, клонирует
+репо в `/opt/ai-dnd-system`, собирает билд и включает сервисы в автозагрузку.
+
+### 2. Конфигурация
+
+```bash
+sudo -u ai-dnd cp /opt/ai-dnd-system/.env.example /opt/ai-dnd-system/.env
+sudo -u ai-dnd nano /opt/ai-dnd-system/.env
+# впишите: LLM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME,
+#          TELEGRAM_WEBHOOK_SECRET_TOKEN
+
+sudo nano /etc/caddy/Caddyfile   # замените bot.example.com на ваш домен
+```
+
+### 3. Запуск и регистрация webhook
+
+```bash
+sudo systemctl start caddy      # получает TLS-сертификат автоматически
+sudo systemctl start ai-dnd
+curl -s http://127.0.0.1:3000/eve/v1/health    # должно вернуть {"ok":true,...}
+
+# Регистрируем публичный webhook (подставьте домен и секрет из .env):
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://ВАШ-ДОМЕН/eve/v1/telegram",
+       "secret_token":"'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
+       "allowed_updates":["message","callback_query"]}'
+```
+
+### 4. Обновления и бэкапы
+
+Обновить бота одной командой (на сервере, из репо):
+
+```bash
+cd /opt/ai-dnd-system && ./deploy.sh
+#                    # git pull → npm ci → build → restart + health-check
+./deploy.sh --skip-backup    # пропустить преддеплойный бэкап
+```
+
+Ночные бэкапы `data/` (SQLite `.backup` + архив кампаний, ротация 14 копий):
+
+```bash
+sudo crontab -e
+# добавить: 0 3 * * * /opt/ai-dnd-system/deploy/backup.sh
+```
+
+### Эксплуатация
+
+```bash
+journalctl -u ai-dnd -f                  # логи в реальном времени
+systemctl status ai-dnd                  # статус процесса
+curl -s http://127.0.0.1:3000/eve/v1/health   # проверка живости
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"  # диагностика Telegram
+```
+
 ## Проверка
 
 ```bash

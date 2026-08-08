@@ -1,0 +1,53 @@
+# systemd-юнит для TTRPG-бота (eve, Nitro node-server).
+# Установка: см. deploy/setup.sh (символическая ссылка в /etc/systemd/system/).
+#
+# Управление:
+#   sudo systemctl start ai-dnd
+#   sudo systemctl restart ai-dnd
+#   sudo systemctl status ai-dnd
+#   journalctl -u ai-dnd -f         # логи в реальном времени
+
+[Unit]
+Description=AI D&D Telegram Bot (eve agent)
+Documentation=https://github.com/luckystrker/ai-dnd-system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-dnd
+Group=ai-dnd
+WorkingDirectory=/opt/ai-dnd-system
+
+# ВАЖНО: eve start НЕ читает .env автоматически. Переменные инжектируем отсюда.
+# .env должен содержать LLM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME,
+# TELEGRAM_WEBHOOK_SECRET_TOKEN и (опционально) CAMPAIGN_*, RATE_LIMIT_*.
+EnvironmentFile=/opt/ai-dnd-system/.env
+
+# eve start → node .output/server/index.mjs (порт из $PORT/$NITRO_PORT, по умолч. 3000).
+ExecStart=/usr/bin/npm start
+
+# Корректный drain по SIGTERM (eve ставит обработчик → закрывает сокет).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5s
+
+# Безопасность: ограничиваем права. better-sqlite3 нужен доступ к data/.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/ai-dnd-system/data /opt/ai-dnd-system/.eve
+
+# Ограничения ресурсов (можно убрать при необходимости).
+MemoryMax=1G
+
+# Логи идут в journald (stdout/stderr перехватываются автоматически).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-dnd
+
+[Install]
+WantedBy=multi-user.target

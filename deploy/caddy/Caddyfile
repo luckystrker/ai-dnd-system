@@ -1,0 +1,25 @@
+# Caddyfile для TTRPG-бота (eve).
+# Caddy сам получает и продлевает TLS-сертификаты Let's Encrypt, делает
+# редирект HTTP→HTTPS и проксирует трафик на локальный eve-сервер (порт 3000).
+#
+# ПОСЛЕ УСТАНОВКИ замените bot.example.com на ваш домен и перезапустите Caddy:
+#   sudo systemctl restart caddy
+#
+# Требуется: A-запись домена → IP этого сервера, порты 80 и 443 открыты.
+
+bot.example.com {
+	# Telegram шлёт POST /eve/v1/telegram с заголовком X-Telegram-Bot-Api-Secret-Token.
+	# Проксируем всё на eve (Nitro node-server на 127.0.0.1:3000).
+	reverse_proxy 127.0.0.1:3000 {
+		# Передаём реальный IP клиента и схему — полезно для логов/дебага.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Логи доступа (по умолчанию пишутся в journald Caddy).
+	log {
+		output stdout
+		format console
+	}
+}
