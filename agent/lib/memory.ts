@@ -34,6 +34,12 @@ export interface GameState {
   /** Порядок ходов боя: инициатива, текущий ход, раунд. */
   combat: CombatOrder;
   journal: string[];
+  /**
+   * Последние грани d20 из skill_check (для «доброго» псевдорандома: если серия
+   * низких бросков, следующий слегка подтягивается). Хранятся только последние
+   * LOW_STREAK_WINDOW значений. Боевые броски сюда не пишутся.
+   */
+  diceHistory: number[];
 }
 
 /** Максимальный размер партии определён в campaigns/types.ts (реэкспорт выше). */
@@ -45,6 +51,7 @@ export const gameState = defineState("ttrpg.game", (): GameState => ({
   enemies: [],
   combat: emptyCombatOrder(),
   journal: [],
+  diceHistory: [],
 }));
 
 export function addToParty(character: PlayerCharacter): { ok: boolean; error?: string } {

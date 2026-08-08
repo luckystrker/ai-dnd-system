@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { canActForCharacter } from "../lib/campaigns/access.ts";
 import type { ToolSessionContext } from "../lib/campaigns/session.ts";
-import { skillCheck } from "../lib/engine/dnd5e.ts";
+import { isLowStreak, makeLuckyRandom, skillCheck } from "../lib/engine/dnd5e.ts";
 import { gameState } from "../lib/memory.ts";
 
 function sessionStats(ctx: ToolSessionContext): Record<string, unknown> {
@@ -45,8 +45,10 @@ const ABILITY_LABELS: Record<string, string> = {
 export default defineTool({
   description:
     "Perform a d20 skill check using the character's ability modifier from the party state. " +
-    "Natural 20 always succeeds, natural 1 always fails. The output contains the full roll " +
-    "breakdown (skill, ability, d20, modifier, total, DC, outcome) - always show it to the player.",
+    "Natural 20 always succeeds, natural 1 always fails. Pass advantage=true when the situation " +
+    "favors the character (roll 2d20 keep higher), advantage=false for disadvantage (keep lower), " +
+    "null for a normal single roll. The output contains the full roll breakdown (skill, ability, " +
+    "d20, modifier, total, DC, outcome) - always show it to the player.",
   inputSchema: z.object({
     character_name: z.string().min(1).max(100),
     skill: z.string().min(1).max(50),
@@ -59,16 +61,23 @@ export default defineTool({
       return access.reason ?? "Проверка за этого персонажа запрещена.";
     }
     const stats = partyStats(character_name) ?? sessionStats(ctx);
-    const result = skillCheck(stats, skill, difficulty, advantage);
+    // «Добрый» псевдорандом: слегка сдвигает d20 вверх и ломает серии низких
+    // бросков. Применяется только к проверкам, не к бою/урону/инициативе.
+    const lowStreak = isLowStreak(gameState.get().diceHistory);
+    const result = skillCheck(stats, skill, difficulty, advantage, makeLuckyRandom(Math.random, lowStreak));
+    // Запоминаем грань d20 для определения будущих серий неудач.
+    gameState.update((s) => ({ ...s, diceHistory: [...s.diceHistory, result.roll].slice(-4) }));
     const abilityLabel = ABILITY_LABELS[result.ability] ?? result.ability.toUpperCase();
     const modifierSign = result.modifier >= 0 ? "+" : "";
+    const advTag =
+      advantage === true ? " (преимущество)" : advantage === false ? " (слабость)" : "";
     let outcome = result.success ? "УСПЕХ" : "ПРОВАЛ";
     if (result.naturalSuccess) outcome += " (натуральная 20)";
     if (result.naturalFailure) outcome += " (натуральная 1)";
     const statsFound = Object.keys(stats).length > 0;
     const noStatsNote = statsFound ? "" : " [характеристики персонажа не найдены, модификатор +0]";
     return (
-      `🎲 ${character_name} — проверка «${skill}» (${abilityLabel}): ` +
+      `🎲 ${character_name} — проверка «${skill}» (${abilityLabel})${advTag}: ` +
       `d20 = ${result.roll} ${modifierSign}${result.modifier} = ${result.total} vs DC ${difficulty} -> ${outcome}` +
       noStatsNote
     );

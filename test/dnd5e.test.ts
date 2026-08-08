@@ -4,9 +4,15 @@ import assert from "node:assert/strict";
 import {
   abilityModifier,
   abilityScore,
+  isLowStreak,
+  LOW_STREAK_FLOOR,
+  LOW_STREAK_WINDOW,
+  makeLuckyRandom,
+  parseDiceNotation,
   proficiencyBonus,
   resolveSkillAbility,
   rollDice,
+  rollDiceNotation,
   skillCheck,
   type CheckResult,
 } from "../agent/lib/engine/dnd5e.ts";
@@ -201,5 +207,168 @@ describe("proficiencyBonus", () => {
   test("handles invalid levels", () => {
     assert.equal(proficiencyBonus(0), 2);
     assert.equal(proficiencyBonus(NaN), 2);
+  });
+});
+
+describe("rollDice advantage", () => {
+  test("advantage on d20 keeps the higher of two and records pairs", () => {
+    const seq = [0.0, 0.999999];
+    const result = rollDice(20, 1, () => seq.shift()!, true);
+    assert.equal(result.rolls.length, 1);
+    assert.equal(result.rolls[0], 20);
+    assert.deepEqual(result.pairs, [[20, 1]]);
+    assert.equal(result.total, 20);
+  });
+
+  test("disadvantage on d20 keeps the lower of two", () => {
+    const seq = [0.5, 0.0];
+    const result = rollDice(20, 1, () => seq.shift()!, false);
+    assert.equal(result.rolls[0], 1);
+    assert.deepEqual(result.pairs, [[1, 11]]);
+  });
+
+  test("advantage ignored for non-d20 dice", () => {
+    const result = rollDice(6, 2, () => 0.5, true);
+    assert.deepEqual(result.rolls, [4, 4]);
+    assert.equal(result.pairs, undefined);
+  });
+
+  test("advantage null behaves like a normal roll with no pairs", () => {
+    const result = rollDice(20, 2, () => 0.5, null);
+    assert.deepEqual(result.rolls, [11, 11]);
+    assert.equal(result.pairs, undefined);
+  });
+});
+
+describe("parseDiceNotation", () => {
+  test("parses a single group with explicit count", () => {
+    assert.deepEqual(parseDiceNotation("4d20"), { groups: [{ count: 4, sides: 20 }], modifier: 0 });
+  });
+
+  test("parses a single group with implicit count (d8)", () => {
+    assert.deepEqual(parseDiceNotation("d8"), { groups: [{ count: 1, sides: 8 }], modifier: 0 });
+  });
+
+  test("parses multiple groups and a positive modifier", () => {
+    assert.deepEqual(parseDiceNotation("2d6+1d8+3"), {
+      groups: [
+        { count: 2, sides: 6 },
+        { count: 1, sides: 8 },
+      ],
+      modifier: 3,
+    });
+  });
+
+  test("parses a negative modifier", () => {
+    assert.deepEqual(parseDiceNotation("2d4-1"), {
+      groups: [{ count: 2, sides: 4 }],
+      modifier: -1,
+    });
+  });
+
+  test("is case-insensitive and ignores spaces", () => {
+    assert.deepEqual(parseDiceNotation(" 2D6 + 1D8 "), {
+      groups: [
+        { count: 2, sides: 6 },
+        { count: 1, sides: 8 },
+      ],
+      modifier: 0,
+    });
+  });
+
+  test("rejects empty notation", () => {
+    assert.throws(() => parseDiceNotation(""), /Пустая нотация/);
+    assert.throws(() => parseDiceNotation("   "), /Пустая нотация/);
+  });
+
+  test("rejects invalid characters", () => {
+    assert.throws(() => parseDiceNotation("2d6+abc"), /Недопустимые символы/);
+    assert.throws(() => parseDiceNotation("roll 1d20"), /Недопустимые символы/);
+  });
+
+  test("rejects zero count and zero sides", () => {
+    assert.throws(() => parseDiceNotation("0d6"), /≥ 1/);
+    assert.throws(() => parseDiceNotation("2d0"), /≥ 1/);
+  });
+
+  test("rejects too many dice and too many groups", () => {
+    assert.throws(() => parseDiceNotation("101d6"), /Слишком много костей/);
+    assert.throws(() => parseDiceNotation("1d6+1d6+1d6+1d6+1d6+1d6"), /Слишком много групп/);
+  });
+});
+
+describe("rollDiceNotation", () => {
+  test("sums multiple groups and a modifier", () => {
+    // random()=0.5 → d6 face 4, d8 face 5
+    const result = rollDiceNotation("2d6+1d8+3", { random: () => 0.5 });
+    assert.equal(result.groups.length, 2);
+    assert.equal(result.groups[0].subtotal, 8);
+    assert.equal(result.groups[1].subtotal, 5);
+    assert.equal(result.modifier, 3);
+    assert.equal(result.total, 16);
+  });
+
+  test("advantage affects only d20 groups", () => {
+    // seq for 2d20: pairs (1,20),(1,20) → keep 20 each; then d6 unaffected → 4
+    const seq = [0.0, 0.999999, 0.0, 0.999999, 0.5];
+    const result = rollDiceNotation("2d20+1d6", {
+      random: () => seq.shift()!,
+      advantage: true,
+    });
+    const d20 = result.groups[0];
+    const d6 = result.groups[1];
+    assert.deepEqual(d20.rolls, [20, 20]);
+    assert.deepEqual(d20.pairs, [
+      [20, 1],
+      [20, 1],
+    ]);
+    assert.equal(d20.subtotal, 40);
+    assert.equal(d6.rolls[0], 4);
+    assert.equal(d6.pairs, undefined);
+    assert.equal(result.total, 44);
+  });
+
+  test("negative modifier reduces total", () => {
+    const result = rollDiceNotation("1d6-2", { random: () => 0.5 });
+    assert.equal(result.total, 2);
+  });
+});
+
+describe("makeLuckyRandom", () => {
+  test("returns a value in [0, 1)", () => {
+    const lucky = makeLuckyRandom(() => 0.7, false);
+    const v = lucky();
+    assert.ok(v >= 0 && v < 1, `lucky() = ${v} out of range`);
+  });
+
+  test("with recentLowStreak the d20 face is at least LOW_STREAK_FLOOR", () => {
+    const lucky = makeLuckyRandom(() => 0.0, true);
+    const face = Math.floor(lucky() * 20) + 1;
+    assert.ok(face >= LOW_STREAK_FLOOR, `face ${face} below floor ${LOW_STREAK_FLOOR}`);
+  });
+
+  test("does not drop below a plain low roll when not in streak", () => {
+    // r = 0.1 → face 2 (< threshold), reroll chance consumed: base()=0.0 < 0.5 →
+    // second base()=0.9 → max(0.1, 0.9) = 0.9 → face 19 (>= original 2).
+    const seq = [0.1, 0.0, 0.9];
+    const lucky = makeLuckyRandom(() => seq.shift()!, false);
+    const face = Math.floor(lucky() * 20) + 1;
+    assert.ok(face >= 2, `face ${face} below plain low roll`);
+  });
+});
+
+describe("isLowStreak", () => {
+  test("true when the last window of rolls are all low", () => {
+    assert.equal(isLowStreak([3, 5]), true);
+    assert.equal(isLowStreak([2, 4, 6]), true);
+  });
+
+  test("false when a recent roll is not low", () => {
+    assert.equal(isLowStreak([3, 12]), false);
+  });
+
+  test("false when there are fewer rolls than the window", () => {
+    assert.equal(isLowStreak([3]), false);
+    assert.equal(isLowStreak(new Array(LOW_STREAK_WINDOW - 1).fill(1)), false);
   });
 });
