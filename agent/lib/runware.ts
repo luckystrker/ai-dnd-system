@@ -12,7 +12,7 @@ const DEFAULT_MODEL = "runware:101@1";
 const DEFAULT_SIZE = 1024;
 
 /** Лимит генерации: дольше ждать не даём, DM продолжает текстом. */
-export const RUNWARE_TIMEOUT_MS = 30_000;
+export const RUNWARE_TIMEOUT_MS = 120_000;
 
 export function runwareConfigured(): boolean {
   return Boolean(process.env.RUNWARE_API_KEY);
