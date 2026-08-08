@@ -126,6 +126,89 @@ export function nextCombatant(order: CombatOrder, alive: AliveCheck): CombatOrde
   return order;
 }
 
+// ─── Персистентность состояния боя ──────────────────────────────────────────
+// Чистые функции сериализации/десериализации без зависимостей от eve-рантайма,
+// чтобы их можно было тестировать изолированно и хранить бой между сессиями
+// (combat.md). Валидация при десериализации строгая: любые посторонние данные
+// дают null — вызывающий код фоллбэчит на пустой бой.
+
+export interface SerializedCombatant {
+  id: string;
+  name: string;
+  side: CombatantSide;
+  bonus: number;
+  roll: number;
+  total: number;
+  hp?: number;
+  maxHp?: number;
+  ac?: number;
+  dodging?: boolean;
+}
+
+export interface SerializedCombatOrder {
+  started: boolean;
+  round: number;
+  current: number;
+  acted: boolean;
+  order: SerializedCombatant[];
+}
+
+export function serializeCombatant(entry: CombatantEntry): SerializedCombatant {
+  return {
+    id: entry.id,
+    name: entry.name,
+    side: entry.side,
+    bonus: entry.bonus,
+    roll: entry.roll,
+    total: entry.total,
+    ...(entry.hp !== undefined ? { hp: entry.hp } : {}),
+    ...(entry.maxHp !== undefined ? { maxHp: entry.maxHp } : {}),
+    ...(entry.ac !== undefined ? { ac: entry.ac } : {}),
+    ...(entry.dodging ? { dodging: true } : {}),
+  };
+}
+
+export function deserializeCombatant(data: unknown): CombatantEntry | null {
+  if (typeof data !== "object" || data === null) return null;
+  const v = data as Record<string, unknown>;
+  const id = typeof v.id === "string" ? v.id : null;
+  const name = typeof v.name === "string" ? v.name : null;
+  const side = v.side === "party" || v.side === "enemy" ? v.side : null;
+  if (!id || !name || !side) return null;
+  if (typeof v.bonus !== "number" || typeof v.roll !== "number" || typeof v.total !== "number") return null;
+  const entry: CombatantEntry = { id, name, side, bonus: v.bonus, roll: v.roll, total: v.total };
+  if (typeof v.hp === "number") entry.hp = v.hp;
+  if (typeof v.maxHp === "number") entry.maxHp = v.maxHp;
+  if (typeof v.ac === "number") entry.ac = v.ac;
+  if (v.dodging === true) entry.dodging = true;
+  return entry;
+}
+
+export function serializeCombatOrder(order: CombatOrder): SerializedCombatOrder {
+  return {
+    started: order.started,
+    round: order.round,
+    current: order.current,
+    acted: order.acted,
+    order: order.order.map(serializeCombatant),
+  };
+}
+
+export function deserializeCombatOrder(data: unknown): CombatOrder | null {
+  if (typeof data !== "object" || data === null) return null;
+  const v = data as Record<string, unknown>;
+  if (typeof v.started !== "boolean") return null;
+  if (typeof v.round !== "number" || typeof v.current !== "number" || typeof v.acted !== "boolean") return null;
+  if (!Array.isArray(v.order)) return null;
+  const order: CombatantEntry[] = [];
+  for (const raw of v.order) {
+    const entry = deserializeCombatant(raw);
+    if (!entry) return null;
+    order.push(entry);
+  }
+  return { started: v.started, round: v.round, current: v.current, acted: v.acted, order };
+}
+
 const DICE_SPEC = /(\d{1,2})d(4|6|8|10|12)/i;
 
 /**

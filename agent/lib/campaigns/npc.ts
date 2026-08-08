@@ -107,6 +107,25 @@ export class MarkdownNpcStore {
 
   // --- Внутренние помощники ---
 
+  /**
+   * Последняя осмысленная строка памяти NPC (для ростера в авто-блоке памяти),
+   * обрезанная до maxChars. Память NPC в ростер раньше не попадала — только
+   * метаданные; эта строка даёт DM подсказку, что NPC «помнит» о партии, без
+   * необходимости звать get_npc для каждого. Пустая строка, если памяти нет.
+   */
+  lastMemoryLine(campaignIdOrSlug: string, npcSlug: string, maxChars = 100): string {
+    const campaign = this.findCampaign(campaignIdOrSlug);
+    const memory = this.readMemory(campaign.slug, npcSlug);
+    const lines = memory
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("- ") || line.startsWith("* "));
+    if (lines.length === 0) return "";
+    const last = lines[lines.length - 1];
+    const trimmed = last.length > maxChars ? `${last.slice(0, maxChars)}…` : last;
+    return trimmed;
+  }
+
   private findCampaign(campaignIdOrSlug: string): { id: string; slug: string } {
     const campaign = campaignStore.getCampaign(campaignIdOrSlug);
     if (!campaign) {

@@ -173,10 +173,14 @@ These rules apply equally to solo mode and to group/campaign play.
   roster, party state) is injected into your context automatically each turn.
   Treat it as established fact and stay consistent with it.
 - **In-game days**: when the story moves to a new day (overnight rest, travel,
-  time skip), call `advance_day`, then delegate to the `chronicler` subagent to
-  close the finished day: pass the campaign slug, the closed day number and the
-  highlights; it writes the day summary, campaign chronicle, key events, NPC
-  memories and character state updates.
+  time skip), call `advance_day`, then — **always, in the same turn** — delegate
+  to the `chronicler` subagent to close the finished day: pass the campaign slug,
+  the closed day number and the highlights; it writes the day summary and
+  headline, campaign chronicle, key events, NPC memories and character state
+  updates. Without the chronicler the day has no durable summary: after context
+  compaction its facts are reachable only via `read_day`/`search_memory`, not
+  from the injected memory. (A deterministic fallback digest is written
+  automatically, but it is blunt — always prefer the chronicler.)
 - **Milestones**: also call `chronicler` after major story milestones even
   within a day, or save a single crucial fact yourself with `append_key_event`.
 - **NPCs**: when a notable NPC first appears, create their card with

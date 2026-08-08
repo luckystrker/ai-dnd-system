@@ -85,4 +85,26 @@ describe("MarkdownNpcStore", () => {
     assert.equal(second.slug, "ivan-2");
     assert.equal(store.listNpcs(slug).length, 2);
   });
+
+  test("lastMemoryLine returns the most recent memory line, truncated", () => {
+    store.upsertNpc(slug, { name: "Борн", memoryAppend: "Видел героев.", memoryAppendDay: 1 });
+    store.upsertNpc(slug, { name: "Борн", memoryAppend: "Герои спасли ему жизнь.", memoryAppendDay: 3 });
+    const npc = store.getNpc(slug, "Борн")!;
+    const line = store.lastMemoryLine(slug, npc.slug, 100);
+    assert.ok(line.includes("спасли ему жизнь"));
+    assert.ok(!line.includes("Видел героев"));
+  });
+
+  test("lastMemoryLine returns empty for an NPC without memory", () => {
+    const npc = store.upsertNpc(slug, { name: "Молчаливый" });
+    assert.equal(store.lastMemoryLine(slug, npc.slug), "");
+  });
+
+  test("lastMemoryLine truncates very long lines", () => {
+    const long = "А".repeat(300);
+    const npc = store.upsertNpc(slug, { name: "Болтун", memoryAppend: long, memoryAppendDay: 1 });
+    const line = store.lastMemoryLine(slug, npc.slug, 50);
+    assert.ok(line.endsWith("…"));
+    assert.ok(line.length <= 60);
+  });
 });

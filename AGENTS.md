@@ -32,11 +32,14 @@ on Node 24. Tests use temp dirs (`test/helpers.ts`), need no `.env` or DB.
 - `agent/tools/` — game tools, auto-discovered by eve. `agent/subagents/chronicler/tools/`
   is a deliberate narrower copy for the chronicler subagent — when adding a tool,
   decide consciously whether the chronicler needs it too.
-- Storage split: campaigns/members/characters live in SQLite
+- Storage split: campaigns/members/characters/quests/threads live in SQLite
   (`data/campaigns.db`, `CAMPAIGN_DB_PATH`; `CAMPAIGN_STORE=markdown` is the
-  MD fallback). Transcripts (`history/days/`), summaries, quests, threads and
-  NPC cards are **always MD files** in the campaign folder, in any store —
-  `agent/lib/campaigns/` (`store*.ts` = structured data, `journal.ts`/`npc.ts` = files).
+  MD fallback — then quests/threads also move to MD). The always-MD layer, in
+  any store, lives in the campaign folder: transcripts (`history/days/`), day
+  summaries + headlines, campaign summary, key events, NPC cards
+  (`agent/lib/campaigns/journal.ts`/`npc.ts`). Combat state snapshot
+  (`combat.md`) is also always-MD, written by `agent/hooks/combat-autosave.ts`
+  so an in-progress fight survives a session restart.
 - `agent/lib/engine/dnd5e.ts` — the only place dice/check rules live; the LLM
   must quote tool results, never invent rolls.
 

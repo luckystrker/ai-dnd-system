@@ -30,6 +30,8 @@ export interface DayRecord {
   date?: string;
   note?: string;
   summary?: string;
+  /** Короткая необрезаемая шапка дня (для компактной хроники). */
+  headline?: string;
   entries: string[];
 }
 
@@ -116,6 +118,7 @@ export function readDayTail(campaignSlug: string, day: number, maxLines: number)
     date: data.date ? String(data.date) : undefined,
     note: data.note ? String(data.note) : undefined,
     summary: data.summary ? String(data.summary) : undefined,
+    headline: data.headline ? String(data.headline) : undefined,
     entries,
   };
 }
@@ -126,6 +129,36 @@ export function setDaySummary(campaignSlug: string, day: number, summary: string
   const path = dayPath(campaignSlug, day);
   const { data, body } = splitFrontmatter(readFileSync(path, "utf8"));
   writeFileSync(path, buildDocument({ ...data, summary: summary.trim() }, body), "utf8");
+}
+
+/**
+ * Короткая «шапка» дня (≤140 симв.) — необрезаемая одна строка на каждый день,
+ * чтобы в авто-блоке памяти была видна вся хроника кампании целиком, а не только
+ * хвост последних ~2000 символов. Пишется chronicler'ом вместе с саммари.
+ */
+export function setDayHeadline(campaignSlug: string, day: number, headline: string): void {
+  ensureDay(campaignSlug, day);
+  const path = dayPath(campaignSlug, day);
+  const { data, body } = splitFrontmatter(readFileSync(path, "utf8"));
+  writeFileSync(path, buildDocument({ ...data, headline: headline.trim().slice(0, 140) }, body), "utf8");
+}
+
+export interface DayHeadline {
+  day: number;
+  headline: string;
+}
+
+/**
+ * Шапки всех дней по возрастанию (для компактной хроники в авто-блоке памяти).
+ * Дни без headline пропускаются. Чтение идёт только по frontmatter — быстро.
+ */
+export function listDayHeadlines(campaignSlug: string): DayHeadline[] {
+  return listDays(campaignSlug).flatMap((day) => {
+    const path = dayPath(campaignSlug, day);
+    if (!existsSync(path)) return [];
+    const { data } = splitFrontmatter(readFileSync(path, "utf8"));
+    return data.headline ? [{ day, headline: String(data.headline) }] : [];
+  });
 }
 
 /** Обновляет (или добавляет) секцию дня в накопительном history/summary.md. */
@@ -148,8 +181,14 @@ export function readCampaignSummary(campaignSlug: string): string {
   return readFileSync(path, "utf8").trim();
 }
 
-/** Добавляет ключевое событие в history/key-events.md. */
-export function appendKeyEvent(campaignSlug: string, day: number, text: string, eventId?: string): void {
+/**
+ * Добавляет ключевое событие в history/key-events.md.
+ * permanent-события помечаются маркером [важно] — они показываются в авто-блоке
+ * памяти полностью (без обрезки), в отличие от обычных, которые обрезаются по
+ * хвосту. permanent — для поворотных фактов (смерти, союзы, раскрытые секреты),
+ * которые DM обязан помнить всю кампанию.
+ */
+export function appendKeyEvent(campaignSlug: string, day: number, text: string, eventId?: string, permanent = false): void {
   const dir = historyDir(campaignSlug);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, "key-events.md");
@@ -157,13 +196,54 @@ export function appendKeyEvent(campaignSlug: string, day: number, text: string, 
   if (marker && existsSync(path) && readFileSync(path, "utf8").includes(marker)) return;
   const clean = text.replace(/\s*\n\s*/g, " ").trim();
   if (!clean) return;
-  let line = `- **День ${day}**: ${clean}`;
+  const prefix = permanent ? "[важно] " : "";
+  let line = `- ${prefix}**День ${day}**: ${clean}`;
   if (marker) line += ` <!-- ${marker} -->`;
   appendFileSync(path, `${line}\n`, "utf8");
+}
+
+/** Разделяет ключевые события на permanent (без обрезки) и обычные (хвост). */
+export function splitKeyEvents(campaignSlug: string): { permanent: string[]; regular: string[] } {
+  const raw = readKeyEvents(campaignSlug);
+  if (!raw) return { permanent: [], regular: [] };
+  const permanent: string[] = [];
+  const regular: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("- ")) continue;
+    if (line.startsWith("- [важно] ")) permanent.push(line);
+    else regular.push(line);
+  }
+  return { permanent, regular };
 }
 
 export function readKeyEvents(campaignSlug: string): string {
   const path = join(historyDir(campaignSlug), "key-events.md");
   if (!existsSync(path)) return "";
   return readFileSync(path, "utf8").trim();
+}
+
+/** Маркер авто-дайджеста в поле summary: отличает страховочное саммари от chronicler'а. */
+export const AUTO_DIGEST_MARK = "*(авто-дайджест)*";
+
+/**
+ * Детерминированный (без LLM) дайджест из записей транскрипта дня. Страховка:
+ * если chronicler не отработал, в саммари дня будет хоть что-то, чтобы факт не
+ * потерялся после compaction. Chronicler перезапишет это поле качественным
+ * саммари (а наличие маркера AUTO_DIGEST_MARK не даёт хуку затирать готовое).
+ * Чистая функция — тестируемая без eve-рантайма.
+ */
+export function buildDayDigest(entries: readonly string[], maxSentences = 5): string {
+  if (entries.length === 0) return "";
+  // Берём последние записи (свежее важнее), чистим разметку и метки времени.
+  const tail = entries.slice(-maxSentences * 2);
+  const cleaned = tail
+    .map((line) =>
+      line
+        .replace(/^-\s*\[\d{2}:\d{2}\]\s*/, "") // убрать "- [HH:MM] "
+        .replace(/<!--\s*evt:[^>]*-->\s*$/, "") // убрать маркер дедупа
+        .trim(),
+    )
+    .filter((text) => text.length > 0);
+  if (cleaned.length === 0) return "";
+  return `${AUTO_DIGEST_MARK} ${cleaned.join(" ")}`;
 }

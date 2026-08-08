@@ -2,6 +2,8 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 
 import { canActForCharacter, characterSheetFor } from "../lib/campaigns/access.ts";
+import { clearCombatState } from "../lib/campaigns/combat-store.ts";
+import { campaignStore } from "../lib/campaigns/store.ts";
 import {
   emptyCombatOrder,
   nextCombatant,
@@ -28,6 +30,11 @@ function parseDamageDice(spec: string): { count: number; sides: number } {
 
 function combatOf(state: GameState): CombatOrder {
   return state.combat ?? emptyCombatOrder();
+}
+
+/** Slug кампании текущей сессии — для очистки сохранения боя при завершении. */
+function campaignSlugOf(state: GameState): string | undefined {
+  return state.campaignId ? campaignStore.getCampaign(state.campaignId)?.slug : undefined;
 }
 
 function notStarted(): string {
@@ -245,7 +252,9 @@ export default defineTool({
     }
 
     if (action === "end") {
+      const slug = campaignSlugOf(state);
       gameState.update((s) => ({ ...s, enemies: [], combat: emptyCombatOrder() }));
+      if (slug) clearCombatState(slug);
       return "Бой окончен: порядок ходов и враги сброшены.";
     }
 
@@ -365,7 +374,9 @@ export default defineTool({
     }
 
     if (hit && nextEnemies.length === 0) {
+      const slug = campaignSlugOf(state);
       gameState.update((s) => ({ ...s, enemies: [], combat: emptyCombatOrder() }));
+      if (slug) clearCombatState(slug);
       return `${resultLine}\nВсе враги повержены. Бой окончен.`;
     }
 

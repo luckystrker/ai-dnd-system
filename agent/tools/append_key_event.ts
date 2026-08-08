@@ -9,7 +9,10 @@ export default defineTool({
   description:
     "Save one key moment of the campaign into long-term memory (history/key-events.md). " +
     "Use for turning points, promises, betrayals, discovered secrets — facts the DM must " +
-    "remember sessions later. One call = one concise event.",
+    "remember sessions later. One call = one concise event. " +
+    "Set permanent=true for the few pivotal facts (deaths, alliances, revealed secrets, oaths) " +
+    "that must NEVER fall out of the memory block as the campaign grows long — permanent events " +
+    "are shown in full every turn; regular ones are truncated to the recent tail.",
   inputSchema: z.object({
     campaignSlug: z
       .string()
@@ -26,12 +29,16 @@ export default defineTool({
       .min(1)
       .optional()
       .describe("Игровой день события. Если не указан — текущий день кампании."),
+    permanent: z
+      .boolean()
+      .optional()
+      .describe("true для поворотных фактов, которые обязаны быть в памяти всю кампанию (смерти, союзы, раскрытые тайны, клятвы). По умолчанию false."),
   }),
-  execute({ campaignSlug, event, day }, ctx) {
+  execute({ campaignSlug, event, day, permanent }, ctx) {
     try {
       const campaign = resolveCampaignForWrite(ctx.session.auth.current, campaignSlug);
       const eventDay = day ?? campaign.currentDay ?? 1;
-      appendKeyEvent(campaign.slug, eventDay, event);
+      appendKeyEvent(campaign.slug, eventDay, event, undefined, permanent === true);
       return { ok: true, day: eventDay, note: "Ключевое событие сохранено в память кампании." };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

@@ -10,9 +10,10 @@ import { defineDynamic, defineInstructions } from "eve/instructions";
 
 import { findCampaignForIdentity } from "../lib/campaigns/access.ts";
 import {
+  listDayHeadlines,
   readCampaignSummary,
   readDayTail,
-  readKeyEvents,
+  splitKeyEvents,
 } from "../lib/campaigns/journal.ts";
 import { npcStore } from "../lib/campaigns/npc.ts";
 import { resolveCallerIdentity, type CallerIdentity } from "../lib/campaigns/session.ts";
@@ -21,6 +22,8 @@ import type { Campaign, CampaignMember, CharacterSheet, NpcProfile } from "../li
 
 const SUMMARY_CAP = 2000;
 const KEY_EVENTS_CAP = 2000;
+/** Кап на компактную хронику (по дням). ~60 симв/день → 40 дней в <2.5k символов. */
+const HEADLINES_CAP = 2500;
 const DAY_TAIL_LINES = 30;
 const NPC_ROSTER_CAP = 20;
 const ACTIVE_QUESTS_CAP = 10;
@@ -76,7 +79,35 @@ function capTail(text: string, max: number): string {
   return `…(начало опущено)\n${text.slice(-max)}`;
 }
 
-function npcRoster(npcs: NpcProfile[]): string {
+/** Компактная хроника: одна строка на каждый день (headline). Необрезаемая —
+ *  видна вся арка кампании. Если дней слишком много, обрезаем хвост. */
+function headlinesSection(slug: string): string | undefined {
+  const headlines = listDayHeadlines(slug);
+  if (headlines.length === 0) return undefined;
+  const lines = headlines.map((h) => `- День ${h.day}: ${h.headline}`);
+  const joined = lines.join("\n");
+  if (joined.length <= HEADLINES_CAP) return `### Хроника (по дням)\n${joined}`;
+  return `### Хроника (по дням)\n${capTail(joined, HEADLINES_CAP)}`;
+}
+
+/** Ключевые события: permanent (без обрезки) + обычные (хвост). */
+function keyEventsSection(slug: string): string | undefined {
+  const { permanent, regular } = splitKeyEvents(slug);
+  if (permanent.length === 0 && regular.length === 0) return undefined;
+  const parts: string[] = [];
+  if (permanent.length > 0) {
+    parts.push("Важное (всегда):");
+    parts.push(...permanent);
+  }
+  if (regular.length > 0) {
+    const tail = capTail(regular.join("\n"), KEY_EVENTS_CAP);
+    parts.push("События:");
+    parts.push(tail);
+  }
+  return `### Ключевые события\n${parts.join("\n")}`;
+}
+
+function npcRoster(npcs: NpcProfile[], campaignId: string): string {
   if (npcs.length === 0) return "(NPC пока не заведены)";
   const lines = npcs.slice(0, NPC_ROSTER_CAP).map((npc) => {
     const relations = Object.entries(npc.relationships)
@@ -88,7 +119,10 @@ function npcRoster(npcs: NpcProfile[]): string {
       npc.location ? `локация: ${npc.location}` : null,
       relations ? `отношения: ${relations}` : null,
     ].filter(Boolean);
-    return `- ${npc.name} — ${parts.join("; ")}`;
+    // Последняя строка памяти NPC — что он «помнит» о партии (подсказка для DM).
+    const memory = npcStore.lastMemoryLine(campaignId, npc.slug);
+    const memoryPart = memory ? `помнит: ${memory}` : null;
+    return `- ${npc.name} — ${[...parts, memoryPart].filter(Boolean).join("; ")}`;
   });
   if (npcs.length > NPC_ROSTER_CAP) lines.push(`- …и ещё ${npcs.length - NPC_ROSTER_CAP} (list_npcs / get_npc)`);
   return lines.join("\n");
@@ -162,15 +196,17 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
   const speaker = speakerSection(identity, characters);
   if (speaker) sections.push(speaker);
 
+  // Компактная хроника (одна строка на день) идёт первой — видна вся арка кампании.
+  const headlines = headlinesSection(slug);
+  if (headlines) sections.push(headlines);
+
   const summary = readCampaignSummary(slug);
   if (summary) {
-    sections.push("### Хроника прошлых дней\n" + capTail(summary, SUMMARY_CAP));
+    sections.push("### Хроника прошлых дней (детально)\n" + capTail(summary, SUMMARY_CAP));
   }
 
-  const keyEvents = readKeyEvents(slug);
-  if (keyEvents) {
-    sections.push("### Ключевые события\n" + capTail(keyEvents, KEY_EVENTS_CAP));
-  }
+  const keyEvents = keyEventsSection(slug);
+  if (keyEvents) sections.push(keyEvents);
 
   sections.push(activeQuestsSection(campaign));
   sections.push(openThreadsSection(campaign));
@@ -178,6 +214,7 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
   const currentDay = readDayTail(slug, day, DAY_TAIL_LINES);
   if (currentDay) {
     const dayParts = [`### Текущий день ${day}`];
+    if (currentDay.headline) dayParts.push(`Шапка дня: ${currentDay.headline}`);
     if (currentDay.summary) dayParts.push(`Саммари дня: ${currentDay.summary}`);
     if (currentDay.entries.length > 0) {
       dayParts.push(`Последние события (последние ${currentDay.entries.length} записей транскрипта):`);
@@ -186,12 +223,13 @@ function buildMemoryBlock(campaign: Campaign, identity: CallerIdentity): string 
     sections.push(dayParts.join("\n"));
   }
 
-  sections.push("### NPC\n" + npcRoster(npcStore.listNpcs(campaign.id)));
+  sections.push("### NPC\n" + npcRoster(npcStore.listNpcs(campaign.id), campaign.id));
   sections.push("### Партия\n" + partyState(campaign, characters));
 
   sections.push(
     "Полный транскрипт дня — через read_day, карточка NPC — через get_npc. " +
       "Квесты и нити — через list_quests / list_open_threads. " +
+      "Если нужен факт из прошлого, а день неизвестен — search_memory по ключевым словам. " +
       "Изменения состояния фиксируй через update_character / upsert_npc; новый день — advance_day.",
   );
 
