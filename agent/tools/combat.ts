@@ -10,7 +10,7 @@ import {
   type CombatantEntry,
 } from "../lib/engine/combat.ts";
 import { abilityModifier, proficiencyBonus, rollDice } from "../lib/engine/dnd5e.ts";
-import { gameState, type GameState } from "../lib/memory.ts";
+import { gameState, type Enemy, type GameState, type PlayerCharacter } from "../lib/memory.ts";
 
 /** Допустимые кости урона: до 3 костей, грани 4/6/8/10/12. */
 const DAMAGE_DICE_PATTERN = /^(\d+)d(\d+)$/i;
@@ -34,16 +34,40 @@ function notStarted(): string {
   return "Бой не начат. Сначала вызови initiative со всеми участниками (партия и враги с HP и КД).";
 }
 
+/** Находит персонажа партии по точному id, затем по нормализованному имени (толерантность к LLM). */
+function findPartyMember(state: GameState, ref: string): PlayerCharacter | undefined {
+  const byId = state.party.find((member) => member.id === ref);
+  if (byId) return byId;
+  const needle = ref.trim().toLowerCase();
+  return state.party.find((member) => member.name.trim().toLowerCase() === needle);
+}
+
+/**
+ * Находит врага по точному id, затем по нормализованному имени. Возвращает и
+ * совпадения по имени, чтобы при неоднозначности (2+ врага с одинаковым именем)
+ * требовать уточнения через id.
+ */
+function findEnemy(state: GameState, ref: string): { match?: Enemy; ambiguous: boolean } {
+  const byId = state.enemies.find((enemy) => enemy.id === ref);
+  if (byId) return { match: byId, ambiguous: false };
+  const needle = ref.trim().toLowerCase();
+  const byName = state.enemies.filter((enemy) => enemy.name.trim().toLowerCase() === needle);
+  if (byName.length === 0) return { ambiguous: false };
+  if (byName.length === 1) return { match: byName[0], ambiguous: false };
+  return { ambiguous: true };
+}
+
 /** Строка текущего хода вида «Раунд 2. Ход: Инокентий (5).». */
 function currentTurnText(combat: CombatOrder): string {
   const entry = combat.order[combat.current];
   if (!combat.started || combat.current < 0 || !entry) return "";
-  return `Раунд ${combat.round}. Ход: ${entry.name} (${entry.total}).`;
+  const dodgeMark = entry.dodging ? " [уклоняется]" : "";
+  return `Раунд ${combat.round}. Ход: ${entry.name} (${entry.total})${dodgeMark}.`;
 }
 
 function hpNote(entry: CombatantEntry, state: GameState): string {
   if (entry.side === "enemy") {
-    const enemy = state.enemies.find((candidate) => candidate.name.toLowerCase() === entry.name.toLowerCase());
+    const enemy = state.enemies.find((candidate) => candidate.id === entry.id);
     return `, HP ${enemy?.hp ?? entry.hp ?? "?"}, КД ${enemy?.ac ?? entry.ac ?? "?"}`;
   }
   return entry.hp !== undefined ? `, HP ${entry.hp}/${entry.maxHp ?? "?"}` : "";
@@ -54,17 +78,18 @@ function statusText(state: GameState): string {
   if (!combat.started || combat.order.length === 0) return notStarted();
   const lines = combat.order.map((entry, index) => {
     const marker = index === combat.current ? (combat.acted ? "→ ✓" : "→") : "  ";
-    return `${marker}${index + 1}. ${entry.name} (${entry.total})${hpNote(entry, state)}`;
+    const dodge = entry.dodging ? " [уклоняется]" : "";
+    return `${marker}${index + 1}. ${entry.name} [${entry.id}] (${entry.total})${hpNote(entry, state)}${dodge}`;
   });
   const turn = currentTurnText(combat);
   return [`Порядок ходов:`, ...lines, turn].filter(Boolean).join("\n");
 }
 
-/** Жив ли участник: враг — пока он в списке активных, партия — пока HP > 0 (без HP — жив). */
+/** Жив ли участник: враг — пока его id есть в списке активных, партия — пока HP > 0 (без HP — жив). */
 function aliveCheck(state: GameState): (entry: CombatantEntry) => boolean {
   return (entry) => {
     if (entry.side === "enemy") {
-      return state.enemies.some((enemy) => enemy.name.toLowerCase() === entry.name.toLowerCase());
+      return state.enemies.some((enemy) => enemy.id === entry.id);
     }
     return entry.hp === undefined || entry.hp > 0;
   };
@@ -84,54 +109,82 @@ function resolveDamageDice(
   return { spec: "1d4", source: "без оружия (1d4)" };
 }
 
-/** Урон или лечение по персонажу партии в порядке ходов. */
+/** Урон или лечение по персонажу партии в порядке ходов (матчинг id-first → name-fallback). */
 function applyPartyDamage(
   state: GameState,
   combat: CombatOrder,
-  targetName: string,
+  ref: string,
   amount: number,
   isHeal: boolean,
 ): string {
-  const needle = targetName.trim().toLowerCase();
+  const needle = ref.trim().toLowerCase();
   const index = combat.order.findIndex(
-    (entry) => entry.side === "party" && entry.name.trim().toLowerCase() === needle,
+    (entry) =>
+      entry.side === "party" && (entry.id === ref || entry.name.trim().toLowerCase() === needle),
   );
   if (index === -1) {
-    const party = state.party.map((entry) => entry.name).join(", ") || "(партия пуста)";
-    return `Персонаж «${targetName}» не найден в порядке ходов партии. Участники: ${party}.`;
+    const party = combat.order
+      .filter((entry) => entry.side === "party")
+      .map((entry) => `${entry.name} [${entry.id}]`)
+      .join(", ") || "(партия пуста)";
+    return `Персонаж «${ref}» не найден в порядке ходов партии. Участники: ${party}.`;
   }
   const entry = combat.order[index];
-  const currentHp = entry.hp ?? state.party.find((member) => member.name.trim().toLowerCase() === needle)?.hp;
+  const member = state.party.find((m) => m.id === entry.id || m.name.trim().toLowerCase() === needle);
+  const currentHp = entry.hp ?? member?.hp;
   if (currentHp === undefined) {
     return `У «${entry.name}» нет HP в порядке ходов. Перезапусти initiative, чтобы подтянуть хиты.`;
   }
   const nextHp = isHeal ? currentHp + amount : Math.max(0, currentHp - amount);
   const order = combat.order.map((candidate, i) => (i === index ? { ...candidate, hp: nextHp } : candidate));
-  const party = state.party.map((member) =>
-    member.name.trim().toLowerCase() === needle ? { ...member, hp: nextHp } : member,
-  );
+  const party = state.party.map((m) => (m.id === entry.id || m.name.trim().toLowerCase() === needle ? { ...m, hp: nextHp } : m));
   gameState.update((s) => ({ ...s, party, combat: { ...combat, order } }));
   const label = isHeal ? "лечение" : "урон";
   const fall = nextHp === 0 ? " Персонаж без сознания!" : "";
   return `${entry.name}: ${label} ${amount} HP → ${nextHp}/${entry.maxHp ?? "?"}.${fall}`;
 }
 
+/** Текущий участник совпадает со ссылкой (id точно либо нормализованное имя). */
+function isCurrent(combat: CombatOrder, ref: string): boolean {
+  const entry = combat.order[combat.current];
+  if (!entry) return false;
+  return entry.id === ref || entry.name.trim().toLowerCase() === ref.trim().toLowerCase();
+}
+
 export default defineTool({
   description:
     "Resolve turn-based combat tracked by the initiative tool. " +
-    "actions: attack — the CURRENT combatant of the party attacks a named enemy (d20 + ability modifier + " +
-    "proficiency vs enemy AC; natural 20 crits with double damage, natural 1 misses; damage dice come from " +
-    "the weapon in the character's inventory); only one attack per turn, the turn then advances; " +
-    "damage — apply damage (or heal) to a party member's HP in the turn order (persist with update_character); " +
-    "next — advance to the next combatant without an attack (after enemy turns, movement, etc.); " +
+    "actions: attack — the CURRENT combatant of the party attacks an enemy by its id or name " +
+    "(d20 + ability modifier + proficiency vs enemy AC; natural 20 crits with double damage, natural 1 misses; " +
+    "damage dice come from the weapon in the character's inventory); only one attack per turn, the turn then " +
+    "advances; pass the id (from initiative) for an exact match — names are a tolerant fallback; " +
+    "damage — apply damage (or heal) to a party member's HP in the turn order by id or name (persist with update_character); " +
+    "dodge — the current party combatant takes the Dodge action: incoming attacks against them have disadvantage " +
+    "until their next turn (roll the enemy's attack with roll_dice advantage='disadvantage'); the turn advances; " +
+    "next — advance to the next combatant without an attack (after enemy turns, movement, Dash/Disengage, etc.); " +
     "status — show the current order, HP and whose turn it is; " +
     "end — end the combat and clear all enemies.",
   inputSchema: z
     .object({
-      action: z.enum(["attack", "damage", "next", "status", "end"]),
-      attacker: z.string().min(1).max(100).optional(),
-      enemy: z.string().min(1).max(100).optional(),
-      target: z.string().min(1).max(100).optional(),
+      action: z.enum(["attack", "damage", "dodge", "next", "status", "end"]),
+      attacker: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("id (точно) или имя участника партии — рекомендуются id из initiative."),
+      enemy: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("id (точно) или имя врага — рекомендуются id из initiative."),
+      target: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("id (точно) или имя персонажа партии для урона/лечения."),
       amount: z.number().int().min(1).max(1000).optional(),
       heal: z.boolean().optional().default(false),
       attack_stat: z
@@ -165,6 +218,10 @@ export default defineTool({
     .refine((value) => value.action !== "attack" || Boolean(value.enemy), {
       message: "enemy is required when action is attack",
       path: ["enemy"],
+    })
+    .refine((value) => value.action !== "dodge" || Boolean(value.attacker), {
+      message: "attacker is required when action is dodge",
+      path: ["attacker"],
     })
     .refine((value) => value.action !== "damage" || Boolean(value.target), {
       message: "target is required when action is damage",
@@ -203,15 +260,39 @@ export default defineTool({
       return applyPartyDamage(state, combat, damageTarget!, amount!, heal === true);
     }
 
+    if (action === "dodge") {
+      const currentEntry = combat.order[combat.current];
+      if (!currentEntry) return notStarted();
+      if (currentEntry.side !== "party") {
+        return `Уклоняться может только персонаж партии. Сейчас ход ${currentEntry.name}.`;
+      }
+      if (!isCurrent(combat, attacker!)) {
+        return `Сейчас ход ${currentEntry.name} — Dodge может использовать только участник, чей ход наступил.`;
+      }
+      const access = canActForCharacter(ctx, currentEntry.name);
+      if (!access.allowed) {
+        return access.reason ?? "Действие от имени этого персонажа запрещено.";
+      }
+      if (combat.acted) {
+        return "Участник уже действовал в этом ходу. Заверши ход через combat action=next.";
+      }
+      const dodgedOrder = combat.order.map((entry, i) =>
+        i === combat.current ? { ...entry, dodging: true } : entry,
+      );
+      const advanced = nextCombatant({ ...combat, order: dodgedOrder }, aliveCheck(state));
+      gameState.update((s) => ({ ...s, combat: advanced }));
+      const turn = currentTurnText(advanced);
+      const base = `${currentEntry.name} уклоняется (Dodge): до его следующего хода атаки по нему идут с помехой.`;
+      return turn ? `${base}\n${turn}` : base;
+    }
+
     // action === "attack"
-    const partyMember = state.party.find(
-      (entry) => entry.name.trim().toLowerCase() === attacker!.trim().toLowerCase(),
-    );
+    const partyMember = findPartyMember(state, attacker!);
     if (!partyMember) {
-      const party = state.party.map((entry) => entry.name).join(", ") || "(партия пуста)";
+      const party = state.party.map((entry) => `${entry.name} [${entry.id}]`).join(", ") || "(партия пуста)";
       return `Персонаж «${attacker}» не найден в партии. Участники партии: ${party}.`;
     }
-    const access = canActForCharacter(ctx, attacker!);
+    const access = canActForCharacter(ctx, partyMember.name);
     if (!access.allowed) {
       return access.reason ?? "Действие от имени этого персонажа запрещено.";
     }
@@ -219,23 +300,28 @@ export default defineTool({
     // Атаковать может только участник, чей ход наступил, и только раз за ход.
     const currentEntry = combat.order[combat.current];
     if (!currentEntry) return notStarted();
-    if (currentEntry.name.trim().toLowerCase() !== attacker!.trim().toLowerCase()) {
+    if (!isCurrent(combat, attacker!)) {
       return `Сейчас ход ${currentEntry.name} — атаковать может только участник, чей ход наступил.`;
     }
     if (combat.acted) {
       return "Участник уже атаковал в этом ходу. Заверши ход через combat action=next.";
     }
 
-    const target = state.enemies.find((candidate) => candidate.name.toLowerCase() === enemy!.toLowerCase());
+    const found = findEnemy(state, enemy!);
+    if (found.ambiguous) {
+      const active = state.enemies.map((e) => `${e.name} [${e.id}] (HP ${e.hp}, КД ${e.ac})`).join(", ");
+      return `Несколько врагов подходят под «${enemy}». Уточни цель по id: ${active}.`;
+    }
+    const target = found.match;
     if (!target) {
       const active = state.enemies
-        .map((candidate) => `${candidate.name} (${candidate.hp} HP, КД ${candidate.ac})`)
+        .map((candidate) => `${candidate.name} [${candidate.id}] (${candidate.hp} HP, КД ${candidate.ac})`)
         .join(", ");
       return `Нет врага «${enemy}». Активные враги: ${active}.`;
     }
 
     // Бонус атаки из характеристик и уровня персонажа (не из воздуха).
-    const sheet = characterSheetFor(ctx, attacker!);
+    const sheet = characterSheetFor(ctx, partyMember.name);
     const stats = sheet?.stats ?? partyMember.stats ?? {};
     const level = sheet?.level ?? partyMember.level ?? 1;
     const inventory = sheet?.inventory;
@@ -270,10 +356,10 @@ export default defineTool({
     let nextEnemies = state.enemies;
     if (hit) {
       if (defeated) {
-        nextEnemies = state.enemies.filter((candidate) => candidate.name !== target.name);
+        nextEnemies = state.enemies.filter((candidate) => candidate.id !== target.id);
       } else {
         nextEnemies = state.enemies.map((candidate) =>
-          candidate.name === target.name ? { ...candidate, hp: Math.max(0, target.hp - damage) } : candidate,
+          candidate.id === target.id ? { ...candidate, hp: Math.max(0, target.hp - damage) } : candidate,
         );
       }
     }

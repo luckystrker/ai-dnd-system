@@ -56,6 +56,31 @@ describe("rollInitiative", () => {
       ["Альфа", "Бета"],
     );
   });
+
+  test("auto-generates slug ids from names", () => {
+    const order = rollInitiative([{ name: "Гоблин Воин", side: "enemy", hp: 10, ac: 12 }], sequence(10));
+    assert.equal(order[0].id, "гоблин-воин");
+  });
+
+  test("deduplicates identical slug ids with -2, -3 suffixes", () => {
+    const order = rollInitiative(
+      [
+        { name: "Гоблин", side: "enemy", hp: 7, ac: 12 },
+        { name: "гоблин", side: "enemy", hp: 7, ac: 12 },
+        { name: "ГОБЛИН", side: "enemy", hp: 7, ac: 12 },
+      ],
+      sequence(5, 5, 5),
+    );
+    assert.deepEqual(
+      order.map((e) => e.id).sort(),
+      ["гоблин", "гоблин-2", "гоблин-3"],
+    );
+  });
+
+  test("uses an explicit id when provided", () => {
+    const order = rollInitiative([{ id: "party_1", name: "Варвар", side: "party" }], sequence(8));
+    assert.equal(order[0].id, "party_1");
+  });
 });
 
 describe("nextCombatant", () => {
@@ -65,9 +90,9 @@ describe("nextCombatant", () => {
     current: 0,
     acted: true,
     order: [
-      { name: "Тварь", side: "enemy", bonus: 4, roll: 16, total: 20 },
-      { name: "Микроб", side: "party", bonus: 2, roll: 8, total: 10 },
-      { name: "Инокентий", side: "party", bonus: 2, roll: 3, total: 5 },
+      { id: "тварь", name: "Тварь", side: "enemy", bonus: 4, roll: 16, total: 20 },
+      { id: "микроб", name: "Микроб", side: "party", bonus: 2, roll: 8, total: 10 },
+      { id: "инокентий", name: "Инокентий", side: "party", bonus: 2, roll: 3, total: 5 },
     ],
   };
 
@@ -100,7 +125,7 @@ describe("nextCombatant", () => {
 
   test("skips party members at zero hp", () => {
     const next = nextCombatant(
-      { ...order, current: 0, order: [...order.order, { name: "Труп", side: "party", hp: 0, bonus: 0, roll: 1, total: 1 }] },
+      { ...order, current: 0, order: [...order.order, { id: "труп", name: "Труп", side: "party", hp: 0, bonus: 0, roll: 1, total: 1 }] },
       (entry) => entry.hp === undefined || entry.hp > 0,
     );
     assert.equal(next.current, 1);
@@ -117,6 +142,22 @@ describe("nextCombatant", () => {
     const next = nextCombatant(idle, () => true);
     assert.equal(next.current, -1);
     assert.equal(next.started, false);
+  });
+
+  test("clears dodging on the combatant whose turn begins", () => {
+    const dodging = order.order.map((e, i) => (i === 1 ? { ...e, dodging: true } : e));
+    const next = nextCombatant({ ...order, current: 0, order: dodging }, () => true);
+    assert.equal(next.current, 1);
+    assert.equal(next.order[1].dodging, false);
+  });
+
+  test("preserves dodging on others when their turn has not come", () => {
+    const dodging = order.order.map((e) => ({ ...e, dodging: true }));
+    // Ход Твари (0) → начинается ход Микроба (1); dodge Микроба должен сброситься,
+    // dodge Инокентия (2) — ещё нет, должен сохраниться.
+    const next = nextCombatant({ ...order, current: 0, order: dodging }, () => true);
+    assert.equal(next.order[1].dodging, false);
+    assert.equal(next.order[2].dodging, true);
   });
 });
 

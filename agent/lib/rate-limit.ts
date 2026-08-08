@@ -3,9 +3,20 @@
  *
  * Один экземпляр на процесс — подходит для одиночного инстанса eve.
  * При горизонтальном масштабировании нужен общий стор (например, Redis).
+ *
+ * Чтобы карта не росла без ограничений (каждый уникальный chat/user id —
+ * отдельный ключ), неактивные ключи периодически вычищаются: ключ, к которому
+ * не обращались дольше windowMs, удаляется целиком.
  */
+interface Bucket {
+  /** Таймстампы разрешённых запросов в текущем окне. */
+  hits: number[];
+  /** Момент последнего обращения к ключу (для очистки неактивных). */
+  lastAccessed: number;
+}
+
 export class SlidingWindowLimiter {
-  private readonly hits = new Map<string, number[]>();
+  private readonly buckets = new Map<string, Bucket>();
 
   /**
    * true, если запрос укладывается в лимит (и он учтён);
@@ -13,20 +24,28 @@ export class SlidingWindowLimiter {
    */
   allow(key: string, limit: number, windowMs: number, now: number = Date.now()): boolean {
     const windowStart = now - windowMs;
-    const timestamps = (this.hits.get(key) ?? []).filter((ts) => ts > windowStart);
-    if (timestamps.length >= limit) {
-      this.hits.set(key, timestamps);
-      return false;
+    const bucket = this.buckets.get(key);
+    const hits = (bucket?.hits ?? []).filter((ts) => ts > windowStart);
+    const allowed = hits.length < limit;
+    if (allowed) hits.push(now);
+    this.buckets.set(key, { hits, lastAccessed: now });
+    // Периодически вычищаем ключи, к которым давно не обращались, — иначе карта
+    // растёт с каждым новым chat/user id и процесс падает по OOM.
+    if (this.buckets.size > 1000) this.sweep(now, windowMs);
+    return allowed;
+  }
+
+  /** Удаляет ключи, неактивные дольше windowMs. Экспонировано для тестов. */
+  sweep(now: number, windowMs: number): void {
+    const cutoff = now - windowMs;
+    for (const [key, bucket] of this.buckets) {
+      if (bucket.lastAccessed < cutoff) this.buckets.delete(key);
     }
-    timestamps.push(now);
-    this.hits.set(key, timestamps);
-    // Периодически чистим полностью опустевшие ключи, чтобы карта не росла.
-    if (this.hits.size > 10_000) {
-      for (const [k, ts] of this.hits) {
-        if (ts.length === 0) this.hits.delete(k);
-      }
-    }
-    return true;
+  }
+
+  /** Число отслеживаемых ключей (для тестов и мониторинга). */
+  size(): number {
+    return this.buckets.size;
   }
 }
 

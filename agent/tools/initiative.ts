@@ -14,7 +14,7 @@ function attachPartyHp(entries: CombatantEntry[], ctx: unknown): CombatantEntry[
       return { ...entry, hp: sheet.hp ?? entry.hp, maxHp: sheet.maxHp ?? entry.maxHp };
     }
     const member = gameState.get().party.find(
-      (candidate) => candidate.name.trim().toLowerCase() === entry.name.trim().toLowerCase(),
+      (candidate) => candidate.id === entry.id || candidate.name.trim().toLowerCase() === entry.name.trim().toLowerCase(),
     );
     if (member?.hp !== undefined || member?.maxHp !== undefined) {
       return { ...entry, hp: member.hp, maxHp: member.maxHp };
@@ -27,9 +27,10 @@ export default defineTool({
   description:
     "Roll initiative and START turn-based combat. Call this the moment a fight begins: list EVERY participant — " +
     "party characters (side=party) and enemies (side=enemy, with their armor class ac and current hit points hp). " +
-    "Party members' HP is loaded from their sheets automatically. " +
-    "Persists the turn order in the session; the combat tool continues from there. " +
-    "If a new enemy joins an ongoing fight, call this again with the full updated list — the order is re-rolled.",
+    "Party members' HP is loaded from their sheets automatically. Each combatant gets a stable id (shown in the " +
+    "result next to its name); pass that id to the combat tool's attacker/enemy/target fields — ids are exact, " +
+    "names are matched as a fallback only. If a new enemy joins an ongoing fight, call this again with the full " +
+    "updated list — the order is re-rolled and ids may change.",
   inputSchema: z.object({
     combatants: z
       .array(
@@ -52,10 +53,19 @@ export default defineTool({
       ),
   }),
   execute({ combatants }, ctx) {
-    const order = attachPartyHp(rollInitiative(combatants), ctx);
+    // Для персонажей партии подставляем id из листа, если он есть — это стабильный id игрока.
+    const party = gameState.get().party;
+    const withIds = combatants.map((c) => {
+      if (c.side === "party") {
+        const member = party.find((m) => m.name.trim().toLowerCase() === c.name.trim().toLowerCase());
+        if (member?.id) return { ...c, id: member.id };
+      }
+      return c;
+    });
+    const order = attachPartyHp(rollInitiative(withIds), ctx);
     const enemies = order
       .filter((entry) => entry.side === "enemy")
-      .map((entry) => ({ name: entry.name, hp: entry.hp as number, ac: entry.ac as number }));
+      .map((entry) => ({ id: entry.id, name: entry.name, hp: entry.hp as number, ac: entry.ac as number }));
     gameState.update((state) => ({
       ...state,
       enemies,
@@ -75,10 +85,12 @@ export default defineTool({
       } else if (entry.hp !== undefined) {
         parts.push(`HP ${entry.hp}/${entry.maxHp ?? "?"}`);
       }
-      return `${index + 1}. ${entry.name} (${parts.join(", ")})`;
+      return `${index + 1}. ${entry.name} [id: ${entry.id}] (${parts.join(", ")})`;
     });
     const first = order[0];
-    const started = first ? `Бой начат, раунд 1. Первый ход: ${first.name}.` : "Бой начат, раунд 1.";
+    const started = first
+      ? `Бой начат, раунд 1. Первый ход: ${first.name} (${first.id}). Используй id в combat.`
+      : "Бой начат, раунд 1.";
     return `Инициатива:\n${lines.join("\n")}\n${started}`;
   },
 });

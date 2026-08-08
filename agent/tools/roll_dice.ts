@@ -4,10 +4,19 @@ import { z } from "zod";
 import { rollDiceNotation, type NotationResult } from "../lib/engine/dnd5e";
 
 /** Развёрнутое сообщение о броске для группы кубиков. */
-function groupLine(spec: string, rolls: number[], subtotal: number, pairs?: Array<[number, number]>): string {
+function groupLine(
+  spec: string,
+  rolls: number[],
+  subtotal: number,
+  options: { pairs?: Array<[number, number]>; dropped?: number[] } = {},
+): string {
+  const { pairs, dropped } = options;
   if (pairs && pairs.length > 0) {
-    const shown = pairs.map(([pick, dropped]) => `${pick}|${dropped}`).join(", ");
+    const shown = pairs.map(([pick, drop]) => `${pick}|${drop}`).join(", ");
     return `${spec} → [${shown}] = ${subtotal}`;
+  }
+  if (dropped && dropped.length > 0) {
+    return `${spec} → [${rolls.join(", ")}] (отброшено: ${dropped.join(", ")}) = ${subtotal}`;
   }
   return `${spec} → [${rolls.join(", ")}] = ${subtotal}`;
 }
@@ -20,7 +29,7 @@ function formatRoll(result: NotationResult, advantage: "advantage" | "disadvanta
       : advantage === "disadvantage"
         ? " (слабость)"
         : "";
-  const lines = result.groups.map((g) => groupLine(g.spec, g.rolls, g.subtotal, g.pairs));
+  const lines = result.groups.map((g) => groupLine(g.spec, g.rolls, g.subtotal, { pairs: g.pairs, dropped: g.dropped }));
   const mod =
     result.modifier === 0
       ? null
@@ -37,15 +46,19 @@ export default defineTool({
     "Use for any uncertain game outcome: enemy attacks vs a player's AC, random tables, " +
     "damage outside the combat tool, loot, etc. Advantage/disadvantage applies to d20 dice " +
     "ONLY (each d20 is rolled twice, keeping the higher for advantage or the lower for " +
-    "disadvantage). Never use invented results.",
+    "disadvantage). Group modifiers: khN/klN keep the highest/lowest N (e.g. '4d6kh3' rolls " +
+    "4d6 and keeps the 3 highest), dhN/dlN drop the highest/lowest N (e.g. '4d6dl1' drops the " +
+    "lowest, same as keep-highest-3 — use for ability score generation), and '!' rolls " +
+    "exploding dice (a die on its max face adds another, e.g. '8d6!'). Never use invented results.",
   inputSchema: z.object({
     notation: z
       .string()
       .min(1)
       .max(50)
       .describe(
-        'Dice notation: "4d20", "2d4", "2d6+1d8+3", "1d20+5", "d8". ' +
-          "Up to 5 groups and at most 100 dice total, plus an optional flat modifier (+N / -N).",
+        'Dice notation: "4d20", "2d4", "2d6+1d8+3", "1d20+5", "d8", "4d6kh3", "4d6dl1", "8d6!". ' +
+          "Up to 5 groups and at most 100 dice total, plus an optional flat modifier (+N / -N). " +
+          "Group modifiers: khN/klN (keep highest/lowest N), dhN/dlN (drop highest/lowest N), ! (explode).",
       ),
     advantage: z
       .enum(["advantage", "disadvantage", "normal"])

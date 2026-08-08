@@ -295,6 +295,60 @@ describe("parseDiceNotation", () => {
     assert.throws(() => parseDiceNotation("101d6"), /Слишком много костей/);
     assert.throws(() => parseDiceNotation("1d6+1d6+1d6+1d6+1d6+1d6"), /Слишком много групп/);
   });
+
+  test("parses keep-high modifier", () => {
+    assert.deepEqual(parseDiceNotation("4d6kh3"), {
+      groups: [{ count: 4, sides: 6, keepHigh: 3 }],
+      modifier: 0,
+    });
+  });
+
+  test("parses drop-low modifier", () => {
+    assert.deepEqual(parseDiceNotation("4d6dl1"), {
+      groups: [{ count: 4, sides: 6, dropLow: 1 }],
+      modifier: 0,
+    });
+  });
+
+  test("parses explode modifier", () => {
+    assert.deepEqual(parseDiceNotation("8d6!"), {
+      groups: [{ count: 8, sides: 6, explode: true }],
+      modifier: 0,
+    });
+  });
+
+  test("parses keep-low and drop-high", () => {
+    assert.deepEqual(parseDiceNotation("3d20kl1"), {
+      groups: [{ count: 3, sides: 20, keepLow: 1 }],
+      modifier: 0,
+    });
+    assert.deepEqual(parseDiceNotation("3d20dh1"), {
+      groups: [{ count: 3, sides: 20, dropHigh: 1 }],
+      modifier: 0,
+    });
+  });
+
+  test("combines a modifier group with a flat modifier", () => {
+    assert.deepEqual(parseDiceNotation("4d6kh3+2"), {
+      groups: [{ count: 4, sides: 6, keepHigh: 3 }],
+      modifier: 2,
+    });
+  });
+
+  test("rejects mixing keep and drop on the same group", () => {
+    assert.throws(() => parseDiceNotation("4d6kh3dl1"), /нельзя комбинировать keep/);
+    assert.throws(() => parseDiceNotation("4d6kh2kl1"), /нельзя одновременно kh и kl/);
+  });
+
+  test("rejects keep/drop out of range", () => {
+    assert.throws(() => parseDiceNotation("4d6kh0"), /kh должен быть/);
+    assert.throws(() => parseDiceNotation("4d6kh4"), /kh должен быть/);
+    assert.throws(() => parseDiceNotation("4d6dl4"), /dl должен быть/);
+  });
+
+  test("still rejects invalid characters with modifiers present", () => {
+    assert.throws(() => parseDiceNotation("2d6+abc"), /Недопустимые символы/);
+  });
 });
 
 describe("rollDiceNotation", () => {
@@ -331,6 +385,67 @@ describe("rollDiceNotation", () => {
   test("negative modifier reduces total", () => {
     const result = rollDiceNotation("1d6-2", { random: () => 0.5 });
     assert.equal(result.total, 2);
+  });
+
+  test("keep-highest keeps N best and reports the dropped", () => {
+    // 4d6 при random()=0.5 → все грани 4. kh3 оставляет три четвёрки, отбрасывает одну.
+    const result = rollDiceNotation("4d6kh3", { random: () => 0.5 });
+    const g = result.groups[0];
+    assert.deepEqual(g.rolls, [4, 4, 4]);
+    assert.deepEqual(g.dropped, [4]);
+    assert.equal(g.subtotal, 12);
+    assert.equal(result.total, 12);
+  });
+
+  test("drop-lowest is equivalent to keep-highest-3", () => {
+    // Неравные грани: случайная последовательность даст [3,6,1,4] на 4d6.
+    const seq = [
+      () => (3 - 1) / 6 + 1e-9, // → 3
+      () => (6 - 1) / 6 + 1e-9, // → 6
+      () => (1 - 1) / 6 + 1e-9, // → 1
+      () => (4 - 1) / 6 + 1e-9, // → 4
+    ];
+    const result = rollDiceNotation("4d6dl1", { random: () => seq.shift()!() });
+    const g = result.groups[0];
+    // отбрасывается минимум (1), остаются 3,4,6.
+    assert.deepEqual(g.rolls.sort((a, b) => a - b), [3, 4, 6]);
+    assert.equal(g.subtotal, 13);
+  });
+
+  test("keep-lowest keeps the single smallest", () => {
+    const seq = [
+      () => (3 - 1) / 6 + 1e-9,
+      () => (6 - 1) / 6 + 1e-9,
+      () => (1 - 1) / 6 + 1e-9,
+    ];
+    const result = rollDiceNotation("3d6kl1", { random: () => seq.shift()!() });
+    const g = result.groups[0];
+    assert.deepEqual(g.rolls, [1]);
+    assert.deepEqual(g.dropped!.sort((a, b) => a - b), [3, 6]);
+    assert.equal(g.subtotal, 1);
+  });
+
+  test("explode adds dice on max face, up to the limit", () => {
+    // Каждая броска даёт максимальную грань (random()=0.999999 → 6 на d6).
+    // 1d6! с пределом EXPLODE_LIMIT даёт 1 + EXPLODE_LIMIT бросков, все по 6.
+    const result = rollDiceNotation("1d6!", { random: () => 0.999999 });
+    const g = result.groups[0];
+    assert.ok(g.rolls.length <= 11, `explode produced too many dice: ${g.rolls.length}`);
+    for (const r of g.rolls) assert.equal(r, 6);
+    assert.equal(g.subtotal, g.rolls.length * 6);
+  });
+
+  test("explode stops when a die is not on its max face", () => {
+    // Последовательность: 6 (взрыв) → 6 (взрыв) → 3 (стоп). Итого [6,6,3], subtotal 15.
+    const seq = [
+      () => (6 - 1) / 6 + 1e-9,
+      () => (6 - 1) / 6 + 1e-9,
+      () => (3 - 1) / 6 + 1e-9,
+    ];
+    const result = rollDiceNotation("1d6!", { random: () => seq.shift()!() });
+    const g = result.groups[0];
+    assert.deepEqual(g.rolls, [6, 6, 3]);
+    assert.equal(g.subtotal, 15);
   });
 });
 

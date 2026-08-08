@@ -12,6 +12,16 @@ export interface DiceResult {
 export interface DiceGroup {
   count: number;
   sides: number;
+  /** Оставить N наибольших (kh) значений; прочие отбрасываются. */
+  keepHigh?: number;
+  /** Оставить N наименьших (kl) значений; прочие отбрасываются. */
+  keepLow?: number;
+  /** Отбросить N наибольших (dh) значений. */
+  dropHigh?: number;
+  /** Отбросить N наименьших (dl) значений — «4d6dl1» = бросок характеристик. */
+  dropLow?: number;
+  /** Взрывные кубики: кость на максимальной грани добавляет ещё одну (рекурсивно, с лимитом). */
+  explode?: boolean;
 }
 
 /** Распарсенная нотация броска: группы кубиков и плоский модификатор. */
@@ -22,10 +32,12 @@ export interface ParsedNotation {
 
 /** Результат броска одной группы кубиков. */
 export interface DiceGroupResult {
-  /** Исходная спецификация группы, например «2d6». */
+  /** Исходная спецификация группы, например «2d6» или «4d6kh3». */
   spec: string;
-  /** Выбранные значения (count штук, после выбора max/min при advantage/disadvantage). */
+  /** Учитываемые значения (после keep/drop; при advantage/disadvantage — выбранные). */
   rolls: number[];
+  /** Отброшенные значения (keep/drop, кроме advantage-пар) — показываются игроку. */
+  dropped?: number[];
   /** Оба брошенных значения — только для advantage/disadvantage на d20. */
   pairs?: Array<[number, number]>;
   subtotal: number;
@@ -246,50 +258,111 @@ export function rollDice(
   return result;
 }
 
+/** Лимит рекурсивных взрывных костей на одну группу (защита от бесконечности). */
+const EXPLODE_LIMIT = 10;
+
+/** Строковое представление группы с модификаторами, напр. «4d6kh3» или «2d6!». */
+function groupSpec(g: DiceGroup): string {
+  let spec = `${g.count}d${g.sides}`;
+  if (g.keepHigh) spec += `kh${g.keepHigh}`;
+  if (g.keepLow) spec += `kl${g.keepLow}`;
+  if (g.dropHigh) spec += `dh${g.dropHigh}`;
+  if (g.dropLow) spec += `dl${g.dropLow}`;
+  if (g.explode) spec += "!";
+  return spec;
+}
+
 /**
- * Парсит нотацию броска: «4d20», «2d6+1d8+3», «1d20+5», «d8», «2d4-1».
- * Группы вида [count]d<sides> (count по умолчанию 1) и плоский модификатор ±N.
+ * Парсит нотацию броска: «4d20», «2d6+1d8+3», «1d20+5», «d8», «2d4-1»,
+ * «4d6kh3» (оставить 3 наибольших), «4d6dl1» (отбросить 1 наименьший),
+ * «8d6!» (взрывные кубики — кость на максимальной грани добавляет ещё одну).
+ * Группы вида [count]d<sides> (count по умолчанию 1) с опциональными модификаторами
+ * и плоским модификатором ±N.
  */
 export function parseDiceNotation(spec: string): ParsedNotation {
   const normalized = spec.replace(/\s+/g, "").toLowerCase();
   if (!normalized) {
     throw new Error(`Пустая нотация броска «${spec}». Пример: «2d6+1d8+3».`);
   }
-  if (!/^[0-9d+\-]+$/.test(normalized)) {
-    throw new Error(`Недопустимые символы в нотации «${spec}». Допускаются цифры, d, +, -.`);
+  // Допустимые символы: цифры, d, модификаторы keep/drop (k,h,l,d), explode (!), операторы.
+  if (!/^[0-9dkhl!+\-]+$/.test(normalized)) {
+    throw new Error(`Недопустимые символы в нотации «${spec}». Допускаются цифры, d, +, -, kh/kl/dh/dl, !.`);
   }
+
+  // Разбиваем на термы по +/-. Каждый терм — группа костей (с модификаторами) или модификатор.
+  const terms = normalized.match(/[+-]?[^+-]+/g);
+  if (!terms || terms.join("") !== normalized) {
+    throw new Error(`Неправильная нотация броска «${spec}». Пример: «2d6+1d8+3».`);
+  }
+
   const groups: DiceGroup[] = [];
-  const groupPattern = /(\d*)d(\d+)/g;
-  let match: RegExpExecArray | null;
-  let lastEnd = 0;
-  let consumed = "";
-  while ((match = groupPattern.exec(normalized)) !== null) {
-    // Проверяем, что между этой группой и предыдущей — только + или - или ничего.
-    const between = normalized.slice(lastEnd, match.index);
-    if (between && !/^[+-]$/.test(between)) {
-      throw new Error(`Неправильная нотация броска «${spec}» (ожидался + или - между группами).`);
-    }
-    const count = match[1] === "" ? 1 : Number(match[1]);
-    const sides = Number(match[2]);
-    if (!Number.isInteger(count) || count < 1) {
-      throw new Error(`Количество костей должно быть ≥ 1 в «${spec}».`);
-    }
-    if (!Number.isInteger(sides) || sides < 1) {
-      throw new Error(`Количество граней должно быть ≥ 1 в «${spec}».`);
-    }
-    groups.push({ count, sides });
-    lastEnd = groupPattern.lastIndex;
-    consumed += match[0];
-  }
-  // Хвост после последней группы — модификатор: +N, -N или пусто.
-  const tail = normalized.slice(lastEnd);
   let modifier = 0;
-  if (tail) {
-    if (!/^[+-]\d+$/.test(tail)) {
-      throw new Error(`Неправильный модификатор «${tail}» в «${spec}». Пример: «+3» или «-1».`);
+  const groupRe = /^(\d*)d(\d+)((?:kh\d+|kl\d+|dh\d+|dl\d+|!)*)$/;
+  const modRe = /(kh\d+|kl\d+|dh\d+|dl\d+|!)/g;
+  for (const term of terms) {
+    const sign = term.startsWith("-") ? -1 : 1;
+    const body = term.replace(/^[+-]/, "");
+    const groupMatch = groupRe.exec(body);
+    if (groupMatch) {
+      if (sign === -1) {
+        throw new Error(`Группа костей не может быть отрицательной в «${spec}».`);
+      }
+      const count = groupMatch[1] === "" ? 1 : Number(groupMatch[1]);
+      const sides = Number(groupMatch[2]);
+      if (!Number.isInteger(count) || count < 1) {
+        throw new Error(`Количество костей должно быть ≥ 1 в «${spec}».`);
+      }
+      if (!Number.isInteger(sides) || sides < 1) {
+        throw new Error(`Количество граней должно быть ≥ 1 в «${spec}».`);
+      }
+      const group: DiceGroup = { count, sides };
+      const modsStr = groupMatch[3];
+      if (modsStr) {
+        let m: RegExpExecArray | null;
+        modRe.lastIndex = 0;
+        while ((m = modRe.exec(modsStr)) !== null) {
+          const token = m[0];
+          if (token === "!") {
+            group.explode = true;
+            continue;
+          }
+          const kind = token.slice(0, 2);
+          const n = Number(token.slice(2));
+          if (kind === "kh") group.keepHigh = n;
+          else if (kind === "kl") group.keepLow = n;
+          else if (kind === "dh") group.dropHigh = n;
+          else group.dropLow = n;
+        }
+        // keep и drop взаимно исключают друг друга; нельзя указать два keep или два drop.
+        const keeps = [group.keepHigh, group.keepLow].filter((v) => v !== undefined).length;
+        const drops = [group.dropHigh, group.dropLow].filter((v) => v !== undefined).length;
+        if (group.keepHigh !== undefined && group.keepLow !== undefined) {
+          throw new Error(`В «${spec}» нельзя одновременно kh и kl.`);
+        }
+        if (keeps > 0 && drops > 0) {
+          throw new Error(`В «${spec}» нельзя комбинировать keep (kh/kl) и drop (dh/dl).`);
+        }
+        if (group.keepHigh !== undefined && (group.keepHigh < 1 || group.keepHigh >= count)) {
+          throw new Error(`В «${spec}» kh должен быть от 1 до ${count - 1}.`);
+        }
+        if (group.keepLow !== undefined && (group.keepLow < 1 || group.keepLow >= count)) {
+          throw new Error(`В «${spec}» kl должен быть от 1 до ${count - 1}.`);
+        }
+        if (group.dropHigh !== undefined && (group.dropHigh < 1 || group.dropHigh >= count)) {
+          throw new Error(`В «${spec}» dh должен быть от 1 до ${count - 1}.`);
+        }
+        if (group.dropLow !== undefined && (group.dropLow < 1 || group.dropLow >= count)) {
+          throw new Error(`В «${spec}» dl должен быть от 1 до ${count - 1}.`);
+        }
+      }
+      groups.push(group);
+    } else if (/^\d+$/.test(body)) {
+      modifier += sign * Number(body);
+    } else {
+      throw new Error(`Неправильная нотация броска «${spec}» (терм «${body}» не распознан).`);
     }
-    modifier = Number(tail);
   }
+
   if (groups.length === 0) {
     throw new Error(`В нотации «${spec}» нет костей. Пример: «2d6+1d8+3».`);
   }
@@ -304,8 +377,68 @@ export function parseDiceNotation(spec: string): ParsedNotation {
 }
 
 /**
+ * Применяет keep/drop к списку значений: возвращает { kept, dropped }.
+ * keep оставляет N наибольших/наименьших, drop убирает N наибольших/наименьших.
+ */
+function applyKeepDrop(values: number[], group: DiceGroup): { kept: number[]; dropped: number[] } {
+  if (
+    group.keepHigh === undefined &&
+    group.keepLow === undefined &&
+    group.dropHigh === undefined &&
+    group.dropLow === undefined
+  ) {
+    return { kept: values, dropped: [] };
+  }
+  // Индексы по убыванию значения — единый способ выбрать и keep, и drop.
+  const order = values.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v || a.i - b.i);
+  const keepCount =
+    group.keepHigh ?? (group.keepLow !== undefined ? group.keepLow : undefined);
+  const dropCount =
+    group.dropHigh ?? (group.dropLow !== undefined ? group.dropLow : undefined);
+
+  let keptIdx: Set<number>;
+  if (keepCount !== undefined) {
+    // keep берёт N «лучших» (наибольших для kh, наименьших для kl).
+    const ranked = group.keepLow !== undefined ? [...order].reverse() : order;
+    keptIdx = new Set(ranked.slice(0, keepCount).map((e) => e.i));
+  } else if (dropCount !== undefined) {
+    // drop убирает N (наибольших для dh, наименьших для dl), остальное остаётся.
+    const toRemove =
+      group.dropHigh !== undefined ? order.slice(0, dropCount) : [...order].reverse().slice(0, dropCount);
+    const removeIdx = new Set(toRemove.map((e) => e.i));
+    keptIdx = new Set(values.map((_, i) => i).filter((i) => !removeIdx.has(i)));
+  } else {
+    keptIdx = new Set(values.map((_, i) => i));
+  }
+
+  const kept: number[] = [];
+  const dropped: number[] = [];
+  values.forEach((v, i) => (keptIdx.has(i) ? kept.push(v) : dropped.push(v)));
+  return { kept, dropped };
+}
+
+/** Бросает группу с учётом взрывных костей: грань == sides добавляет ещё одну (рекурсивно). */
+function rollGroupWithExplode(sides: number, count: number, explode: boolean, random: RandomSource): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    let face = randomInt(sides, random);
+    out.push(face);
+    if (!explode) continue;
+    let guard = 0;
+    while (face === sides && guard < EXPLODE_LIMIT) {
+      face = randomInt(sides, random);
+      out.push(face);
+      guard += 1;
+    }
+  }
+  return out;
+}
+
+/**
  * Бросает кубики по нотации. Advantage/disadvantage применяется ТОЛЬКО к d20-группам
  * (бросаем каждую d20 дважды, берём max/min); прочие кости кидаются честно.
+ * Модификаторы группы keep/drop (kh/kl/dh/dl) и взрывные кости (!) поддерживаются
+ * только в нотации; advantage взаимоисключается с keep/drop на d20.
  */
 export function rollDiceNotation(
   spec: string,
@@ -315,13 +448,28 @@ export function rollDiceNotation(
   const advantage = options.advantage ?? null;
   const parsed = parseDiceNotation(spec);
   const groups: DiceGroupResult[] = parsed.groups.map((g) => {
-    const result = rollDice(g.sides, g.count, random, g.sides === 20 ? advantage : null);
+    const hasKeepDrop =
+      g.keepHigh !== undefined || g.keepLow !== undefined || g.dropHigh !== undefined || g.dropLow !== undefined;
+    const useAdv = advantage !== null && g.sides === 20 && !hasKeepDrop;
+    if (useAdv) {
+      // d20 с advantage/disadvantage: кидаем дважды, выбираем — как раньше.
+      const result = rollDice(g.sides, g.count, random, advantage);
+      const groupResult: DiceGroupResult = {
+        spec: groupSpec(g),
+        rolls: result.rolls,
+        subtotal: result.total,
+      };
+      if (result.pairs) groupResult.pairs = result.pairs;
+      return groupResult;
+    }
+    const values = rollGroupWithExplode(g.sides, g.count, g.explode === true, random);
+    const { kept, dropped } = applyKeepDrop(values, g);
     const groupResult: DiceGroupResult = {
-      spec: `${g.count}d${g.sides}`,
-      rolls: result.rolls,
-      subtotal: result.total,
+      spec: groupSpec(g),
+      rolls: kept,
+      subtotal: kept.reduce((sum, v) => sum + v, 0),
     };
-    if (result.pairs) groupResult.pairs = result.pairs;
+    if (dropped.length > 0) groupResult.dropped = dropped;
     return groupResult;
   });
   const groupsTotal = groups.reduce((sum, g) => sum + g.subtotal, 0);

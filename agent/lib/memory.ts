@@ -18,6 +18,8 @@ export interface PlayerCharacter {
 }
 
 export interface Enemy {
+  /** Стабильный id врага (совпадает с combat.order entry id). */
+  id: string;
   name: string;
   hp: number;
   ac: number;
