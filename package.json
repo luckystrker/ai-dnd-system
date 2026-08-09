@@ -12,6 +12,7 @@
     "poll": "node --env-file=.env scripts/telegram-poll.ts",
     "smoke": "node scripts/smoke-campaigns.ts",
     "start": "eve start",
+    "start:local": "bash deploy/start-polling.sh",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc"
   },
