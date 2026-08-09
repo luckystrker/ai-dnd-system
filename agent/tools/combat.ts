@@ -12,7 +12,7 @@ import {
   type CombatantEntry,
 } from "../lib/engine/combat.ts";
 import { abilityModifier, combineAdvantage, environmentModifiersForAttack, proficiencyBonus, rollDice } from "../lib/engine/dnd5e.ts";
-import { gameState, type Enemy, type GameState, type PlayerCharacter } from "../lib/memory.ts";
+import { gameState, readGameState, type Enemy, type GameState, type PlayerCharacter } from "../lib/memory.ts";
 
 /** Допустимые кости урона: до 3 костей, грани 4/6/8/10/12. */
 const DAMAGE_DICE_PATTERN = /^(\d+)d(\d+)$/i;
@@ -253,7 +253,7 @@ export default defineTool({
     { action, attacker, enemy, target: damageTarget, amount, heal, attack_stat, bonus, weapon, damage_dice },
     ctx,
   ) {
-    const state = gameState.get();
+    const state = readGameState();
     const combat = combatOf(state);
 
     if (action === "status") return statusText(state);

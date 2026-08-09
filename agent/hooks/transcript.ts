@@ -17,7 +17,7 @@ import { resolveCallerIdentity } from "../lib/campaigns/session.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
 import type { Campaign } from "../lib/campaigns/types.ts";
 import { appendTranscriptEntry } from "../lib/campaigns/journal.ts";
-import { gameState } from "../lib/memory.ts";
+import { readGameState } from "../lib/memory.ts";
 import combatTool from "../tools/combat.ts";
 import initiativeTool from "../tools/initiative.ts";
 import rollDiceTool from "../tools/roll_dice.ts";
@@ -34,7 +34,7 @@ function campaignForInbound(auth: unknown): Campaign | undefined {
 
 /** Кампания для событий хода: по campaignId из durable-состояния сессии. */
 function campaignForTurn(): Campaign | undefined {
-  const { campaignId } = gameState.get();
+  const { campaignId } = readGameState();
   if (!campaignId) return undefined;
   return campaignStore.getCampaign(campaignId);
 }

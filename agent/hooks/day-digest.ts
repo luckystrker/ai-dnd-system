@@ -20,10 +20,10 @@ import {
   readDayTail,
   setDaySummary,
 } from "../lib/campaigns/journal.ts";
-import { gameState } from "../lib/memory.ts";
+import { readGameState } from "../lib/memory.ts";
 
 function slugForTurn(): string | undefined {
-  const { campaignId } = gameState.get();
+  const { campaignId } = readGameState();
   if (!campaignId) return undefined;
   return campaignStore.getCampaign(campaignId)?.slug;
 }
@@ -34,9 +34,8 @@ export default defineHook({
       try {
         const slug = slugForTurn();
         if (!slug) return;
-        const day = gameState.get().campaignId
-          ? campaignStore.getCampaign(gameState.get().campaignId!)?.currentDay ?? 1
-          : 1;
+        const campaignId = readGameState().campaignId;
+        const day = campaignId ? campaignStore.getCampaign(campaignId)?.currentDay ?? 1 : 1;
         const record = readDayTail(slug, day, 8);
         if (!record) return;
         // chronicler уже отработал (есть summary без маркера или есть headline) — не лезем.

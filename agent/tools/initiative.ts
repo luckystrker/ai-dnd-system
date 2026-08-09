@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { characterSheetFor } from "../lib/campaigns/access.ts";
 import { rollInitiative, type CombatantEntry } from "../lib/engine/combat.ts";
-import { gameState } from "../lib/memory.ts";
+import { gameState, readGameState } from "../lib/memory.ts";
 
 /** Привязывает HP/макс HP персонажей партии: свежий лист → состояние партии. */
 function attachPartyHp(entries: CombatantEntry[], ctx: unknown): CombatantEntry[] {
@@ -13,7 +13,7 @@ function attachPartyHp(entries: CombatantEntry[], ctx: unknown): CombatantEntry[
     if (sheet?.hp !== undefined || sheet?.maxHp !== undefined) {
       return { ...entry, hp: sheet.hp ?? entry.hp, maxHp: sheet.maxHp ?? entry.maxHp };
     }
-    const member = gameState.get().party.find(
+    const member = readGameState().party.find(
       (candidate) => candidate.id === entry.id || candidate.name.trim().toLowerCase() === entry.name.trim().toLowerCase(),
     );
     if (member?.hp !== undefined || member?.maxHp !== undefined) {
@@ -54,7 +54,7 @@ export default defineTool({
   }),
   execute({ combatants }, ctx) {
     // Для персонажей партии подставляем id из листа, если он есть — это стабильный id игрока.
-    const party = gameState.get().party;
+    const party = readGameState().party;
     const withIds = combatants.map((c) => {
       if (c.side === "party") {
         const member = party.find((m) => m.name.trim().toLowerCase() === c.name.trim().toLowerCase());

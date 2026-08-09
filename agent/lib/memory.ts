@@ -56,15 +56,51 @@ export const gameState = defineState("ttrpg.game", (): GameState => ({
   diceHistory: [],
 }));
 
+/**
+ * Нормализация сырого durable-состояния: подставляет дефолты отсутствующих полей.
+ *
+ * Durable-состояние сессии сохраняется в контексте eve как есть; если сессия
+ * старше кода (поля GameState добавлялись со временем: combat, diceHistory),
+ * `defineState` при восстановлении возвращает старый объект без новых полей, а
+ * инициализатор повторно не запускается. Это валило skill_check и combat-autosave
+ * (`undefined.slice` / `undefined.started`). Выделена отдельно для тестируемости.
+ */
+export function normalizeGameState(raw: Record<string, unknown>): GameState {
+  return {
+    started: raw.started === true,
+    campaignId: typeof raw.campaignId === "string" ? raw.campaignId : undefined,
+    scene: typeof raw.scene === "string" ? raw.scene : "",
+    party: Array.isArray(raw.party) ? (raw.party as PlayerCharacter[]) : [],
+    enemies: Array.isArray(raw.enemies) ? (raw.enemies as Enemy[]) : [],
+    combat: (raw.combat as CombatOrder | undefined) ?? emptyCombatOrder(),
+    journal: Array.isArray(raw.journal) ? (raw.journal as string[]) : [],
+    diceHistory: Array.isArray(raw.diceHistory) ? (raw.diceHistory as number[]) : [],
+  };
+}
+
+/**
+ * Нормализованное чтение состояния: подставляет дефолты отсутствующих полей.
+ *
+ * Durable-состояние сессии сохраняется в контексте eve как есть; если сессия
+ * старше кода (поля GameState добавлялись со временем: combat, diceHistory),
+ * `defineState` при восстановлении возвращает старый объект без новых полей, а
+ * инициализатор повторно не запускается. Это валило skill_check и combat-autosave
+ * (`undefined.slice` / `undefined.started`). Читать gameState нужно только через
+ * эту функцию, чтобы недостающие поля получали безопасные значения.
+ */
+export function readGameState(): GameState {
+  return normalizeGameState(gameState.get() as unknown as Record<string, unknown>);
+}
+
 export function addToParty(character: PlayerCharacter): { ok: boolean; error?: string } {
-  const state = gameState.get();
+  const state = readGameState();
   if (state.party.length >= MAX_PARTY) {
     return { ok: false, error: `Party is full (max ${MAX_PARTY} players).` };
   }
   if (state.party.some((member) => member.name.toLowerCase() === character.name.toLowerCase())) {
     return { ok: false, error: `${character.name} is already in the party.` };
   }
-  gameState.update((s) => ({ ...s, party: [...s.party, character] }));
+  gameState.update((s) => ({ ...s, party: [...(Array.isArray(s.party) ? s.party : []), character] }));
   return { ok: true };
 }
 

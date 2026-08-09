@@ -11,7 +11,7 @@ import {
   makeLuckyRandom,
   skillCheck,
 } from "../lib/engine/dnd5e.ts";
-import { gameState } from "../lib/memory.ts";
+import { gameState, readGameState } from "../lib/memory.ts";
 
 function sessionStats(ctx: ToolSessionContext): Record<string, unknown> {
   const auth = ctx.session.auth.current ?? ctx.session.auth.initiator;
@@ -36,7 +36,7 @@ function sessionStats(ctx: ToolSessionContext): Record<string, unknown> {
  */
 function partyStats(characterName: string): Record<string, unknown> | undefined {
   const name = characterName.trim().toLowerCase();
-  const member = gameState.get().party.find((entry) => entry.name.trim().toLowerCase() === name);
+  const member = readGameState().party.find((entry) => entry.name.trim().toLowerCase() === name);
   return member?.stats;
 }
 
@@ -71,7 +71,8 @@ export default defineTool({
 
     // Влияние окружения (C2): время суток и погода могут давать помеху/преимущество.
     // По правилу 5e преимущество и помеха взаимно отменяются (combineAdvantage).
-    const campaignId = gameState.get().campaignId;
+    const state = readGameState();
+    const campaignId = state.campaignId;
     const campaign = campaignId ? campaignStore.getCampaign(campaignId) : undefined;
     const env = environmentModifiersForCheck(
       { timeOfDay: campaign?.timeOfDay, weather: campaign?.weather },
@@ -81,10 +82,13 @@ export default defineTool({
 
     // «Добрый» псевдорандом: слегка сдвигает d20 вверх и ломает серии низких
     // бросков. Применяется только к проверкам, не к бою/урону/инициативе.
-    const lowStreak = isLowStreak(gameState.get().diceHistory);
+    const lowStreak = isLowStreak(state.diceHistory);
     const result = skillCheck(stats, skill, difficulty, effectiveAdvantage, makeLuckyRandom(Math.random, lowStreak));
     // Запоминаем грань d20 для определения будущих серий неудач.
-    gameState.update((s) => ({ ...s, diceHistory: [...s.diceHistory, result.roll].slice(-4) }));
+    gameState.update((s) => ({
+      ...s,
+      diceHistory: [...(Array.isArray(s.diceHistory) ? s.diceHistory : []), result.roll].slice(-4),
+    }));
     const abilityLabel = ABILITY_LABELS[result.ability] ?? result.ability.toUpperCase();
     const modifierSign = result.modifier >= 0 ? "+" : "";
     const advTag =

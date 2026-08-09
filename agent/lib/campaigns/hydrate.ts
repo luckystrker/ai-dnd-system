@@ -1,6 +1,7 @@
 import { gameState } from "../memory.ts";
 import type { Campaign, CharacterSheet } from "./types.ts";
 import { loadCombatState } from "./combat-store.ts";
+import { emptyCombatOrder } from "../engine/combat.ts";
 
 /**
  * Наполняет состояние игровой сессии из сохранённой кампании:
@@ -22,8 +23,10 @@ export function hydrateGameState(campaign: Campaign, characters: CharacterSheet[
   const saved = loadCombatState(campaign.slug);
   gameState.update((state) => {
     let nextParty = party;
-    let combat = state.combat;
-    let enemies = state.enemies;
+    // Дефолты: durable-состояние старых сессий может не иметь полей combat/enemies
+    // (поля GameState добавлялись со временем) — не персистим undefined обратно.
+    let combat = state.combat ?? emptyCombatOrder();
+    let enemies = Array.isArray(state.enemies) ? state.enemies : [];
     if (saved) {
       combat = saved.combat;
       enemies = saved.enemies;

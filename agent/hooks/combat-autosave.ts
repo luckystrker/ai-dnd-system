@@ -15,7 +15,7 @@ import { toolResultFrom } from "eve/tools";
 
 import { clearCombatState, saveCombatState } from "../lib/campaigns/combat-store.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
-import { gameState } from "../lib/memory.ts";
+import { gameState, readGameState } from "../lib/memory.ts";
 import combatTool from "../tools/combat.ts";
 import initiativeTool from "../tools/initiative.ts";
 
@@ -24,14 +24,14 @@ let lastSignature = "";
 
 /** Кампания текущего хода: по campaignId из durable-состояния сессии. */
 function slugForTurn(): string | undefined {
-  const { campaignId } = gameState.get();
+  const { campaignId } = readGameState();
   if (!campaignId) return undefined;
   return campaignStore.getCampaign(campaignId)?.slug;
 }
 
 /** Компактная подпись состояния боя для сравнения «изменилось ли». */
 function combatSignature(): string {
-  const { combat, enemies } = gameState.get();
+  const { combat, enemies } = readGameState();
   if (!combat.started) return "";
   const order = combat.order
     .map((e) => `${e.id}:${e.hp ?? "?"}:${e.dodging ? "d" : ""}`)
@@ -44,7 +44,7 @@ function combatSignature(): string {
 function syncCombatSave(): void {
   const slug = slugForTurn();
   if (!slug) return;
-  const { combat, enemies } = gameState.get();
+  const { combat, enemies } = readGameState();
   if (!combat.started || enemies.length === 0) {
     // Бой завершён/пуст: стираем сохранение и сбрасываем подпись.
     if (lastSignature !== "") {
