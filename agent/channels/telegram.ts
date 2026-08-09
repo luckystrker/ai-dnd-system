@@ -34,6 +34,8 @@ import { telegramChatQueue } from "../lib/chat-queue.ts";
 import { campaignStore } from "../lib/campaigns/store.ts";
 import { MAX_PARTY } from "../lib/campaigns/types.ts";
 import { telegramLimiter, TELEGRAM_RATE_LIMITS } from "../lib/rate-limit.ts";
+import { markdownToTelegramHtml, stripMarkdown } from "../lib/telegram-format.ts";
+import type { TelegramMessageBody } from "eve/channels/telegram";
 
 const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
 
@@ -179,15 +181,32 @@ async function startTyping(state: TelegramState): Promise<void> {
 async function postText(state: TelegramState, text: string): Promise<void> {
   const chatId = state.chatId;
   if (!chatId) return;
-  try {
-    for (const chunk of splitTelegramMessageText(text)) {
-      await sendTelegramMessage({
-        body: { text: chunk, message_thread_id: state.messageThreadId ?? undefined },
-        chatId,
-      });
+  for (const chunk of splitTelegramMessageText(text)) {
+    try {
+      // eve без parse_mode шлёт текст как есть, и **жирный** из Markdown
+      // светился буквально. Конвертируем Markdown в HTML (см. telegram-format.ts).
+      // TelegramMessageBody не объявляет parse_mode, но eve пробрасывает все
+      // поля тела в sendMessage — см. normalizeTelegramMessageBody.
+      const body = {
+        text: markdownToTelegramHtml(chunk),
+        message_thread_id: state.messageThreadId ?? undefined,
+        parse_mode: "HTML",
+      } as TelegramMessageBody;
+      await sendTelegramMessage({ body, chatId });
+    } catch (error) {
+      // Фолбэк на любой сбой, не только на ошибку парсинга сущностей: если
+      // HTML-отправка упала (в т.ч. транзиентно), не теряем сообщение для игрока,
+      // а доставляем тот же текст без разметки.
+      console.error("telegram channel: HTML sendMessage failed, downgrading to plain text", error);
+      try {
+        await sendTelegramMessage({
+          body: { text: stripMarkdown(chunk), message_thread_id: state.messageThreadId ?? undefined },
+          chatId,
+        });
+      } catch (retryError) {
+        console.error("telegram channel: sendMessage failed", retryError);
+      }
     }
-  } catch (error) {
-    console.error("telegram channel: sendMessage failed", error);
   }
 }
 
