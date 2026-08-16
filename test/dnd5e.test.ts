@@ -486,4 +486,11 @@ describe("isLowStreak", () => {
     assert.equal(isLowStreak([3]), false);
     assert.equal(isLowStreak(new Array(LOW_STREAK_WINDOW - 1).fill(1)), false);
   });
+
+  test("undefined/null history (старое состояние сессии) не валит бросок", () => {
+    // Регрессия: старые durable-состояния без diceHistory давали
+    // "TypeError: Cannot read properties of undefined (reading 'slice')".
+    assert.equal(isLowStreak(undefined), false);
+    assert.equal(isLowStreak(null), false);
+  });
 });

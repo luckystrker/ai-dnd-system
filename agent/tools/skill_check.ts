@@ -84,11 +84,12 @@ export default defineTool({
     // бросков. Применяется только к проверкам, не к бою/урону/инициативе.
     const lowStreak = isLowStreak(state.diceHistory);
     const result = skillCheck(stats, skill, difficulty, effectiveAdvantage, makeLuckyRandom(Math.random, lowStreak));
-    // Запоминаем грань d20 для определения будущих серий неудач.
-    gameState.update((s) => ({
-      ...s,
-      diceHistory: [...(Array.isArray(s.diceHistory) ? s.diceHistory : []), result.roll].slice(-4),
-    }));
+    // Запоминаем грань d20 для определения будущих серий неудач. Старое
+    // durable-состояние сессии может не содержать diceHistory — дефолтим в [].
+    gameState.update((s) => {
+      const diceHistory = Array.isArray(s?.diceHistory) ? s.diceHistory : [];
+      return { ...s, diceHistory: [...diceHistory, result.roll].slice(-4) };
+    });
     const abilityLabel = ABILITY_LABELS[result.ability] ?? result.ability.toUpperCase();
     const modifierSign = result.modifier >= 0 ? "+" : "";
     const advTag =

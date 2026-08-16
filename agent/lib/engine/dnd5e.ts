@@ -218,9 +218,11 @@ export function makeLuckyRandom(base: RandomSource = Math.random, recentLowStrea
 /**
  * true, если последние LOW_STREAK_WINDOW граней d20 — все ниже LOW_ROLL_THRESHOLD.
  * Используется skill_check для включения «доброго» режима (анти-серия).
+ * history может прийти undefined/null из старого durable-состояния сессии —
+ * тогда это не серия (безопасный дефолт вместо undefined.slice).
  */
-export function isLowStreak(history: readonly number[]): boolean {
-  const recent = history.slice(-LOW_STREAK_WINDOW);
+export function isLowStreak(history: readonly number[] | null | undefined): boolean {
+  const recent = (history ?? []).slice(-LOW_STREAK_WINDOW);
   return recent.length >= LOW_STREAK_WINDOW && recent.every((v) => v < LOW_ROLL_THRESHOLD);
 }
 
