@@ -13,14 +13,13 @@ npm run poll                 # 2nd terminal: long-poll -> POST localhost:2000/ev
 npm run typecheck            # tsc (noEmit)
 npm run build                # eve build (bundles; better-sqlite3 stays external — native addon)
 npm test                     # node --test "test/*.test.ts" (node:test + TS type-stripping, no build step)
-node --test test/store.test.ts   # single test file
-npm run smoke                # store round-trip tests (MD + SQLite stores)
-npm run migrate:sqlite       # idempotent MD -> SQLite migration
+node --test test/store-sqlite.test.ts   # single test file
+npm run smoke                # store round-trip tests (SQLite)
 node scripts/dump-sessions.ts [username|chat_id] [--all]   # print chats from .eve/traces (see view-sessions skill)
 ```
 
 CI (`.github/workflows/ci.yml`) runs: `npm ci` → `typecheck` → `test` → `build`
-on Node 24. Tests use temp dirs (`test/helpers.ts`), need no `.env` or DB.
+on Node 24. Tests use temp SQLite DBs (`test/helpers.ts`), need no `.env`.
 
 ## Architecture
 
@@ -32,20 +31,16 @@ on Node 24. Tests use temp dirs (`test/helpers.ts`), need no `.env` or DB.
 - `agent/tools/` — game tools, auto-discovered by eve. `agent/subagents/chronicler/tools/`
   is a deliberate narrower copy for the chronicler subagent — when adding a tool,
   decide consciously whether the chronicler needs it too.
-- Storage split: campaigns/members/characters/quests/threads live in SQLite
-  (`data/campaigns.db`, `CAMPAIGN_DB_PATH`; `CAMPAIGN_STORE=markdown` is the
-  MD fallback — then quests/threads also move to MD). The always-MD layer, in
-  any store, lives in the campaign folder: transcripts (`history/days/`), day
-  summaries + headlines, campaign summary, key events, NPC cards
-  (`agent/lib/campaigns/journal.ts`/`npc.ts`); loot ledger (`history/ledger.md`,
-  `journal.ts`) and overwriteable world-state (`history/world-state.md`,
-  `world-state.ts`); location and faction cards (`locations/`, `factions/` —
-  `locations.ts`/`factions.ts`, same MD pattern as NPC). Combat state snapshot
-  (`combat.md`) is also always-MD, written by `agent/hooks/combat-autosave.ts`
-  so an in-progress fight survives a session restart. In-game time/weather
-  (`timeOfDay`/`inGameDate`/`weather`) live on `Campaign` itself — stored both
-  in SQLite and MD frontmatter — so the engine can read them for mechanical
-  modifiers (night/fog/storm in `dnd5e.ts`).
+- Storage: everything — campaigns, members, characters, quests, open threads,
+  day transcripts, day summaries + headlines, campaign summary, key events,
+  loot ledger, world-state, NPC cards, locations, factions and the combat
+  snapshot — lives in one SQLite database (`data/campaigns.db`,
+  `CAMPAIGN_DB_PATH`; key tables: `campaign_days`, `transcript_entries`,
+  `key_events`, `ledger_rows`, `campaign_summary`, `npcs`, `locations`,
+  `factions`, `world_changes`, `combat_snapshot`). There is no MD layer
+  anymore. In-game time/weather (`timeOfDay`/`inGameDate`/`weather`) live on
+  `Campaign` itself (SQLite columns) so the engine can read them for
+  mechanical modifiers (night/fog/storm in `dnd5e.ts`).
 - `agent/lib/engine/dnd5e.ts` — the only place dice/check rules live; the LLM
   must quote tool results, never invent rolls.
 

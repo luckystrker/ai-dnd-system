@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 
 import { SqliteCampaignStore } from "../agent/lib/campaigns/store-sqlite.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
 import { StoreError, type BoundChat, type Campaign } from "../agent/lib/campaigns/types.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -190,15 +191,6 @@ describe("SqliteCampaignStore", () => {
     );
   });
 
-  test("upsertCampaign and upsertCharacter are idempotent (migration path)", () => {
-    const campaign = createCampaign("Миграция");
-    store.upsertCampaign(campaign, "описание");
-    const sheet = store.saveCharacter(campaign.id, "u-dm", { name: "Герой", characterClass: "воин", race: "человек" });
-    store.upsertCharacter(sheet);
-    assert.equal(store.getCampaign(campaign.slug)?.title, campaign.title);
-    assert.equal(store.listCharacters(campaign.id).length, 1);
-  });
-
   test("role enforcement works", () => {
     const campaign = createCampaign("Права");
     store.addMember(campaign.id, "u-dm", { userId: "u-player" });
@@ -223,5 +215,15 @@ describe("SqliteCampaignStore", () => {
     const reader = new SqliteCampaignStore(path);
     assert.equal(reader.getCampaign(campaign.slug)?.id, campaign.id);
     reader.close();
+  });
+
+  test("openCampaignDb возвращает один общий handle для дефолтного пути", () => {
+    process.env.CAMPAIGN_DB_PATH = join(root, `default-${Date.now()}.db`);
+    const first = openCampaignDb();
+    const second = openCampaignDb();
+    assert.equal(first, second);
+    assert.ok(first.prepare("SELECT 1 AS x").get());
+    // Закрываем, чтобы temp-папка удалилась до конца прогона.
+    first.close();
   });
 });

@@ -8,8 +8,7 @@ import { StoreError } from "../lib/campaigns/types.ts";
 export default defineTool({
   description:
     "Create or update a faction of the campaign: a guild, clan, order or other organization with a " +
-    "standing (reputation) toward the party on a -5 (enemy) .. +5 (ally) scale. Factions live in the " +
-    "campaign's factions/ folder. Use this to introduce political groups; use adjust_standing for " +
+    "standing (reputation) toward the party on a -5 (enemy) .. +5 (ally) scale. Use this to introduce political groups; use adjust_standing for " +
     "reputation changes from quest outcomes.",
   inputSchema: z.object({
     campaignSlug: z
@@ -39,7 +38,7 @@ export default defineTool({
           description: faction.description ?? null,
           standing: faction.standing,
         },
-        note: "Фракция сохранена в папке кампании (factions/).",
+        note: "Фракция сохранена.",
       };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

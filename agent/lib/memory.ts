@@ -105,11 +105,9 @@ export function addToParty(character: PlayerCharacter): { ok: boolean; error?: s
 }
 
 /**
- * Долговременная память кампании живёт в файлах папки кампании:
- * - history/days/day-NNNN.md — транскрипт по игровым дням (пишет hooks/transcript.ts);
- * - history/summary.md, history/key-events.md — саммари и ключевые моменты
- *   (пишет субагент chronicler, см. agent/lib/campaigns/journal.ts);
- * - npcs/ — профили и память NPC (agent/lib/campaigns/npc.ts);
- * - characters/ — листы персонажей с динамическим состоянием.
+ * Долговременная память кампании живёт в SQLite-базе кампаний (campaigns.db):
+ * - транскрипт по игровым дням, саммари и ключевые моменты (journal.ts);
+ * - NPC (профили + память), локации, фракции (npc.ts/locations.ts/factions.ts);
+ * - листы персонажей с динамическим состоянием (store-sqlite.ts).
  * gameState выше — только per-session состояние текущей игры.
  */

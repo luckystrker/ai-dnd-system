@@ -28,7 +28,7 @@ agent/
     ├── engine/dnd5e.ts   # правила: броски и проверки
     ├── memory.ts         # состояние партии (defineState)
     ├── rate-limit.ts     # sliding-window лимитер webhook (чат/пользователь)
-    └── campaigns/        # хранилище кампаний: SQLite (основное) и MD-файлы (откат)
+    └── campaigns/        # вся память кампаний: SQLite (data/campaigns.db)
 ```
 
 ## Кампании и персонажи
@@ -38,12 +38,10 @@ agent/
 `/join` (вступление игрока в кампанию чата), `/newchar` (создание персонажа),
 `/invite` (приглашение игрока, только DM).
 
-- Кампании, участники и персонажи хранятся в SQLite (`data/campaigns.db`,
-  переопределяется `CAMPAIGN_DB_PATH`). `CAMPAIGN_STORE=markdown` включает
-  откат на MD-файлы в `data/campaigns/` (переопределяется `CAMPAIGN_DATA_DIR`).
-  Перенос существующих MD-кампаний в базу: `npm run migrate:sqlite`
-  (идемпотентна). Транскрипты, саммари и NPC остаются MD-файлами в папках
-  кампаний при любом сторе.
+- Вся память кампаний — кампании, участники, персонажи, квесты, открытые
+  нити, транскрипты дней, саммари и ключевые события, лут-журнал, состояние
+  мира, NPC, локации и фракции — хранится в одной SQLite-базе
+  `data/campaigns.db` (переопределяется `CAMPAIGN_DB_PATH`).
 - Кампания создаётся где угодно, но после `/startcampaign` привязывается к
   чату (или топику форум-группы); один чат — одна активная кампания.
 - Роли: `dm` (администратор, создатель кампании) и `player`. Приглашает
@@ -80,9 +78,7 @@ npm run dev -- --no-ui
 
 | Переменная | По умолчанию | Назначение |
 |------------|--------------|------------|
-| `CAMPAIGN_STORE` | `sqlite` | `markdown` — откат на MD-стор |
-| `CAMPAIGN_DB_PATH` | `data/campaigns.db` | путь к SQLite-базе |
-| `CAMPAIGN_DATA_DIR` | `data/campaigns` | корень MD-данных (транскрипты, NPC и MD-стор) |
+| `CAMPAIGN_DB_PATH` | `data/campaigns.db` | путь к SQLite-базе всей памяти кампаний |
 | `TELEGRAM_RATE_LIMIT_CHAT_PER_MIN` | `20` | лимит сообщений на чат/топик в минуту |
 | `TELEGRAM_RATE_LIMIT_USER_PER_MIN` | `10` | лимит сообщений на пользователя в минуту |
 | `TELEGRAM_MAX_UPDATE_BYTES` | `1048576` | максимальный размер входящего update (413 при превышении) |
@@ -193,7 +189,7 @@ cd /opt/ai-dnd-system && ./deploy.sh
 ./deploy.sh --skip-backup    # пропустить преддеплойный бэкап
 ```
 
-Ночные бэкапы `data/` (SQLite `.backup` + архив кампаний, ротация 14 копий):
+Ночные бэкапы `data/` (SQLite `.backup`, ротация 14 копий):
 
 ```bash
 sudo crontab -e
@@ -214,6 +210,5 @@ curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"  # ди
 ```bash
 npm run typecheck
 npm run build
-npm run smoke          # смоук-тест хранилища кампаний (MD- и SQLite-стор)
-npm run migrate:sqlite # перенос MD-кампаний в SQLite (идемпотентно)
+npm run smoke          # смоук-тест хранилища кампаний (SQLite)
 ```

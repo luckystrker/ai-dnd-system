@@ -16,7 +16,7 @@ export default defineTool({
     goal: z.string().optional().describe("Конечная цель игроков, если определена"),
     tone: z.string().optional().describe("Тон повествования"),
     openingScene: z.string().optional().describe("Стартовая сцена, с которой начнётся игра"),
-    description: z.string().optional().describe("Развёрнутое описание кампании для файла"),
+    description: z.string().optional().describe("Развёрнутое описание кампании"),
   }),
   execute(input, ctx) {
     const identity = resolveCallerIdentity(ctx.session.auth.current);

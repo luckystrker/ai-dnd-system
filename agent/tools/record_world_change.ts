@@ -7,7 +7,7 @@ import { upsertWorldChange } from "../lib/campaigns/world-state.ts";
 
 export default defineTool({
   description:
-    "Record a durable change to the world's current state (history/world-state.md) — the opposite of " +
+    "Record a durable change to the world's current state — the opposite of " +
     "an append-only log: it holds what is true NOW, grouped by category. Use for deaths (" +
     "category «Погибшие»), destroyed/built places, decisions taken, alliance shifts. Prevents the " +
     "world from contradicting itself (e.g. reviving a dead NPC). Idempotent by text within a category.",

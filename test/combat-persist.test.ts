@@ -1,7 +1,5 @@
-import { test, describe, after, before } from "node:test";
+import { test, describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 import {
   deserializeCombatOrder,
@@ -16,16 +14,26 @@ import {
   loadCombatState,
   saveCombatState,
 } from "../agent/lib/campaigns/combat-store.ts";
-import { tempDir } from "./helpers.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
+import { SqliteCampaignStore } from "../agent/lib/campaigns/store-sqlite.ts";
+import { tempDb } from "./helpers.ts";
 
-const { root, cleanup } = tempDir("combat-persist");
-process.env.CAMPAIGN_DATA_DIR = root;
+// Фикстура: temp-файл БД (CAMPAIGN_DB_PATH до первого обращения) + кампания.
+const { path, cleanup } = tempDb("combat-persist");
+const store = new SqliteCampaignStore(path);
+after(() => store.close());
 after(cleanup);
 
 const slug = "persist-campaign";
-const campaignRoot = join(root, slug);
-before(() => {
-  rmSync(campaignRoot, { recursive: true, force: true });
+store.createCampaign(
+  { title: "persist-campaign", length: "medium", setting: "Подземелье", theme: "боевик" },
+  { userId: "u-dm" },
+);
+
+// Каждый тест начинает без снимка боя. Первый вызов создаёт таблицы
+// (DDL выполняется лениво), затем чистим их.
+beforeEach(() => {
+  clearCombatState(slug);
 });
 
 /** Детерминированный генератор: d20-броски (значения 1..20). */
@@ -82,7 +90,7 @@ describe("serialize/deserialize combat order", () => {
 });
 
 describe("combat-store save/load/clear", () => {
-  test("returns null when no combat.md exists", () => {
+  test("returns null when no snapshot exists", () => {
     assert.equal(loadCombatState(slug), null);
   });
 
@@ -106,19 +114,26 @@ describe("combat-store save/load/clear", () => {
     assert.equal(loadCombatState(slug), null);
   });
 
-  test("clear removes the file and is idempotent", () => {
+  test("clear removes the snapshot and is idempotent", () => {
     saveCombatState(slug, { combat: sampleOrder(), enemies: [{ id: "g", name: "G", hp: 1, ac: 10 }] });
-    const path = join(campaignRoot, "combat.md");
-    assert.ok(existsSync(path));
+    assert.ok(loadCombatState(slug) !== null);
     clearCombatState(slug);
-    assert.ok(!existsSync(path));
     assert.equal(loadCombatState(slug), null);
     // Повторный clear не падает.
     clearCombatState(slug);
   });
 
-  test("load tolerates corrupted combat.md (returns null)", () => {
-    writeFileSync(join(campaignRoot, "combat.md"), "not yaml frontmatter at all", "utf8");
+  test("load tolerates corrupted snapshot JSON (returns null)", () => {
+    saveCombatState(slug, { combat: sampleOrder(), enemies: [{ id: "g", name: "G", hp: 1, ac: 10 }] });
+    const campaignId = store.getCampaign(slug)!.id;
+    openCampaignDb().prepare("UPDATE combat_snapshot SET combat = 'not json' WHERE campaign_id = ?").run(campaignId);
     assert.equal(loadCombatState(slug), null);
+  });
+
+  test("returns null for an unknown campaign without throwing", () => {
+    assert.equal(loadCombatState("no-such-campaign"), null);
+    saveCombatState("no-such-campaign", { combat: sampleOrder(), enemies: [{ id: "e", name: "E", hp: 1, ac: 10 }] });
+    assert.equal(loadCombatState("no-such-campaign"), null);
+    clearCombatState("no-such-campaign");
   });
 });

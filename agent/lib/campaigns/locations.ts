@@ -1,32 +1,125 @@
 /**
- * Хранилище локаций кампании (C1 — карта/локации): папка locations/ внутри
- * папки кампании, по образцу npc.ts. Frontmatter хранит профиль локации
- * (описание, связи, дни посещения, current), тело файла — свободные заметки.
+ * Хранилище локаций кампании на SQLite: таблица locations в базе кампаний
+ * (campaigns.db). Профиль локации (описание, связи, дни посещения, current)
+ * лежит в одной строке; connections и visitedDays — JSON-колонками.
  *
  * current-флаг один на кампанию: при установке current=true у одной локации
  * он снимается с остальных (партия может находиться только в одном месте).
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type BetterSqlite3 from "better-sqlite3";
 
-import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
-import { assertCampaignSlug, campaignDataRoot, campaignStore, slugify } from "./store.ts";
+import { openCampaignDb } from "./sqlite-db.ts";
+import { campaignStore, slugify } from "./store.ts";
 import { StoreError, type Location, type LocationConnection, type UpsertLocationInput } from "./types.ts";
 
-export class MarkdownLocationStore {
-  private readonly root: string;
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS locations (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  connections TEXT NOT NULL DEFAULT '[]', -- JSON LocationConnection[]
+  discovered_day INTEGER,
+  visited_days TEXT NOT NULL DEFAULT '[]', -- JSON number[]
+  current INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
+  UNIQUE (campaign_id, slug)
+);
+`;
 
-  constructor(root: string) {
-    this.root = root;
+interface LocationRow {
+  id: string;
+  campaign_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  connections: string;
+  discovered_day: number | null;
+  visited_days: string;
+  current: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+// Ленивое открытие БД: handle и DDL создаются при первом обращении, а не
+// в конструкторе и не на импорте модуля (eve-снапшот компиляции падает при
+// открытии better-sqlite3 на этапе сборки тулов).
+let dbHandle: BetterSqlite3.Database | undefined;
+let schemaReady = false;
+function db(): BetterSqlite3.Database {
+  if (!dbHandle) dbHandle = openCampaignDb();
+  if (!schemaReady) {
+    dbHandle.exec(SCHEMA);
+    schemaReady = true;
   }
+  return dbHandle;
+}
 
+/** Связи как JSON-строка: [{to, via?, discoveredDay?}]. */
+function serializeConnections(connections: LocationConnection[]): string {
+  const items = connections.map((connection) => ({
+    to: connection.to,
+    ...(connection.via ? { via: connection.via } : {}),
+    ...(connection.discoveredDay !== undefined ? { discoveredDay: connection.discoveredDay } : {}),
+  }));
+  return JSON.stringify(items);
+}
+
+function deserializeConnections(value: string): LocationConnection[] {
+  const connections: LocationConnection[] = [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return connections;
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      const to = typeof record.to === "string" ? record.to : "";
+      if (!to) continue;
+      const connection: LocationConnection = { to };
+      if (typeof record.via === "string" && record.via) connection.via = record.via;
+      if (typeof record.discoveredDay === "number") connection.discoveredDay = record.discoveredDay;
+      connections.push(connection);
+    }
+  } catch {
+    // Повреждённый JSON игнорируем.
+  }
+  return connections;
+}
+
+function deserializeVisitedDays(value: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => Number(item)).filter((item) => Number.isFinite(item));
+  } catch {
+    return [];
+  }
+}
+
+function rowToLocation(row: LocationRow): Location {
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    name: row.name,
+    slug: row.slug,
+    description: row.description ?? undefined,
+    connections: deserializeConnections(row.connections),
+    discoveredDay: row.discovered_day ?? undefined,
+    visitedDays: deserializeVisitedDays(row.visited_days),
+    current: row.current === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at ?? undefined,
+  };
+}
+
+export class SqliteLocationStore {
   /** Создаёт или обновляет локацию (поиск по имени без учёта регистра). */
   upsertLocation(campaignIdOrSlug: string, input: UpsertLocationInput & { name: string }): Location {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const existing = this.listLocations(campaign.id).find(
-      (location) => location.name.toLowerCase() === input.name!.toLowerCase(),
-    );
+    const existing = this.findByName(campaign.id, input.name);
     const now = new Date().toISOString();
     const profile: Location = existing
       ? { ...existing }
@@ -34,7 +127,7 @@ export class MarkdownLocationStore {
           id: randomUUID(),
           campaignId: campaign.id,
           name: input.name,
-          slug: this.uniqueSlug(campaign.slug, slugify(input.name)),
+          slug: this.uniqueSlug(campaign.id, slugify(input.name)),
           connections: [],
           visitedDays: [],
           createdAt: now,
@@ -44,7 +137,7 @@ export class MarkdownLocationStore {
     if (input.connections !== undefined) profile.connections = input.connections;
     profile.updatedAt = now;
 
-    this.writeLocation(campaign.slug, profile);
+    this.writeLocation(profile);
 
     // current — один на кампанию: снимаем с остальных при установке true.
     if (input.current === true) {
@@ -53,7 +146,7 @@ export class MarkdownLocationStore {
     } else if (input.current === false) {
       // Снятие только у этой локации.
       profile.current = false;
-      this.writeLocation(campaign.slug, profile);
+      this.writeLocation(profile);
     }
     return profile;
   }
@@ -65,12 +158,9 @@ export class MarkdownLocationStore {
     if (!target) {
       throw new StoreError(`Локация «${locationSlug}» не найдена.`, "not_found");
     }
-    for (const location of this.listLocations(campaign.id)) {
-      const becomesCurrent = location.slug === target.slug;
-      if (location.current !== becomesCurrent) {
-        this.writeLocation(campaign.slug, { ...location, current: becomesCurrent });
-      }
-    }
+    const now = new Date().toISOString();
+    db().prepare("UPDATE locations SET current = 0, updated_at = ? WHERE campaign_id = ?").run(now, campaign.id);
+    db().prepare("UPDATE locations SET current = 1, updated_at = ? WHERE id = ?").run(now, target.id);
   }
 
   /** Отмечает день посещения (добавляет в visitedDays, без дубликатов). */
@@ -82,40 +172,30 @@ export class MarkdownLocationStore {
       location.visitedDays = [...location.visitedDays, day].sort((a, b) => a - b);
     }
     location.updatedAt = new Date().toISOString();
-    this.writeLocation(campaign.slug, location);
+    this.writeLocation(location);
     return location;
   }
 
   getLocation(campaignIdOrSlug: string, nameOrSlug: string): Location | undefined {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const needle = nameOrSlug.toLowerCase();
-    return this.listLocations(campaign.id).find(
-      (location) =>
-        location.id === nameOrSlug ||
-        location.slug.toLowerCase() === needle ||
-        location.name.toLowerCase() === needle,
-    );
+    const row = this.findRow(campaign.id, nameOrSlug);
+    return row ? rowToLocation(row) : undefined;
   }
 
   currentLocation(campaignIdOrSlug: string): Location | undefined {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    return this.listLocations(campaign.id).find((location) => location.current === true);
+    const row = db().prepare(
+      "SELECT * FROM locations WHERE campaign_id = ? AND current = 1 LIMIT 1",
+    ).get(campaign.id) as LocationRow | undefined;
+    return row ? rowToLocation(row) : undefined;
   }
 
   listLocations(campaignIdOrSlug: string): Location[] {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const dir = this.locationsDir(campaign.slug);
-    if (!existsSync(dir)) return [];
-    const profiles: Location[] = [];
-    for (const entry of readdirSync(dir)) {
-      if (!entry.endsWith(".md")) continue;
-      try {
-        profiles.push(docToLocation(readFileSync(join(dir, entry), "utf8")));
-      } catch {
-        // Повреждённый профиль пропускаем.
-      }
-    }
-    return profiles.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const rows = db().prepare(
+      "SELECT * FROM locations WHERE campaign_id = ? ORDER BY created_at",
+    ).all(campaign.id) as LocationRow[];
+    return rows.map(rowToLocation);
   }
 
   // --- Внутренние помощники ---
@@ -128,92 +208,67 @@ export class MarkdownLocationStore {
     return { id: campaign.id, slug: campaign.slug };
   }
 
-  private locationsDir(campaignSlug: string): string {
-    assertCampaignSlug(campaignSlug);
-    return join(this.root, campaignSlug, "locations");
+  private findByName(campaignId: string, name: string): Location | undefined {
+    const needle = name.toLowerCase();
+    const rows = db().prepare("SELECT * FROM locations WHERE campaign_id = ?").all(campaignId) as LocationRow[];
+    const row = rows.find((candidate) => candidate.name.toLowerCase() === needle);
+    return row ? rowToLocation(row) : undefined;
   }
 
-  private uniqueSlug(campaignSlug: string, base: string): string {
-    const dir = this.locationsDir(campaignSlug);
+  private findRow(campaignId: string, nameOrSlug: string): LocationRow | undefined {
+    const needle = nameOrSlug.toLowerCase();
+    const rows = db().prepare("SELECT * FROM locations WHERE campaign_id = ?").all(campaignId) as LocationRow[];
+    return rows.find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+  }
+
+  private uniqueSlug(campaignId: string, base: string): string {
+    const probe = db().prepare("SELECT 1 FROM locations WHERE campaign_id = ? AND slug = ?");
     let slug = base || "location";
     let counter = 2;
-    while (existsSync(join(dir, `${slug}.md`))) {
+    while (probe.get(campaignId, slug)) {
       slug = `${base}-${counter}`;
       counter += 1;
     }
     return slug;
   }
 
-  private writeLocation(campaignSlug: string, profile: Location): void {
-    const dir = this.locationsDir(campaignSlug);
-    mkdirSync(dir, { recursive: true });
-    const doc = buildDocument(locationToFrontmatter(profile), profile.description ?? "");
-    writeFileSync(join(dir, `${profile.slug}.md`), doc, "utf8");
+  private writeLocation(profile: Location): void {
+    db().prepare(
+      `INSERT OR REPLACE INTO locations (
+         id, campaign_id, slug, name, description, connections, discovered_day,
+         visited_days, current, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      profile.id,
+      profile.campaignId,
+      profile.slug,
+      profile.name,
+      profile.description ?? null,
+      serializeConnections(profile.connections),
+      profile.discoveredDay ?? null,
+      JSON.stringify(profile.visitedDays),
+      profile.current === true ? 1 : 0,
+      profile.createdAt,
+      profile.updatedAt ?? null,
+    );
   }
 }
 
-function locationToFrontmatter(profile: Location): Record<string, unknown> {
-  return {
-    id: profile.id,
-    campaignId: profile.campaignId,
-    name: profile.name,
-    slug: profile.slug,
-    description: profile.description,
-    connections: profile.connections,
-    discoveredDay: profile.discoveredDay,
-    visitedDays: profile.visitedDays,
-    current: profile.current,
-    createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt,
-  };
+/** Ленивый синглтон: БД открывается при первом обращении к методу, а не на импорте. */
+function lazySingleton(): SqliteLocationStore {
+  let instance: SqliteLocationStore | undefined;
+  return new Proxy({} as SqliteLocationStore, {
+    get(_target, prop, receiver) {
+      if (!instance) instance = new SqliteLocationStore();
+      const value = Reflect.get(instance, prop, receiver);
+      return typeof value === "function" ? value.bind(instance) : value;
+    },
+  });
 }
 
-function asString(value: unknown): string {
-  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function parseConnections(value: unknown): LocationConnection[] {
-  if (!Array.isArray(value)) return [];
-  const connections: LocationConnection[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    const to = asString(record.to);
-    if (!to) continue;
-    const connection: LocationConnection = { to };
-    if (record.via !== undefined) {
-      const via = asString(record.via);
-      if (via) connection.via = via;
-    }
-    const discoveredDay = asNumber(record.discoveredDay);
-    if (discoveredDay !== undefined) connection.discoveredDay = discoveredDay;
-    connections.push(connection);
-  }
-  return connections;
-}
-
-function docToLocation(doc: string): Location {
-  const { data, body } = splitFrontmatter(doc);
-  const visitedDays = Array.isArray(data.visitedDays)
-    ? (data.visitedDays as unknown[]).map((item) => Number(item)).filter((item) => Number.isFinite(item))
-    : [];
-  return {
-    id: asString(data.id),
-    campaignId: asString(data.campaignId),
-    name: asString(data.name),
-    slug: asString(data.slug),
-    description: body.trim() ? body.trim() : undefined,
-    connections: parseConnections(data.connections),
-    discoveredDay: asNumber(data.discoveredDay),
-    visitedDays,
-    current: data.current === true,
-    createdAt: asString(data.createdAt),
-    updatedAt: data.updatedAt ? asString(data.updatedAt) : undefined,
-  };
-}
-
-export const locationStore: MarkdownLocationStore = new MarkdownLocationStore(campaignDataRoot());
+export const locationStore: SqliteLocationStore = lazySingleton();

@@ -19,8 +19,7 @@ const relationshipSchema = z.object({
 export default defineTool({
   description:
     "Create or update an NPC of the campaign: profile (role, status, location), relationships " +
-    "toward party members and a memory note about what the players did to this NPC. NPCs live in " +
-    "the campaign's npcs/ folder and are loaded dynamically. Call this whenever a notable NPC " +
+    "toward party members and a memory note about what the players did to this NPC. Call this whenever a notable NPC " +
     "appears or something changes for them.",
   inputSchema: z.object({
     campaignSlug: z
@@ -75,7 +74,7 @@ export default defineTool({
           location: npc.location ?? null,
           relationships: npc.relationships,
         },
-        note: "NPC сохранён в папке кампании (npcs/).",
+        note: "NPC сохранён.",
       };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

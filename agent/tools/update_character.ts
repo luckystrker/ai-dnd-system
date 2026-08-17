@@ -63,7 +63,7 @@ export default defineTool({
           xp: sheet.xp ?? null,
           location: sheet.location ?? null,
         },
-        note: "Состояние персонажа обновлено в папке кампании.",
+        note: "Состояние персонажа обновлено.",
       };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

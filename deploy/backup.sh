@@ -4,8 +4,8 @@
 #
 # Что бэкапим:
 #   - SQLite-БД:     data/campaigns.db  (через sqlite3 .backup — согласованно с активным WAL)
-#   - MD-кампании:   data/campaigns/    (tar.gz — транскрипты, NPC, локации, фракции,
-#                     лут-леджер, world-state, combat.md)
+#                     вся память кампаний — кампании, журнал, NPC, локации, фракции,
+#                     лут-леджер, world-state, combat — в одной базе
 #
 # Ротация: храним последние BACKUP_KEEP копий (по умолч. 14), старые удаляем.
 #
@@ -44,27 +44,20 @@ echo "Бэкап от $stamp → $dest"
 # 1. SQLite: согласованный снимок через .backup (не повреждает активный WAL).
 if [[ -f "$DB_PATH" ]]; then
   echo "  • SQLite .backup..."
+  # Чекпоинт WAL перед копией, чтобы файлы -wal/-shm не остались непустыми.
+  sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
   sqlite3 "$DB_PATH" ".backup '$dest/$(basename "$DB_PATH")'"
   echo "    ✓ $(basename "$DB_PATH")"
 else
-  echo "  • БД $DB_PATH не найдена — пропускаю (возможно, CAMPAIGN_STORE=markdown)."
+  echo "  • БД $DB_PATH не найдена — пропускаю (бот ещё не запускался?)."
 fi
 
-# 2. MD-кампании: транскрипты, карты NPC/локаций/фракций, лут, world-state, combat.
-if [[ -d "$DATA_DIR/campaigns" ]]; then
-  echo "  • Архивация data/campaigns/..."
-  tar -czf "$dest/campaigns.tar.gz" -C "$DATA_DIR" campaigns
-  echo "    ✓ campaigns.tar.gz ($(du -h "$dest/campaigns.tar.gz" | cut -f1))"
-else
-  echo "  • data/campaigns/ не найден — пропускаю."
-fi
-
-# 3. Копируем .env, чтобы иметь под рукой конфигурацию на момент бэкапа.
+# 2. Копируем .env, чтобы иметь под рукой конфигурацию на момент бэкапа.
 if [[ -f "$INSTALL_DIR/.env" ]]; then
   cp "$INSTALL_DIR/.env" "$dest/env.txt"
 fi
 
-# 4. Ротация: оставляем BACKUP_KEEP последних копий.
+# 3. Ротация: оставляем BACKUP_KEEP последних копий.
 echo "  • Ротация (оставляем $BACKUP_KEEP копий)..."
 # Список бэкап-каталогов по времени имени, свежие сверху; удаляем всё после N.
 deleted=0
@@ -76,6 +69,6 @@ for d in "${dirs[@]:$BACKUP_KEEP}"; do
 done
 echo "    ✓ удалено старых: $deleted"
 
-# 5. Сводка.
+# 4. Сводка.
 total_size=$(du -sh "$dest" | cut -f1)
 c_green "✓ Бэкап готов: $dest ($total_size)"

@@ -7,7 +7,7 @@ import { StoreError } from "../lib/campaigns/types.ts";
 
 export default defineTool({
   description:
-    "Add (or replace) the campaign-wide summary section for one in-game day in history/summary.md. " +
+    "Add (or replace) the campaign-wide summary section for one in-game day. " +
     "This is the rolling digest the DM loads in later sessions instead of the full transcript.",
   inputSchema: z.object({
     campaignSlug: z
@@ -25,7 +25,7 @@ export default defineTool({
     try {
       const campaign = resolveCampaignForWrite(ctx.session.auth.current, campaignSlug);
       upsertCampaignSummaryDay(campaign.slug, day, text);
-      return { ok: true, day, note: "Саммари дня добавлено в хронику кампании (history/summary.md)." };
+      return { ok: true, day, note: "Саммари дня добавлено в хронику кампании." };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };
       throw error;

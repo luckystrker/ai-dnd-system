@@ -1,35 +1,16 @@
 /**
- * Хранилище кампаний на SQLite: реализация того же интерфейса CampaignStore,
- * что и MarkdownCampaignStore. Основной стор (один БД-файл вместо дерева
- * MD-файлов, индексный поиск по привязанному чату); MD-стор сохранён как
- * откат (CAMPAIGN_STORE=markdown) и как источник для миграции
- * (scripts/migrate-md-to-sqlite.ts).
+ * Хранилище кампаний на SQLite: реализация интерфейса CampaignStore —
+ * единственный стор бота (один БД-файл вместо дерева MD-файлов, индексный
+ * поиск по привязанному чату).
  *
- * Транскрипты, саммари и NPC остаются в MD-файлах (journal.ts, npc.ts):
- * они вне интерфейса CampaignStore и используют slug кампании для путей.
+ * Память кампаний (журнал, NPC и т.п.) живёт в той же базе — см.
+ * sqlite-db.ts, journal.ts, npc.ts.
  */
-import { mkdirSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type BetterSqlite3 from "better-sqlite3";
 
-/**
- * better-sqlite3 — нативный аддон: бандлер eve не может корректно собрать
- * .node-бинарник (ищет его относительно собственного выходного каталога).
- * Поэтому пакет не импортируется статически, а грузится в рантайме через
- * require из node_modules проекта. type-import выше на рантайм не влияет.
- */
-const projectRequire = createRequire(resolve(process.cwd(), "package.json"));
-let databaseCtor: typeof BetterSqlite3 | undefined;
-function betterSqlite(): typeof BetterSqlite3 {
-  if (!databaseCtor) {
-    databaseCtor = projectRequire("better-sqlite3") as typeof BetterSqlite3;
-  }
-  return databaseCtor;
-}
-
+import { openCampaignDb } from "./sqlite-db.ts";
 import { slugify } from "./store.ts";
 import {
   MAX_PARTY,
@@ -327,10 +308,7 @@ export class SqliteCampaignStore implements CampaignStore {
   private readonly db: BetterSqlite3.Database;
 
   constructor(dbPath: string) {
-    mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new (betterSqlite())(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
+    this.db = openCampaignDb(dbPath);
     this.db.exec(SCHEMA);
     this.migrate();
   }
@@ -397,7 +375,7 @@ export class SqliteCampaignStore implements CampaignStore {
 
   findByBoundChat(chatId: string, messageThreadId?: number, options?: { anyStatus?: boolean }): Campaign | undefined {
     // bound_thread_id IS ? — null-safe сравнение: кампания без топика
-    // совпадает только с запросом без топика (как в MarkdownCampaignStore).
+    // совпадает только с запросом без топика.
     const statusClause = options?.anyStatus === true ? "" : "AND status = 'active'";
     const row = this.db
       .prepare(`SELECT * FROM campaigns WHERE bound_chat_id = ? AND bound_thread_id IS ? ${statusClause} LIMIT 1`)
@@ -774,63 +752,12 @@ export class SqliteCampaignStore implements CampaignStore {
     return this.listCharacterRows(campaignId).map((row) => this.sheetFromRow(row));
   }
 
-  /** Описание кампании (тело campaign.md в MD-сторе) — для полноты миграции. */
+  /** Описание кампании (ранее — тело файла кампании; теперь колонка description). */
   readDescription(campaignIdOrSlug: string): string {
     const row = this.db
       .prepare("SELECT description FROM campaigns WHERE id = ? OR slug = ? LIMIT 1")
       .get(campaignIdOrSlug, campaignIdOrSlug) as { description: string } | undefined;
     return row?.description ?? "";
-  }
-
-  // --- Upsert'ы для миграции из MD (scripts/migrate-md-to-sqlite.ts) ---
-
-  upsertCampaign(campaign: Campaign, description: string): void {
-    this.db
-      .prepare(
-        `INSERT INTO campaigns (
-           id, slug, title, status, owner_user_id, length, setting, theme, goal, tone,
-           opening_scene, description, bound_chat_id, bound_thread_id, current_day,
-           time_of_day, in_game_date, weather, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           slug = excluded.slug, title = excluded.title, status = excluded.status,
-           owner_user_id = excluded.owner_user_id, length = excluded.length,
-           setting = excluded.setting, theme = excluded.theme, goal = excluded.goal,
-           tone = excluded.tone, opening_scene = excluded.opening_scene,
-           description = excluded.description, bound_chat_id = excluded.bound_chat_id,
-           bound_thread_id = excluded.bound_thread_id, current_day = excluded.current_day,
-           time_of_day = excluded.time_of_day, in_game_date = excluded.in_game_date,
-           weather = excluded.weather, created_at = excluded.created_at`,
-      )
-      .run(
-        campaign.id,
-        campaign.slug,
-        campaign.title,
-        campaign.status,
-        campaign.ownerUserId,
-        campaign.length,
-        campaign.setting,
-        campaign.theme,
-        campaign.goal ?? null,
-        campaign.tone ?? null,
-        campaign.openingScene ?? null,
-        description,
-        campaign.boundChat?.chatId ?? null,
-        campaign.boundChat?.messageThreadId ?? null,
-        campaign.currentDay ?? null,
-        campaign.timeOfDay ?? null,
-        campaign.inGameDate ?? null,
-        campaign.weather ?? null,
-        campaign.createdAt,
-      );
-    this.db.prepare("DELETE FROM campaign_members WHERE campaign_id = ?").run(campaign.id);
-    for (const member of campaign.members) {
-      this.insertMember(campaign.id, member);
-    }
-  }
-
-  upsertCharacter(sheet: CharacterSheet): void {
-    this.insertCharacter(sheet, { upsert: true });
   }
 
   close(): void {
@@ -1079,24 +1006,14 @@ export class SqliteCampaignStore implements CampaignStore {
       .run(campaignId, member.userId, member.name ?? null, member.username ?? null, member.role);
   }
 
-  private insertCharacter(sheet: CharacterSheet, options?: { upsert?: boolean }): void {
-    const conflict = options?.upsert === true
-      ? `ON CONFLICT(id) DO UPDATE SET
-           campaign_id = excluded.campaign_id, slug = excluded.slug, name = excluded.name,
-           owner_user_id = excluded.owner_user_id, class = excluded.class, race = excluded.race,
-           level = excluded.level, stats = excluded.stats, background = excluded.background,
-           motivation = excluded.motivation, appearance = excluded.appearance, hp = excluded.hp,
-           max_hp = excluded.max_hp, conditions = excluded.conditions, inventory = excluded.inventory,
-           abilities = excluded.abilities, gold = excluded.gold, xp = excluded.xp,
-           location = excluded.location, updated_at = excluded.updated_at, created_at = excluded.created_at`
-      : "";
+  private insertCharacter(sheet: CharacterSheet): void {
     this.db
       .prepare(
         `INSERT INTO characters (
            id, campaign_id, slug, name, owner_user_id, class, race, level, stats, background,
            motivation, appearance, hp, max_hp, conditions, inventory, abilities, gold, xp, location,
            updated_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ${conflict}`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sheet.id,

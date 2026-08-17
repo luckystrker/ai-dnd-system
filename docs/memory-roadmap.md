@@ -32,11 +32,11 @@ Location {
 }
 ```
 
-**Хранение (выбран вариант A — MD по паттерну NPC).** MD-файлы
-`data/campaigns/<slug>/locations/<slug>.md` (frontmatter = профиль, тело =
-описание/заметки) — `agent/lib/campaigns/locations.ts`, всегда-MD.
-`MarkdownLocationStore` + singleton `locationStore`. `current` — один на кампанию
-(при установке снимается с остальных).
+**Хранение (устарело: был выбран MD по паттерну NPC — заменено SQLite).** Раньше
+MD-файлы `data/campaigns/<slug>/locations/<slug>.md` (frontmatter = профиль,
+тело = описание/заметки); теперь — таблица `locations` в `data/campaigns.db`
+(`agent/lib/campaigns/locations.ts`, singleton `locationStore`). `current` — один
+на кампанию (при установке снимается с остальных).
 
 **Интеграция.** Секция `### Карта` в авто-блоке памяти
 (`agent/instructions/campaign-context.ts`): текущая локация + известные связи.
@@ -54,9 +54,9 @@ Location {
 
 **Структура.** Поля на `Campaign` (`agent/lib/campaigns/types.ts`):
 `timeOfDay` (morning/day/evening/night), `inGameDate` (строка по календарю мира),
-`weather?`. Хранятся и в SQLite (`time_of_day`/`in_game_date`/`weather`,
-миграция idempotent `ALTER TABLE`), и в MD-frontmatter. `advanceDay` сбрасывает
-`timeOfDay = "morning"`.
+`weather?`. Хранятся в SQLite как колонки `campaigns` (`time_of_day`/
+`in_game_date`/`weather`, миграция idempotent `ALTER TABLE`). `advanceDay`
+сбрасывает `timeOfDay = "morning"`.
 
 **Интеграция.** В авто-блоке памяти — строка «Игровое время: вечер, 3 день
 Месяца Туманов; пасмурно» (`environmentLine`). Тулы: `advance_time` (циклит
@@ -77,8 +77,8 @@ Location {
 нас этот меч» или «на что мы потратили 50 золотых в день 3». Экономика
 непрозрачна.
 
-**Структура.** Append-only журнал в
-`data/campaigns/<slug>/history/ledger.md` (по паттерну key-events):
+**Структура.** Append-only журнал — таблица `ledger_rows` в `data/campaigns.db`
+(по паттерну key-events):
 ```
 { day, type: found | spent, itemOrGold, by?, note? }
 ```
@@ -104,9 +104,10 @@ Location {
 standing: number, createdAt, updatedAt? }` (репутация партии: -5..+5).
 `NpcProfile.relationships` остался `Record<string, NpcRelationship>` — ключом
 может быть и имя фракции (без структурного изменения).
-Хранение (выбран MD по паттерну NPC): `data/campaigns/<slug>/factions/<slug>.md` —
-`agent/lib/campaigns/factions.ts`, `MarkdownFactionStore` + singleton `factionStore`.
-`adjustStanding` клампит в -5..+5.
+Хранение (устарело: был выбран MD по паттерну NPC — заменено SQLite): раньше
+`data/campaigns/<slug>/factions/<slug>.md`; теперь таблица `factions` в
+`data/campaigns.db` — `agent/lib/campaigns/factions.ts`, singleton
+`factionStore`. `adjustStanding` клампит в -5..+5.
 
 **Интеграция.** В авто-блоке — секция `### Фракции` с текущим standing.
 Тулы: `upsert_faction`, `adjust_standing`. Связь с квестами: `complete_quest`
@@ -118,13 +119,13 @@ standing: number, createdAt, updatedAt? }` (репутация партии: -5.
 
 ## C5. Состояние мира / последствия — ✅ реализовано
 
-**Проблема.** `key-events.md` — это журнал моментов (append-only), а не живое
+**Проблема.** Ключевые события — журнал моментов (append-only), а не живое
 текущее состояние мира. «Кто сейчас мёртв», «какой город сожжён», «какие
 решения приняты» — всё это размазано по саммари и key-events. Мир не реагирует
 на прошлые решения последовательно: бот может «оживить» убитого NPC.
 
-**Структура.** Перезаписываемый (не журнал!)
-`data/campaigns/<slug>/history/world-state.md` с актуальными фактами мира:
+**Структура.** Перезаписываемое (не журнал!) состояние мира — таблица
+`world_changes` в `data/campaigns.db` с актуальными фактами мира:
 ```
 ## Погибшие
 - Ян (день 1) — найден у ручья
@@ -157,17 +158,17 @@ standing: number, createdAt, updatedAt? }` (репутация партии: -5.
 
 ## Общие принципы для всех пунктов
 
-- Соблюдать существующий split: структурированные данные → SQLite, нарратив →
-  MD-файлы в папке кампании (см. обновлённый `AGENTS.md`). C1/C4/C3/C5 — всегда-MD
-  по паттерну `npc.ts`; C2 — поля на `Campaign` (нужны в движке для механики),
-  хранятся и в SQLite, и в MD-frontmatter.
+- Вся память кампаний живёт в одной SQLite-базе `data/campaigns.db` (см.
+  `AGENTS.md`). C1/C4/C3/C5 — таблицы `locations`, `factions`, `ledger_rows`,
+  `world_changes`; C2 — поля на `Campaign` (нужны в движке для механики),
+  колонки `campaigns` (`time_of_day`/`in_game_date`/`weather`).
 - Новые секции добавлять в `buildMemoryBlock` (`campaign-context.ts`) с
   разумными капами; растущие журналы (ledger) не грузить целиком — через
   `list_ledger` / `search_memory`.
 - Chronicler обновляет новые типы памяти при закрытии дня (шаги 8–10 в
   `agent/subagents/chronicler/instructions.md`); outputSchema расширена счётчиками
   `locationsUpdated` / `factionsUpdated` / `worldChangesWritten`.
-- Тесты на темп-папках (`test/helpers.ts`), без `.env`/БД: `test/locations.test.ts`,
-  `test/factions.test.ts`, `test/world-state.test.ts`, `test/ledger.test.ts`,
-  `test/dnd5e-environment.test.ts`, расширены `test/store.test.ts` /
+- Тесты на временной SQLite-базе (`test/helpers.ts`), без `.env`:
+  `test/locations.test.ts`, `test/factions.test.ts`, `test/world-state.test.ts`,
+  `test/ledger.test.ts`, `test/dnd5e-environment.test.ts`, расширены
   `test/store-sqlite.test.ts`.

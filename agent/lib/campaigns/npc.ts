@@ -1,14 +1,14 @@
 /**
- * Хранилище NPC кампании: отдельная папка npcs/ внутри папки кампании.
- * Frontmatter хранит профиль (роль, статус, отношения), тело файла —
- * память NPC: что игроки с ним сделали и что он об этом знает.
+ * Хранилище NPC кампании на SQLite: таблица npcs в базе кампаний
+ * (campaigns.db). Профиль NPC (роль, статус, отношения) и его память —
+ * что игроки с ним сделали и что он об этом знает — лежат в одной строке:
+ * память в колонке memory (отрендеренные строки), отношения — JSON-колонкой.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type BetterSqlite3 from "better-sqlite3";
 
-import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
-import { assertCampaignSlug, campaignDataRoot, campaignStore, slugify } from "./store.ts";
+import { openCampaignDb } from "./sqlite-db.ts";
+import { campaignStore, slugify } from "./store.ts";
 import { StoreError, type NpcProfile, type NpcRelationship, type NpcStatus } from "./types.ts";
 
 /** Входные данные для создания/обновления NPC. */
@@ -27,19 +27,114 @@ export interface NpcUpsertInput {
   memoryAppendDay?: number;
 }
 
-export class MarkdownNpcStore {
-  private readonly root: string;
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS npcs (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  role TEXT,
+  status TEXT NOT NULL DEFAULT 'alive',
+  location TEXT,
+  relationships TEXT NOT NULL DEFAULT '{}', -- JSON: имя персонажа -> {attitude, notes?}
+  first_seen_day INTEGER,
+  last_seen_day INTEGER,
+  memory TEXT NOT NULL DEFAULT '',         -- отрендеренные строки памяти NPC
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
+  UNIQUE (campaign_id, slug)
+);
+`;
 
-  constructor(root: string) {
-    this.root = root;
+interface NpcRow {
+  id: string;
+  campaign_id: string;
+  slug: string;
+  name: string;
+  role: string | null;
+  status: string;
+  location: string | null;
+  relationships: string;
+  first_seen_day: number | null;
+  last_seen_day: number | null;
+  memory: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+// Ленивое открытие БД: handle и DDL создаются при первом обращении, а не
+// в конструкторе и не на импорте модуля (eve-снапшот компиляции падает при
+// открытии better-sqlite3 на этапе сборки тулов).
+let dbHandle: BetterSqlite3.Database | undefined;
+let schemaReady = false;
+function db(): BetterSqlite3.Database {
+  if (!dbHandle) dbHandle = openCampaignDb();
+  if (!schemaReady) {
+    dbHandle.exec(SCHEMA);
+    schemaReady = true;
   }
+  return dbHandle;
+}
 
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
+}
+
+/** Отношения как JSON-строка: имя персонажа -> {attitude, notes?}. */
+function serializeRelationships(relationships: Record<string, NpcRelationship>): string {
+  const record: Record<string, unknown> = {};
+  for (const [name, relation] of Object.entries(relationships)) {
+    record[name] = { attitude: relation.attitude, ...(relation.notes ? { notes: relation.notes } : {}) };
+  }
+  return JSON.stringify(record);
+}
+
+function deserializeRelationships(value: string): Record<string, NpcRelationship> {
+  const relationships: Record<string, NpcRelationship> = {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return relationships;
+    for (const [name, item] of Object.entries(parsed as Record<string, unknown>)) {
+      if (item && typeof item === "object") {
+        const relation = item as Record<string, unknown>;
+        relationships[name] = {
+          attitude: typeof relation.attitude === "number" ? relation.attitude : 0,
+          notes: relation.notes ? asString(relation.notes) : undefined,
+        };
+      }
+    }
+  } catch {
+    // Повреждённый JSON игнорируем.
+  }
+  return relationships;
+}
+
+function statusOf(value: string): NpcStatus {
+  return value === "dead" || value === "unknown" ? value : "alive";
+}
+
+function rowToNpc(row: NpcRow): NpcProfile {
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    name: row.name,
+    slug: row.slug,
+    role: row.role ?? undefined,
+    status: statusOf(row.status),
+    location: row.location ?? undefined,
+    relationships: deserializeRelationships(row.relationships),
+    firstSeenDay: row.first_seen_day ?? undefined,
+    lastSeenDay: row.last_seen_day ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at ?? undefined,
+  };
+}
+
+export class SqliteNpcStore {
   /** Создаёт или обновляет NPC (поиск по имени без учёта регистра). */
   upsertNpc(campaignIdOrSlug: string, input: NpcUpsertInput): NpcProfile & { memory: string } {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const existing = this.listNpcs(campaign.id).find(
-      (npc) => npc.name.toLowerCase() === input.name.toLowerCase(),
-    );
+    const existing = this.findByName(campaign.id, input.name);
     const now = new Date().toISOString();
     const profile: NpcProfile = existing
       ? { ...existing }
@@ -47,7 +142,7 @@ export class MarkdownNpcStore {
           id: randomUUID(),
           campaignId: campaign.id,
           name: input.name,
-          slug: this.uniqueSlug(campaign.slug, slugify(input.name)),
+          slug: this.uniqueSlug(campaign.id, slugify(input.name)),
           status: "alive",
           relationships: {},
           createdAt: now,
@@ -64,45 +159,31 @@ export class MarkdownNpcStore {
     }
     profile.updatedAt = now;
 
-    let memory = existing ? this.readMemory(campaign.slug, existing.slug) : "";
+    let memory = existing ? existing.memory : "";
     const append = input.memoryAppend?.trim();
     if (append) {
       const dayMark = input.memoryAppendDay !== undefined ? ` [День ${input.memoryAppendDay}]` : "";
       const line = `-${dayMark} ${append.replace(/\s*\n\s*/g, " ")}`;
       memory = memory ? `${memory}\n${line}` : line;
     }
-    this.writeNpc(campaign.slug, profile, memory);
+    this.writeNpc(profile, memory);
     return { ...profile, memory };
   }
 
   /** Полная карточка NPC вместе с памятью. */
   getNpc(campaignIdOrSlug: string, nameOrSlug: string): (NpcProfile & { memory: string }) | undefined {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const needle = nameOrSlug.toLowerCase();
-    const profile = this.listNpcs(campaign.id).find(
-      (npc) =>
-        npc.id === nameOrSlug ||
-        npc.slug.toLowerCase() === needle ||
-        npc.name.toLowerCase() === needle,
-    );
-    if (!profile) return undefined;
-    return { ...profile, memory: this.readMemory(campaign.slug, profile.slug) };
+    const row = this.findRow(campaign.id, nameOrSlug);
+    if (!row) return undefined;
+    return { ...rowToNpc(row), memory: row.memory };
   }
 
   listNpcs(campaignIdOrSlug: string): NpcProfile[] {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const dir = this.npcsDir(campaign.slug);
-    if (!existsSync(dir)) return [];
-    const profiles: NpcProfile[] = [];
-    for (const entry of readdirSync(dir)) {
-      if (!entry.endsWith(".md")) continue;
-      try {
-        profiles.push(docToNpc(readFileSync(join(dir, entry), "utf8")));
-      } catch {
-        // Повреждённый профиль пропускаем.
-      }
-    }
-    return profiles.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const rows = db().prepare(
+      "SELECT * FROM npcs WHERE campaign_id = ? ORDER BY created_at",
+    ).all(campaign.id) as NpcRow[];
+    return rows.map(rowToNpc);
   }
 
   // --- Внутренние помощники ---
@@ -115,7 +196,12 @@ export class MarkdownNpcStore {
    */
   lastMemoryLine(campaignIdOrSlug: string, npcSlug: string, maxChars = 100): string {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const memory = this.readMemory(campaign.slug, npcSlug);
+    const needle = npcSlug.toLowerCase();
+    const rows = db().prepare(
+      "SELECT slug, memory FROM npcs WHERE campaign_id = ?",
+    ).all(campaign.id) as { slug: string; memory: string }[];
+    const row = rows.find((candidate) => candidate.slug.toLowerCase() === needle);
+    const memory = row?.memory ?? "";
     const lines = memory
       .split("\n")
       .map((line) => line.trim())
@@ -134,90 +220,69 @@ export class MarkdownNpcStore {
     return { id: campaign.id, slug: campaign.slug };
   }
 
-  private npcsDir(campaignSlug: string): string {
-    assertCampaignSlug(campaignSlug);
-    return join(this.root, campaignSlug, "npcs");
+  private findByName(campaignId: string, name: string): (NpcProfile & { memory: string }) | undefined {
+    const needle = name.toLowerCase();
+    const rows = db().prepare("SELECT * FROM npcs WHERE campaign_id = ?").all(campaignId) as NpcRow[];
+    const row = rows.find((candidate) => candidate.name.toLowerCase() === needle);
+    return row ? { ...rowToNpc(row), memory: row.memory } : undefined;
   }
 
-  private uniqueSlug(campaignSlug: string, base: string): string {
-    const dir = this.npcsDir(campaignSlug);
+  private findRow(campaignId: string, nameOrSlug: string): NpcRow | undefined {
+    const needle = nameOrSlug.toLowerCase();
+    const rows = db().prepare("SELECT * FROM npcs WHERE campaign_id = ?").all(campaignId) as NpcRow[];
+    return rows.find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+  }
+
+  private uniqueSlug(campaignId: string, base: string): string {
+    const probe = db().prepare("SELECT 1 FROM npcs WHERE campaign_id = ? AND slug = ?");
     let slug = base || "npc";
     let counter = 2;
-    while (existsSync(join(dir, `${slug}.md`))) {
+    while (probe.get(campaignId, slug)) {
       slug = `${base}-${counter}`;
       counter += 1;
     }
     return slug;
   }
 
-  private readMemory(campaignSlug: string, npcSlug: string): string {
-    const path = join(this.npcsDir(campaignSlug), `${npcSlug}.md`);
-    if (!existsSync(path)) return "";
-    return splitFrontmatter(readFileSync(path, "utf8")).body;
-  }
-
-  private writeNpc(campaignSlug: string, profile: NpcProfile, memory: string): void {
-    const dir = this.npcsDir(campaignSlug);
-    mkdirSync(dir, { recursive: true });
-    const doc = buildDocument(npcToFrontmatter(profile), memory);
-    writeFileSync(join(dir, `${profile.slug}.md`), doc, "utf8");
+  private writeNpc(profile: NpcProfile, memory: string): void {
+    db().prepare(
+      `INSERT OR REPLACE INTO npcs (
+         id, campaign_id, slug, name, role, status, location, relationships,
+         first_seen_day, last_seen_day, memory, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      profile.id,
+      profile.campaignId,
+      profile.slug,
+      profile.name,
+      profile.role ?? null,
+      profile.status,
+      profile.location ?? null,
+      serializeRelationships(profile.relationships),
+      profile.firstSeenDay ?? null,
+      profile.lastSeenDay ?? null,
+      memory,
+      profile.createdAt,
+      profile.updatedAt ?? null,
+    );
   }
 }
 
-function npcToFrontmatter(profile: NpcProfile): Record<string, unknown> {
-  const relationships: Record<string, unknown> = {};
-  for (const [name, relation] of Object.entries(profile.relationships)) {
-    relationships[name] = { attitude: relation.attitude, ...(relation.notes ? { notes: relation.notes } : {}) };
-  }
-  return {
-    id: profile.id,
-    campaignId: profile.campaignId,
-    name: profile.name,
-    slug: profile.slug,
-    role: profile.role,
-    status: profile.status,
-    location: profile.location,
-    relationships,
-    firstSeenDay: profile.firstSeenDay,
-    lastSeenDay: profile.lastSeenDay,
-    createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt,
-  };
+/** Ленивый синглтон: БД открывается при первом обращении к методу, а не на импорте. */
+function lazySingleton(): SqliteNpcStore {
+  let instance: SqliteNpcStore | undefined;
+  return new Proxy({} as SqliteNpcStore, {
+    get(_target, prop, receiver) {
+      if (!instance) instance = new SqliteNpcStore();
+      const value = Reflect.get(instance, prop, receiver);
+      return typeof value === "function" ? value.bind(instance) : value;
+    },
+  });
 }
 
-function asString(value: unknown): string {
-  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
-}
-
-function docToNpc(doc: string): NpcProfile {
-  const { data } = splitFrontmatter(doc);
-  const relationships: Record<string, NpcRelationship> = {};
-  if (data.relationships && typeof data.relationships === "object") {
-    for (const [name, value] of Object.entries(data.relationships as Record<string, unknown>)) {
-      if (value && typeof value === "object") {
-        const relation = value as Record<string, unknown>;
-        relationships[name] = {
-          attitude: typeof relation.attitude === "number" ? relation.attitude : 0,
-          notes: relation.notes ? asString(relation.notes) : undefined,
-        };
-      }
-    }
-  }
-  const status = data.status === "dead" || data.status === "unknown" ? data.status : "alive";
-  return {
-    id: asString(data.id),
-    campaignId: asString(data.campaignId),
-    name: asString(data.name),
-    slug: asString(data.slug),
-    role: data.role ? asString(data.role) : undefined,
-    status,
-    location: data.location ? asString(data.location) : undefined,
-    relationships,
-    firstSeenDay: typeof data.firstSeenDay === "number" ? data.firstSeenDay : undefined,
-    lastSeenDay: typeof data.lastSeenDay === "number" ? data.lastSeenDay : undefined,
-    createdAt: asString(data.createdAt),
-    updatedAt: data.updatedAt ? asString(data.updatedAt) : undefined,
-  };
-}
-
-export const npcStore: MarkdownNpcStore = new MarkdownNpcStore(campaignDataRoot());
+export const npcStore: SqliteNpcStore = lazySingleton();

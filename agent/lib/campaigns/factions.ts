@@ -1,37 +1,79 @@
 /**
- * Хранилище фракций кампании (C4 — фракции/отношения): папка factions/ внутри
- * папки кампании, по образцу npc.ts. Frontmatter хранит профиль (описание,
- * standing), тело файла — свободные заметки.
+ * Хранилище фракций кампании на SQLite: таблица factions в базе кампаний
+ * (campaigns.db). Профиль фракции (описание, standing) лежит в одной строке.
  *
  * standing — репутация партии у фракции: шкала -5 (враг) .. +5 (союзник).
  * Корректируется детерминированно из complete_quest.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type BetterSqlite3 from "better-sqlite3";
 
-import { buildDocument, splitFrontmatter } from "./frontmatter.ts";
-import { assertCampaignSlug, campaignDataRoot, campaignStore, slugify } from "./store.ts";
+import { openCampaignDb } from "./sqlite-db.ts";
+import { campaignStore, slugify } from "./store.ts";
 import { StoreError, type Faction, type UpsertFactionInput } from "./types.ts";
 
 /** Клампинг репутации в диапазон -5 .. +5. */
-function clampStanding(value: number): number {
+export function clampStanding(value: number): number {
   return Math.max(-5, Math.min(5, Math.trunc(value)));
 }
 
-export class MarkdownFactionStore {
-  private readonly root: string;
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS factions (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  standing INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
+  UNIQUE (campaign_id, slug)
+);
+`;
 
-  constructor(root: string) {
-    this.root = root;
+interface FactionRow {
+  id: string;
+  campaign_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  standing: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+// Ленивое открытие БД: handle и DDL создаются при первом обращении, а не
+// в конструкторе и не на импорте модуля (eve-снапшот компиляции падает при
+// открытии better-sqlite3 на этапе сборки тулов).
+let dbHandle: BetterSqlite3.Database | undefined;
+let schemaReady = false;
+function db(): BetterSqlite3.Database {
+  if (!dbHandle) dbHandle = openCampaignDb();
+  if (!schemaReady) {
+    dbHandle.exec(SCHEMA);
+    schemaReady = true;
   }
+  return dbHandle;
+}
 
+function rowToFaction(row: FactionRow): Faction {
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    name: row.name,
+    slug: row.slug,
+    description: row.description ?? undefined,
+    standing: clampStanding(row.standing),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at ?? undefined,
+  };
+}
+
+export class SqliteFactionStore {
   /** Создаёт или обновляет фракцию (поиск по имени без учёта регистра). */
   upsertFaction(campaignIdOrSlug: string, input: UpsertFactionInput & { name: string }): Faction {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const existing = this.listFactions(campaign.id).find(
-      (faction) => faction.name.toLowerCase() === input.name!.toLowerCase(),
-    );
+    const existing = this.findByName(campaign.id, input.name);
     const now = new Date().toISOString();
     const profile: Faction = existing
       ? { ...existing }
@@ -39,14 +81,14 @@ export class MarkdownFactionStore {
           id: randomUUID(),
           campaignId: campaign.id,
           name: input.name,
-          slug: this.uniqueSlug(campaign.slug, slugify(input.name)),
+          slug: this.uniqueSlug(campaign.id, slugify(input.name)),
           standing: 0,
           createdAt: now,
         };
     if (input.description !== undefined) profile.description = input.description;
     if (input.standing !== undefined) profile.standing = clampStanding(input.standing);
     profile.updatedAt = now;
-    this.writeFaction(campaign.slug, profile);
+    this.writeFaction(profile);
     return profile;
   }
 
@@ -62,35 +104,22 @@ export class MarkdownFactionStore {
     }
     faction.standing = clampStanding(faction.standing + delta);
     faction.updatedAt = new Date().toISOString();
-    this.writeFaction(campaign.slug, faction);
+    this.writeFaction(faction);
     return faction;
   }
 
   getFaction(campaignIdOrSlug: string, nameOrSlug: string): Faction | undefined {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const needle = nameOrSlug.toLowerCase();
-    return this.listFactions(campaign.id).find(
-      (faction) =>
-        faction.id === nameOrSlug ||
-        faction.slug.toLowerCase() === needle ||
-        faction.name.toLowerCase() === needle,
-    );
+    const row = this.findRow(campaign.id, nameOrSlug);
+    return row ? rowToFaction(row) : undefined;
   }
 
   listFactions(campaignIdOrSlug: string): Faction[] {
     const campaign = this.findCampaign(campaignIdOrSlug);
-    const dir = this.factionsDir(campaign.slug);
-    if (!existsSync(dir)) return [];
-    const profiles: Faction[] = [];
-    for (const entry of readdirSync(dir)) {
-      if (!entry.endsWith(".md")) continue;
-      try {
-        profiles.push(docToFaction(readFileSync(join(dir, entry), "utf8")));
-      } catch {
-        // Повреждённый профиль пропускаем.
-      }
-    }
-    return profiles.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const rows = db().prepare(
+      "SELECT * FROM factions WHERE campaign_id = ? ORDER BY created_at",
+    ).all(campaign.id) as FactionRow[];
+    return rows.map(rowToFaction);
   }
 
   // --- Внутренние помощники ---
@@ -103,60 +132,63 @@ export class MarkdownFactionStore {
     return { id: campaign.id, slug: campaign.slug };
   }
 
-  private factionsDir(campaignSlug: string): string {
-    assertCampaignSlug(campaignSlug);
-    return join(this.root, campaignSlug, "factions");
+  private findByName(campaignId: string, name: string): Faction | undefined {
+    const needle = name.toLowerCase();
+    const rows = db().prepare("SELECT * FROM factions WHERE campaign_id = ?").all(campaignId) as FactionRow[];
+    const row = rows.find((candidate) => candidate.name.toLowerCase() === needle);
+    return row ? rowToFaction(row) : undefined;
   }
 
-  private uniqueSlug(campaignSlug: string, base: string): string {
-    const dir = this.factionsDir(campaignSlug);
+  private findRow(campaignId: string, nameOrSlug: string): FactionRow | undefined {
+    const needle = nameOrSlug.toLowerCase();
+    const rows = db().prepare("SELECT * FROM factions WHERE campaign_id = ?").all(campaignId) as FactionRow[];
+    return rows.find(
+      (candidate) =>
+        candidate.id === nameOrSlug ||
+        candidate.slug.toLowerCase() === needle ||
+        candidate.name.toLowerCase() === needle,
+    );
+  }
+
+  private uniqueSlug(campaignId: string, base: string): string {
+    const probe = db().prepare("SELECT 1 FROM factions WHERE campaign_id = ? AND slug = ?");
     let slug = base || "faction";
     let counter = 2;
-    while (existsSync(join(dir, `${slug}.md`))) {
+    while (probe.get(campaignId, slug)) {
       slug = `${base}-${counter}`;
       counter += 1;
     }
     return slug;
   }
 
-  private writeFaction(campaignSlug: string, profile: Faction): void {
-    const dir = this.factionsDir(campaignSlug);
-    mkdirSync(dir, { recursive: true });
-    const doc = buildDocument(factionToFrontmatter(profile), profile.description ?? "");
-    writeFileSync(join(dir, `${profile.slug}.md`), doc, "utf8");
+  private writeFaction(profile: Faction): void {
+    db().prepare(
+      `INSERT OR REPLACE INTO factions (
+         id, campaign_id, slug, name, description, standing, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      profile.id,
+      profile.campaignId,
+      profile.slug,
+      profile.name,
+      profile.description ?? null,
+      profile.standing,
+      profile.createdAt,
+      profile.updatedAt ?? null,
+    );
   }
 }
 
-function factionToFrontmatter(profile: Faction): Record<string, unknown> {
-  return {
-    id: profile.id,
-    campaignId: profile.campaignId,
-    name: profile.name,
-    slug: profile.slug,
-    description: profile.description,
-    standing: profile.standing,
-    createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt,
-  };
+/** Ленивый синглтон: БД открывается при первом обращении к методу, а не на импорте. */
+function lazySingleton(): SqliteFactionStore {
+  let instance: SqliteFactionStore | undefined;
+  return new Proxy({} as SqliteFactionStore, {
+    get(_target, prop, receiver) {
+      if (!instance) instance = new SqliteFactionStore();
+      const value = Reflect.get(instance, prop, receiver);
+      return typeof value === "function" ? value.bind(instance) : value;
+    },
+  });
 }
 
-function asString(value: unknown): string {
-  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
-}
-
-function docToFaction(doc: string): Faction {
-  const { data, body } = splitFrontmatter(doc);
-  const standing = typeof data.standing === "number" ? clampStanding(data.standing) : 0;
-  return {
-    id: asString(data.id),
-    campaignId: asString(data.campaignId),
-    name: asString(data.name),
-    slug: asString(data.slug),
-    description: body.trim() ? body.trim() : undefined,
-    standing,
-    createdAt: asString(data.createdAt),
-    updatedAt: data.updatedAt ? asString(data.updatedAt) : undefined,
-  };
-}
-
-export const factionStore: MarkdownFactionStore = new MarkdownFactionStore(campaignDataRoot());
+export const factionStore: SqliteFactionStore = lazySingleton();

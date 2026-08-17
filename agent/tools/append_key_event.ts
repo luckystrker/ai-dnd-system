@@ -7,7 +7,7 @@ import { StoreError } from "../lib/campaigns/types.ts";
 
 export default defineTool({
   description:
-    "Save one key moment of the campaign into long-term memory (history/key-events.md). " +
+    "Save one key moment of the campaign into long-term memory. " +
     "Use for turning points, promises, betrayals, discovered secrets — facts the DM must " +
     "remember sessions later. One call = one concise event. " +
     "Set permanent=true for the few pivotal facts (deaths, alliances, revealed secrets, oaths) " +

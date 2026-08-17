@@ -9,7 +9,7 @@
 | Файл | Назначение |
 |------|------------|
 | `setup.sh` | Первичная установка на свежем VPS (run-once). Ставит Node 24 + Caddy, клонирует репо, собирает билд, ставит systemd-юнит и Caddyfile. |
-| `backup.sh` | Бэкап `data/` (SQLite `.backup` + `tar` кампаний), ротация 14 копий. Готов к cron. |
+| `backup.sh` | Бэкап `data/campaigns.db` (SQLite `.backup` + WAL-чекпоинт), ротация 14 копий. Готов к cron. |
 | `../deploy.sh` | Обновление бота (в корне репо): `git pull → npm ci → build → restart + health-check`. |
 | `caddy/Caddyfile` | Reverse proxy + авто-TLS (Let's Encrypt). Проксирует на `127.0.0.1:3000`. |
 | `systemd/ai-dnd.service` | Supervisor-юнит. `User=ai-dnd`, `EnvironmentFile=.env`, `Restart=on-failure`. |
@@ -23,7 +23,7 @@ Telegram ──HTTPS──▶ Caddy (:80, :443, авто-TLS)
                  eve-сервер (Nitro) ──▶ 127.0.0.1:3000  [systemd: ai-dnd.service]
                       │
                       ├── /opt/ai-dnd-system/.output/   (билд)
-                      ├── /opt/ai-dnd-system/data/      (SQLite + MD — ПЕРСИСТЕНТНО)
+                      ├── /opt/ai-dnd-system/data/      (SQLite — ПЕРСИСТЕНТНО)
                       └── /opt/ai-dnd-system/.env       (секреты, читает systemd)
 ```
 
@@ -60,11 +60,8 @@ sudo systemctl stop ai-dnd
 # Бэкап лежит в /opt/ai-dnd-system/data/backups/<timestamp>/
 BACKUP=/opt/ai-dnd-system/data/backups/20260101T030000Z
 
-# 1. SQLite
+# 1. SQLite (вся память кампаний — журнал, NPC, локации, world-state и т.п.)
 cp "$BACKUP/campaigns.db" /opt/ai-dnd-system/data/campaigns.db
-# 2. MD-кампании (транскрипты, NPC, локации, лут, world-state)
-rm -rf /opt/ai-dnd-system/data/campaigns
-tar -xzf "$BACKUP/campaigns.tar.gz" -C /opt/ai-dnd-system/data
 
 sudo -u ai-dnd chown -R ai-dnd:ai-dnd /opt/ai-dnd-system/data
 sudo systemctl start ai-dnd
@@ -100,8 +97,7 @@ curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
 
 | Путь | Статус | Содержит |
 |------|--------|----------|
-| `data/campaigns.db` (+`-wal`, `-shm`) | **БЭКАПИТЬ** | кампании, участники, персонажи, квесты, треды |
-| `data/campaigns/` | **БЭКАПИТЬ** | транскрипты дней, саммари, NPC/локации/фракции, лут-леджер, world-state, `combat.md` |
+| `data/campaigns.db` (+`-wal`, `-shm`) | **БЭКАПИТЬ** | кампании, участники, персонажи, квесты, треды, транскрипты дней, саммари, NPC/локации/фракции, лут-леджер, world-state, снимок боя |
 | `.env` | **ХРАНИТЬ** (вне репо) | секреты |
 | `.eve/` | эфемерно | трейсы, локи, билды, sandbox-кэш — пересоздаётся |
 | `.output/` | эфемерно | билд-артефакт — пересобирается `deploy.sh` |

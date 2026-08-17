@@ -1,9 +1,11 @@
 /**
  * Продолжение e2e: от того же пользователя /startcampaign -> привязка к чату.
+ * Кампания проверяется через campaignStore (SQLite).
  * Запуск: node --env-file=.env scripts/e2e-start.ts
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+const { campaignStore } = await import("../agent/lib/campaigns/store.ts");
 
 const SECRET = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
 if (!SECRET) throw new Error("TELEGRAM_WEBHOOK_SECRET_TOKEN is required");
@@ -37,20 +39,20 @@ if (!res.ok) {
   process.exit(1);
 }
 
-const path = join(process.env.CAMPAIGN_DATA_DIR ?? "data/campaigns", "testovyy-pohod", "campaign.md");
+// Ждём, пока кампания станет active и привяжется к чату (по БД).
 const deadline = Date.now() + 180_000;
-let doc = "";
+let campaign: import("../agent/lib/campaigns/types.ts").Campaign | undefined;
 while (Date.now() < deadline) {
-  doc = readFileSync(path, "utf8");
-  if (doc.includes('status: "active"')) break;
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  campaign = campaignStore.getCampaign("testovyy-pohod");
+  if (campaign?.status === "active" && campaign.boundChat) break;
+  await sleep(3000);
 }
 
-console.log(`\n--- testovyy-pohod/campaign.md ---\n${doc}`);
+console.log(`\n--- кампания testovyy-pohod (${campaign?.status ?? "не найдена"}) ---`);
 const checks: Array<[string, boolean]> = [
-  ["status active", doc.includes('status: "active"')],
-  ["привязана к чату", doc.includes(`chatId: "${CHAT_ID}"`)],
-  ["топик сохранён", doc.includes("messageThreadId: 42")],
+  ["status active", campaign?.status === "active"],
+  ["привязана к чату", campaign?.boundChat?.chatId === String(CHAT_ID)],
+  ["топик сохранён", campaign?.boundChat?.messageThreadId === 42],
 ];
 let failed = 0;
 for (const [name, ok] of checks) {

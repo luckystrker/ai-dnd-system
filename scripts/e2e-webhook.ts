@@ -3,8 +3,7 @@
  * Требует запущенный `npm run dev` и .env с TELEGRAM_WEBHOOK_SECRET_TOKEN.
  * Запуск: node --env-file=.env scripts/e2e-webhook.ts
  *
- * Кампания проверяется через активный CampaignStore (по умолчанию SQLite),
- * поэтому прогон работает независимо от выбора CAMPAIGN_STORE.
+ * Кампания проверяется через активный CampaignStore (SQLite).
  */
 import { setTimeout as sleep } from "node:timers/promises";
 

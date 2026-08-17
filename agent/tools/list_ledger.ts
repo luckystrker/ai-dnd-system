@@ -7,7 +7,7 @@ import { StoreError, type LedgerType } from "../lib/campaigns/types.ts";
 
 export default defineTool({
   description:
-    "Read the campaign loot/economy ledger (history/ledger.md): an append-only log of gold and items " +
+    "Read the campaign loot/economy ledger: an append-only log of gold and items " +
     "found or spent, recorded automatically when characters are granted loot or quests completed. " +
     "Optionally filter by in-game day or by found/spent, and limit the number of entries. The ledger " +
     "is not loaded into the memory block (it grows) — use this tool or search_memory to recall it.",

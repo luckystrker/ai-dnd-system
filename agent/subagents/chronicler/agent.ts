@@ -13,7 +13,7 @@ export default defineAgent({
     "Campaign chronicler: reads the transcript of an in-game day and writes the campaign's " +
     "long-term memory — day summary, campaign summary, key events, NPC memories/relationships, " +
     "player character state, time/weather, locations/map, world-state and factions — into the " +
-    "campaign folder. Delegate to it when closing an in-game day (after advance_day) or after a " +
+    "campaign's memory. Delegate to it when closing an in-game day (after advance_day) or after a " +
     "major story milestone; pass the campaign slug, the day number and what to chronicle.",
   model: llm(process.env.LLM_MODEL ?? "deepseek-v4-flash"),
   modelContextWindowTokens: 128000,

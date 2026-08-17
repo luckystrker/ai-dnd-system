@@ -61,7 +61,7 @@ export default defineTool({
       return {
         ok: true,
         character: characterCard(sheet),
-        note: "Персонаж сохранён в папке кампании. Покажи игроку полную карточку персонажа.",
+        note: "Персонаж сохранён. Покажи игроку полную карточку персонажа.",
       };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

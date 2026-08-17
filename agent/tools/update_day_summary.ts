@@ -7,7 +7,7 @@ import { StoreError } from "../lib/campaigns/types.ts";
 
 export default defineTool({
   description:
-    "Write the short summary of one in-game day into the day file. Call when closing a day " +
+    "Write the short summary of one in-game day. Call when closing a day " +
     "(usually via the chronicler) so later sessions can recall the day without reading the full transcript. " +
     "The optional headline is a one-line (<=140 chars) title of the day shown for EVERY past day in the " +
     "memory block, so the full campaign arc stays visible regardless of how long the campaign grows.",
@@ -40,7 +40,7 @@ export default defineTool({
       const wantedDay = day ?? campaign.currentDay ?? 1;
       setDaySummary(campaign.slug, wantedDay, summary);
       if (headline) setDayHeadline(campaign.slug, wantedDay, headline);
-      return { ok: true, day: wantedDay, note: "Саммари дня записано в файл дня." };
+      return { ok: true, day: wantedDay, note: "Саммари дня записано." };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };
       throw error;

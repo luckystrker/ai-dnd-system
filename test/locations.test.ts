@@ -1,31 +1,37 @@
 import { test, describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
-import { join } from "node:path";
 
-import { MarkdownLocationStore } from "../agent/lib/campaigns/locations.ts";
+import { SqliteLocationStore } from "../agent/lib/campaigns/locations.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
 import { campaignStore } from "../agent/lib/campaigns/store.ts";
 import { StoreError } from "../agent/lib/campaigns/types.ts";
-import { tempDir } from "./helpers.ts";
+import { tempDb } from "./helpers.ts";
 
-const { root, cleanup } = tempDir("locations");
-process.env.CAMPAIGN_DATA_DIR = root;
-process.env.CAMPAIGN_STORE = "markdown";
+// Фикстура: temp-файл БД (CAMPAIGN_DB_PATH до первого обращения) + кампания.
+const { cleanup } = tempDb("locations");
+after(() => {
+  // Закрываем соединение дефолтного стора, чтобы temp-папка удалилась
+  // (Windows не даёт удалить файл с открытым соединением).
+  (campaignStore as { close?: () => void }).close?.();
+});
 after(cleanup);
 
-const store = new MarkdownLocationStore(root);
-const slug = "temnyy-les";
+const store = new SqliteLocationStore();
+const slug = "temnyy-les"; // slug of "Тёмный лес"
+campaignStore.createCampaign(
+  { title: "Тёмный лес", length: "medium", setting: "Лес", theme: "хоррор" },
+  { userId: "u-dm" },
+);
 
+// Каждый тест начинает с пустого списка локаций. Первый вызов создаёт таблицы
+// (DDL выполняется лениво), затем чистим их.
 beforeEach(() => {
-  rmSync(join(root, slug), { recursive: true, force: true });
-  campaignStore.createCampaign(
-    { title: "Тёмный лес", length: "medium", setting: "Лес", theme: "хоррор" },
-    { userId: "u-dm" },
-  );
+  store.listLocations(slug);
+  openCampaignDb().exec("DELETE FROM locations;");
 });
 
-describe("MarkdownLocationStore", () => {
-  test("upsertLocation creates a location with empty connections and visitedDays", () => {
+describe("SqliteLocationStore", () => {
+  test("upsertLocation создаёт локацию с пустыми connections и visitedDays", () => {
     const loc = store.upsertLocation(slug, { name: "Мораг", description: "Деревня у ручья", discoveredDay: 1 });
     assert.equal(loc.name, "Мораг");
     assert.equal(loc.description, "Деревня у ручья");
@@ -36,7 +42,7 @@ describe("MarkdownLocationStore", () => {
     assert.ok(loc.id);
   });
 
-  test("upsertLocation updates an existing location by name case-insensitively", () => {
+  test("upsertLocation обновляет локацию по имени без учёта регистра", () => {
     store.upsertLocation(slug, { name: "Мораг", discoveredDay: 1 });
     const updated = store.upsertLocation(slug, {
       name: "мораг",
@@ -50,7 +56,7 @@ describe("MarkdownLocationStore", () => {
     assert.equal(store.listLocations(slug).length, 1);
   });
 
-  test("current flag is exclusive — setting it on one clears others", () => {
+  test("current-флаг эксклюзивен: установка у одной снимает с остальных", () => {
     store.upsertLocation(slug, { name: "Мораг", current: true });
     store.upsertLocation(slug, { name: "Чёрный лес", current: true });
     const all = store.listLocations(slug);
@@ -61,7 +67,7 @@ describe("MarkdownLocationStore", () => {
     assert.equal(store.currentLocation(slug)?.name, "Чёрный лес");
   });
 
-  test("markVisited adds the day without duplicates and sorted", () => {
+  test("markVisited добавляет день без дубликатов и с сортировкой", () => {
     const loc = store.upsertLocation(slug, { name: "Мораг", discoveredDay: 1 });
     store.markVisited(slug, loc.slug, 3);
     store.markVisited(slug, loc.slug, 1);
@@ -70,7 +76,7 @@ describe("MarkdownLocationStore", () => {
     assert.deepEqual(reloaded.visitedDays, [1, 3]);
   });
 
-  test("getLocation resolves by id, slug and name; unknown returns undefined", () => {
+  test("getLocation находит по id, slug и имени; неизвестный возвращает undefined", () => {
     const loc = store.upsertLocation(slug, { name: "Развалины" });
     assert.equal(store.getLocation(slug, loc.id)?.name, "Развалины");
     assert.equal(store.getLocation(slug, loc.slug)?.name, "Развалины");
@@ -78,14 +84,14 @@ describe("MarkdownLocationStore", () => {
     assert.equal(store.getLocation(slug, "Нигде"), undefined);
   });
 
-  test("setCurrent throws StoreError for an unknown location", () => {
+  test("setCurrent бросает StoreError для неизвестной локации", () => {
     assert.throws(
       () => store.setCurrent(slug, "несуществующая"),
       (error: unknown) => error instanceof StoreError && error.code === "not_found",
     );
   });
 
-  test("same name (different case) merges into one location, not a duplicate", () => {
+  test("одинаковое имя (разный регистр) сливается в одну локацию", () => {
     const first = store.upsertLocation(slug, { name: "Лагерь", discoveredDay: 1 });
     const second = store.upsertLocation(slug, { name: "лагерь", description: "Тент у ручья" });
     assert.equal(first.slug, second.slug);
@@ -94,7 +100,7 @@ describe("MarkdownLocationStore", () => {
     assert.equal(second.description, "Тент у ручья");
   });
 
-  test("persists and reloads connections with optional fields", () => {
+  test("connections с опциональными полями переживают перезагрузку", () => {
     store.upsertLocation(slug, {
       name: "Перевал",
       connections: [

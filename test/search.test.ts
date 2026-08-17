@@ -1,93 +1,126 @@
-import { test, describe, after, before } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
+import { appendKeyEvent, appendTranscriptEntry } from "../agent/lib/campaigns/journal.ts";
+import { SqliteFactionStore } from "../agent/lib/campaigns/factions.ts";
+import { SqliteLocationStore } from "../agent/lib/campaigns/locations.ts";
+import { SqliteNpcStore } from "../agent/lib/campaigns/npc.ts";
 import { queryTerms, searchCampaignMemory } from "../agent/lib/campaigns/search.ts";
-import { StoreError } from "../agent/lib/campaigns/types.ts";
-import { tempDir } from "./helpers.ts";
+import { SqliteCampaignStore } from "../agent/lib/campaigns/store-sqlite.ts";
+import { campaignStore } from "../agent/lib/campaigns/store.ts";
+import { tempDb } from "./helpers.ts";
 
-const { root, cleanup } = tempDir("search");
-process.env.CAMPAIGN_DATA_DIR = root;
+// Фикстура: temp-файл БД (CAMPAIGN_DB_PATH до первого обращения) + кампания
+// с записями в нескольких источниках памяти.
+const { path, cleanup } = tempDb("search");
+const store = new SqliteCampaignStore(path);
+after(() => {
+  store.close();
+  // Сторы NPC/локаций/фракций резолвят кампанию через ленивый синглтон
+  // campaignStore — закрываем и его, чтобы temp-папка удалилась (Windows не
+  // даёт удалить файл с открытым соединением).
+  (campaignStore as { close?: () => void }).close?.();
+});
 after(cleanup);
 
 const slug = "test-campaign";
-const campaignRoot = join(root, slug);
+const npcStore = new SqliteNpcStore();
+const locationStore = new SqliteLocationStore();
+const factionStore = new SqliteFactionStore();
 
-before(() => {
-  rmSync(campaignRoot, { recursive: true, force: true });
-  // Транскрипт дня 1 с упоминанием Каэля.
-  mkdirSync(join(campaignRoot, "history", "days"), { recursive: true });
-  writeFileSync(
-    join(campaignRoot, "history", "days", "day-0001.md"),
-    "---\nday: 1\n---\n\n# Игровой день 1\n\n- [11:00] **Игрок @hero**: Я говорю с Каэлем у часовни.\n- [11:05] **DM**: Каэль обещает помочь, если принести тело Яна.\n",
-    "utf8",
-  );
-  // Транскрипт дня 3 — упоминание Каэля в более позднем дне.
-  writeFileSync(
-    join(campaignRoot, "history", "days", "day-0003.md"),
-    "---\nday: 3\n---\n\n# Игровой день 3\n\n- [09:00] **DM**: Каэль снимает проклятие в часовне.\n",
-    "utf8",
-  );
-  // Карточка NPC Каэль.
-  mkdirSync(join(campaignRoot, "npcs"), { recursive: true });
-  writeFileSync(
-    join(campaignRoot, "npcs", "kael.md"),
-    '---\nname: "Каэль"\nrole: "Отшельник"\nstatus: "alive"\n---\n\n- [День 1] Договорился с партией.\n',
-    "utf8",
-  );
-  // Ключевые события.
-  writeFileSync(join(campaignRoot, "history", "key-events.md"), "- **День 1**: Каэль дал клятву.\n", "utf8");
+store.createCampaign(
+  { title: "test-campaign", length: "medium", setting: "Тёмный лес", theme: "приключение" },
+  { userId: "u-dm" },
+);
+// Транскрипт дня 1 с упоминанием Каэля.
+appendTranscriptEntry(slug, 1, { kind: "player", author: "hero", text: "Я говорю с Каэлем у часовни." });
+appendTranscriptEntry(slug, 1, { kind: "dm", text: "Каэль обещает помочь, если принести тело Яна." });
+// Транскрипт дня 3 — Каэль в более позднем дне.
+appendTranscriptEntry(slug, 3, { kind: "dm", text: "Каэль снимает проклятие в часовне." });
+// Ключевые события.
+appendKeyEvent(slug, 1, "Каэль дал клятву.");
+// Карточка NPC Каэль.
+npcStore.upsertNpc(slug, {
+  name: "Каэль",
+  role: "Отшельник",
+  memoryAppend: "Договорился с партией.",
+  memoryAppendDay: 1,
 });
+// Локация и фракция (поиск по описанию).
+locationStore.upsertLocation(slug, { name: "Часовня", description: "Разрушенная часовня на холме" });
+factionStore.upsertFaction(slug, { name: "Гильдия купцов", description: "Торговцы из Морага" });
 
 describe("queryTerms", () => {
-  test("splits into normalized lowercase words, length >= 2, dedups", () => {
+  test("разбивает на нормализованные слова длиной >= 2 с дедупом", () => {
     assert.deepEqual(queryTerms("Каэль, ЧАСОВНЯ! часовня"), ["каэль", "часовня"]);
   });
-  test("ignores single chars and punctuation", () => {
+  test("игнорирует одиночные символы и пунктуацию", () => {
     assert.deepEqual(queryTerms("а у K?"), []);
     assert.deepEqual(queryTerms("   "), []);
   });
 });
 
 describe("searchCampaignMemory", () => {
-  test("finds matches across files and returns snippets with day", () => {
+  test("находит совпадения по источникам с днём и меткой источника", () => {
     const hits = searchCampaignMemory(slug, "Каэль");
-    assert.ok(hits.length >= 3, `expected >=3 hits, got ${hits.length}`);
-    // Свежий день (3) должен быть выше дня 1.
-    const days = hits.filter((h) => h.day !== undefined).map((h) => h.day);
-    assert.equal(days[0], 3);
-    assert.ok(days.includes(1));
+    assert.ok(hits.length >= 4, `expected >=4 hits, got ${hits.length}`);
+    const sources = hits.map((h) => h.source);
+    assert.ok(sources.some((s) => s === "транскрипт, день 1"), `missing day-1 transcript: ${sources}`);
+    assert.ok(sources.some((s) => s === "транскрипт, день 3"), `missing day-3 transcript: ${sources}`);
+    assert.ok(sources.some((s) => s === "ключевое событие, день 1"), `missing key event: ${sources}`);
+    assert.ok(sources.some((s) => s === "NPC Каэль"), `missing NPC hit: ${sources}`);
     for (const hit of hits) {
-      assert.ok(hit.file.endsWith(".md"));
       assert.ok(hit.snippet.length > 0);
       assert.ok(hit.snippet.toLowerCase().includes("каэль"), `snippet missing term: ${hit.snippet}`);
     }
   });
 
-  test("includes NPC and key-events files (day undefined for those)", () => {
+  test("сортирует по дню по убыванию: свежий день первым", () => {
     const hits = searchCampaignMemory(slug, "Каэль");
-    const files = hits.map((h) => h.file);
-    assert.ok(files.some((f) => f.startsWith("npcs/")), "expected a npcs/ hit");
-    assert.ok(files.some((f) => f === "history/key-events.md"), "expected a key-events hit");
+    const withDay = hits.filter((h) => h.day !== undefined);
+    assert.ok(withDay.length > 0);
+    assert.equal(withDay[0].day, 3);
+    const days = withDay.map((h) => h.day!);
+    for (let i = 1; i < days.length; i++) {
+      assert.ok(days[i] <= days[i - 1], `day order broken: ${days.join(", ")}`);
+    }
   });
 
-  test("returns empty for no matches", () => {
-    assert.deepEqual(searchCampaignMemory(slug, "несуществующееслово"), []);
-  });
-
-  test("respects limit option", () => {
-    const hits = searchCampaignMemory(slug, "Каэль", { limit: 1 });
-    assert.equal(hits.length, 1);
-  });
-
-  test("multiple terms match lines containing any term", () => {
+  test("AND-логика: строка должна содержать каждый терм", () => {
     const hits = searchCampaignMemory(slug, "тело ян");
     assert.ok(hits.length >= 1);
     assert.ok(hits.some((h) => h.snippet.includes("тело")));
+    for (const hit of hits) {
+      assert.ok(hit.snippet.toLowerCase().includes("ян"), `snippet missing term: ${hit.snippet}`);
+    }
   });
 
-  test("rejects path-traversal slug", () => {
-    assert.throws(() => searchCampaignMemory("../etc", "x"), StoreError);
+  test("ищет по описаниям локаций и фракций", () => {
+    const chapel = searchCampaignMemory(slug, "часовня");
+    assert.ok(chapel.some((h) => h.source === "локация Часовня"), `no location hit: ${JSON.stringify(chapel)}`);
+    const morag = searchCampaignMemory(slug, "мораг");
+    assert.ok(morag.some((h) => h.source === "фракция Гильдия купцов"), `no faction hit: ${JSON.stringify(morag)}`);
+  });
+
+  test("возвращает пустой список при отсутствии совпадений", () => {
+    assert.deepEqual(searchCampaignMemory(slug, "несуществующееслово"), []);
+  });
+
+  test("возвращает пустой список для неизвестной кампании", () => {
+    assert.deepEqual(searchCampaignMemory("no-such-campaign", "Каэль"), []);
+  });
+
+  test("учитывает опцию limit", () => {
+    const hits = searchCampaignMemory(slug, "Каэль", { limit: 2 });
+    assert.equal(hits.length, 2);
+  });
+
+  test("учитывает опцию perSource", () => {
+    const hits = searchCampaignMemory(slug, "Каэль", { perSource: 1 });
+    assert.equal(hits.filter((h) => h.source.startsWith("транскрипт")).length, 1);
+  });
+
+  test("запрос только из коротких слов ничего не ищет", () => {
+    assert.deepEqual(searchCampaignMemory(slug, "а у"), []);
   });
 });

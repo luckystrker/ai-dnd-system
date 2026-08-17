@@ -7,7 +7,7 @@ import { renderWorldState } from "../lib/campaigns/world-state.ts";
 
 export default defineTool({
   description:
-    "Read the current durable state of the world (history/world-state.md): who is dead, what places " +
+    "Read the current durable state of the world: who is dead, what places " +
     "changed, what decisions were taken — grouped by category. Reflects what is true now, unlike the " +
     "append-only key events. Read-only. The world-state is also loaded into the memory block each turn.",
   inputSchema: z.object({

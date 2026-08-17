@@ -1,23 +1,50 @@
 /**
- * Состояние мира кампании (C5 — последствия): перезаписываемый файл
- * history/world-state.md с актуальными фактами мира, сгруппированными по
- * категориям (## Погибшие, ## Изменения и т.п.). В отличие от key-events.md
- * (append-only журнал моментов), этот файл отражает текущее состояние мира —
- * поэтому записи upsert'ятся по (категория + текст), а не дописываются.
+ * Состояние мира кампании (C5 — последствия): таблица world_changes в базе
+ * кампаний (campaigns.db) с актуальными фактами мира, сгруппированными по
+ * категориям (Погибшие, Изменения и т.п.). В отличие от key_events
+ * (append-only журнал моментов), эта таблица отражает текущее состояние
+ * мира — поэтому записи upsert'ятся по (категория + текст), а не дописываются.
  *
  * Назначение: чтобы бот не «оживлял» убитых NPC и последовательно учитывал
  * прошлые решения. Грузится в авто-блок памяти целиком (компактно, с капом).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import type BetterSqlite3 from "better-sqlite3";
 
-import { buildDocument } from "./frontmatter.ts";
-import { assertCampaignSlug, campaignDataRoot } from "./store.ts";
+import { openCampaignDb } from "./sqlite-db.ts";
 import type { WorldChange } from "./types.ts";
 
-function worldStatePath(campaignSlug: string): string {
-  assertCampaignSlug(campaignSlug);
-  return join(campaignDataRoot(), campaignSlug, "history", "world-state.md");
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS world_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  category TEXT NOT NULL,
+  text TEXT NOT NULL,            -- чистый текст без "- " и без "(день N)"
+  day INTEGER,                   -- NULL = без пометки дня
+  text_norm TEXT NOT NULL,       -- lower(text)
+  UNIQUE (campaign_id, category, text_norm)
+);
+`;
+
+// Ленивое открытие БД: handle и DDL создаются при первом обращении, а не
+// на импорте модуля (eve-снапшот компиляции падает при открытии
+// better-sqlite3 на этапе сборки тулов).
+let dbHandle: BetterSqlite3.Database | undefined;
+let schemaReady = false;
+function db(): BetterSqlite3.Database {
+  if (!dbHandle) dbHandle = openCampaignDb();
+  if (!schemaReady) {
+    dbHandle.exec(SCHEMA);
+    schemaReady = true;
+  }
+  return dbHandle;
+}
+
+/** id кампании по slug; undefined, если кампании нет (тихий no-op). */
+function campaignIdOf(campaignSlug: string): string | undefined {
+  const row = db().prepare("SELECT id FROM campaigns WHERE slug = ?").get(campaignSlug) as
+    | { id: string }
+    | undefined;
+  return row?.id;
 }
 
 /**
@@ -26,50 +53,35 @@ function worldStatePath(campaignSlug: string): string {
  * иначе добавляет. Дубликаты (та же категория + тот же текст) не создаются.
  */
 export function upsertWorldChange(campaignSlug: string, change: WorldChange): void {
-  const categories = readWorldState(campaignSlug);
+  const id = campaignIdOf(campaignSlug);
+  if (!id) return;
   const category = change.category.trim() || "Изменения";
   const text = change.text.replace(/\s*\n\s*/g, " ").trim();
   if (!text) return;
-
-  const items = categories.get(category) ?? [];
-  const dayMark = change.day !== undefined ? ` (день ${change.day})` : "";
-  const line = `- ${text}${dayMark}`;
-  const normalizedText = text.toLowerCase();
-  const existingIndex = items.findIndex((item) => {
-    // Убираем маркер списка «- » и пометку дня для сравнения по тексту.
-    const itemText = item
-      .replace(/^-\s+/, "")
-      .replace(/\s*\(день \d+\)\s*$/, "")
-      .trim()
-      .toLowerCase();
-    return itemText === normalizedText;
-  });
-  if (existingIndex >= 0) {
-    items[existingIndex] = line;
-  } else {
-    items.push(line);
-  }
-  categories.set(category, items);
-  writeWorldState(campaignSlug, categories);
+  db().prepare(
+    `INSERT INTO world_changes (campaign_id, category, text, day, text_norm) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(campaign_id, category, text_norm) DO UPDATE SET day = excluded.day`,
+  ).run(id, category, text, change.day ?? null, text.toLowerCase());
 }
 
-/** Считывает состояние мира как карту категория → список строк. */
+/**
+ * Считывает состояние мира как карту категория → список отрендеренных строк
+ * («- текст» или «- текст (день N)» — прежний формат строк).
+ * Категории идут в порядке первого появления, записи — в порядке добавления.
+ */
 export function readWorldState(campaignSlug: string): Map<string, string[]> {
-  const path = worldStatePath(campaignSlug);
+  const id = campaignIdOf(campaignSlug);
   const categories = new Map<string, string[]>();
-  if (!existsSync(path)) return categories;
-  const body = readFileSync(path, "utf8");
-  let currentCategory = "";
-  for (const line of body.split("\n")) {
-    const heading = /^##\s+(.+?)\s*$/.exec(line);
-    if (heading) {
-      currentCategory = heading[1].trim();
-      if (!categories.has(currentCategory)) categories.set(currentCategory, []);
-      continue;
-    }
-    if (line.startsWith("- ") && currentCategory) {
-      categories.get(currentCategory)!.push(line);
-    }
+  if (!id) return categories;
+  const rows = db().prepare(
+    "SELECT category, text, day FROM world_changes WHERE campaign_id = ? ORDER BY id",
+  ).all(id) as { category: string; text: string; day: number | null }[];
+  for (const row of rows) {
+    const dayMark = row.day !== null ? ` (день ${row.day})` : "";
+    const line = `- ${row.text}${dayMark}`;
+    const items = categories.get(row.category) ?? [];
+    items.push(line);
+    categories.set(row.category, items);
   }
   return categories;
 }
@@ -80,7 +92,7 @@ export function renderWorldState(campaignSlug: string): string {
 }
 
 /** Рендерит переданные категории в текст. */
-function renderCategories(categories: Map<string, string[]>): string {
+export function renderCategories(categories: Map<string, string[]>): string {
   if (categories.size === 0) return "";
   const parts: string[] = [];
   for (const [category, items] of categories) {
@@ -88,11 +100,4 @@ function renderCategories(categories: Map<string, string[]>): string {
     parts.push(`## ${category}\n${items.join("\n")}`);
   }
   return parts.join("\n\n");
-}
-
-function writeWorldState(campaignSlug: string, categories: Map<string, string[]>): void {
-  const path = worldStatePath(campaignSlug);
-  mkdirSync(join(path, ".."), { recursive: true });
-  const body = renderCategories(categories);
-  writeFileSync(path, buildDocument({ updatedAt: new Date().toISOString() }, body || "Нет записей."), "utf8");
 }

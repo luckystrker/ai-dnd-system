@@ -14,8 +14,7 @@ const connectionSchema = z.object({
 export default defineTool({
   description:
     "Create or update a location of the campaign (map node): description, connections to other " +
-    "locations, the day it was discovered, and whether the party is currently there. Locations live " +
-    "in the campaign's locations/ folder. Only one location can be current at a time — setting " +
+    "locations, the day it was discovered, and whether the party is currently there. Only one location can be current at a time — setting " +
     "current=true clears it from the others. Use move_party to travel, not this tool.",
   inputSchema: z.object({
     campaignSlug: z
@@ -50,7 +49,7 @@ export default defineTool({
           visitedDays: location.visitedDays,
           current: location.current === true,
         },
-        note: "Локация сохранена в папке кампании (locations/).",
+        note: "Локация сохранена.",
       };
     } catch (error) {
       if (error instanceof StoreError) return { ok: false, error: error.message };

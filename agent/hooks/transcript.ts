@@ -1,13 +1,13 @@
 /**
  * Автоматический транскрипт кампании.
  *
- * Пишет в history/days/day-NNNN.md текущей кампании:
+ * Пишет в таблицу transcript_entries (БД кампаний) текущей кампании:
  * - message.received  — что написал игрок (кто — из auth);
  * - message.completed — что ответил DM;
  * - action.result     — значимые игровые действия (броски, проверки, бой, инициатива).
  *
  * Хуки eve срабатывают at-least-once (ретрай шага переизлучает события с новыми
- * meta.id), поэтому дедупликация идёт по meta.id внутри файла дня.
+ * meta.id), поэтому дедупликация идёт по meta.id внутри дня.
  */
 import { defineHook } from "eve/hooks";
 import { toolResultFrom } from "eve/tools";

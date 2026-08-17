@@ -178,9 +178,9 @@ These rules apply equally to solo mode and to group/campaign play.
 
 ## Campaign memory
 
-- The transcript is recorded automatically into the campaign folder
-  (`history/days/day-NNNN.md`): every player message, your replies and notable
-  rolls. You never need to log it manually.
+- The transcript is recorded automatically into the day's transcript (every
+  player message, your replies and notable rolls). You never need to log it
+  manually.
 - Campaign memory (past-day chronicle, key events, current day digest, NPC
   roster, party state) is injected into your context automatically each turn.
   Treat it as established fact and stay consistent with it.
@@ -279,9 +279,9 @@ These rules apply equally to solo mode and to group/campaign play.
 
 - The session game state (scene, party, enemies) is authoritative for the
   current session. Update it as the game progresses.
-- The campaign folder on disk is the persistent memory of the game: it survives
+- The campaign database is the persistent memory of the game: it survives
   restarts and sessions. The injected campaign-memory block, `get_game_context`
   and the journal/NPC tools read it.
 - Old turns are compacted automatically as the context window fills (sliding
-  window); anything older than that lives only in the campaign files, so facts
+  window); anything older than that lives only in the campaign memory, so facts
   worth keeping must be written there (key events, summaries, NPC cards).

@@ -1,66 +1,75 @@
 import { test, describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
-import { join } from "node:path";
 
 import { appendLedgerRow, readLedger, readLedgerRaw } from "../agent/lib/campaigns/journal.ts";
-import { tempDir } from "./helpers.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
+import { SqliteCampaignStore } from "../agent/lib/campaigns/store-sqlite.ts";
+import { tempDb } from "./helpers.ts";
 
-const { root, cleanup } = tempDir("ledger");
-process.env.CAMPAIGN_DATA_DIR = root;
+// Фикстура: temp-файл БД (CAMPAIGN_DB_PATH до первого обращения) + кампания.
+const { path, cleanup } = tempDb("ledger");
+const store = new SqliteCampaignStore(path);
+after(() => store.close());
 after(cleanup);
 
 const slug = "test-campaign";
+store.createCampaign(
+  { title: "test-campaign", length: "medium", setting: "s", theme: "t" },
+  { userId: "u-dm" },
+);
 
+// Каждый тест начинает с пустого журнала экономики. Первый вызов журнальной
+// функции создаёт таблицы (DDL выполняется лениво), затем чистим их.
 beforeEach(() => {
-  rmSync(join(root, slug), { recursive: true, force: true });
+  readLedger(slug);
+  openCampaignDb().exec("DELETE FROM ledger_rows;");
 });
 
 describe("ledger", () => {
-  test("appendLedgerRow writes a formatted line", () => {
+  test("appendLedgerRow пишет отформатированную строку", () => {
     appendLedgerRow(slug, { day: 3, type: "found", itemOrGold: "серебряный кинжал", by: "Дэн", note: "в сундуке" });
     const raw = readLedgerRaw(slug);
     assert.match(raw, /- \[День 3\] найдено: серебряный кинжал \(Дэн\) — в сундуке/);
   });
 
-  test("appendLedgerRow dedups by eventId", () => {
+  test("appendLedgerRow дедуплицирует по eventId", () => {
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "50 золотых" }, "evt:g1");
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "50 золотых" }, "evt:g1");
     assert.equal(readLedger(slug).length, 1);
   });
 
-  test("appendLedgerRow without eventId does not dedup", () => {
+  test("appendLedgerRow без eventId не дедуплицирует", () => {
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "10 золотых" });
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "10 золотых" });
     assert.equal(readLedger(slug).length, 2);
   });
 
-  test("appendLedgerRow with empty item is a no-op", () => {
+  test("appendLedgerRow с пустым предметом — no-op", () => {
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "   " });
     assert.equal(readLedgerRaw(slug), "");
   });
 
-  test("spent type uses the spent verb", () => {
+  test("spent-тип использует глагол потрачено", () => {
     appendLedgerRow(slug, { day: 5, type: "spent", itemOrGold: "20 золотых", note: "на ночлег" });
     const raw = readLedgerRaw(slug);
     assert.match(raw, /- \[День 5\] потрачено: 20 золотых — на ночлег/);
   });
 
-  test("readLedger filters by day", () => {
+  test("readLedger фильтрует по дню", () => {
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "кинжал" });
     appendLedgerRow(slug, { day: 3, type: "found", itemOrGold: "меч" });
     assert.equal(readLedger(slug, { day: 3 }).length, 1);
     assert.match(readLedger(slug, { day: 3 })[0], /меч/);
   });
 
-  test("readLedger filters by type", () => {
+  test("readLedger фильтрует по типу", () => {
     appendLedgerRow(slug, { day: 1, type: "found", itemOrGold: "золото" });
     appendLedgerRow(slug, { day: 1, type: "spent", itemOrGold: "еда" });
     assert.equal(readLedger(slug, { type: "found" }).length, 1);
     assert.equal(readLedger(slug, { type: "spent" }).length, 1);
   });
 
-  test("readLedger returns last maxLines", () => {
+  test("readLedger возвращает последние maxLines", () => {
     for (let i = 1; i <= 5; i++) {
       appendLedgerRow(slug, { day: i, type: "found", itemOrGold: `предмет ${i}` });
     }
@@ -69,7 +78,7 @@ describe("ledger", () => {
     assert.match(tail[1], /предмет 5/);
   });
 
-  test("readLedger returns empty when file missing", () => {
+  test("readLedger возвращает пустой список без записей", () => {
     assert.deepEqual(readLedger(slug), []);
   });
 });

@@ -1,28 +1,26 @@
 /**
- * Разовый смоук-тест хранилищ кампании. Основной прогон выполняется дважды —
- * для MarkdownCampaignStore и SqliteCampaignStore (кампании, роли, персонажи,
- * привязка к чату, игровые дни, динамическое состояние); поверх — файловые
- * MarkdownNpcStore и журнал (транскрипт/саммари/ключевые события).
+ * Разовый смоук-тест хранилища кампании. Прогон идёт на временной SQLite-базе
+ * (CAMPAIGN_DB_PATH в temp-папке): кампании, роли, персонажи, привязка к чату,
+ * игровые дни, динамическое состояние; поверх — журнал (транскрипт/саммари/
+ * ключевые события) и NPC.
  * Запуск: npm run smoke
  */
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.CAMPAIGN_DATA_DIR = join(tmpdir(), `dnd-smoke-${Date.now()}`);
-process.env.CAMPAIGN_DB_PATH = join(tmpdir(), `dnd-smoke-db-${Date.now()}.db`);
+const root = mkdtempSync(join(tmpdir(), `dnd-smoke-${Date.now()}-`));
+process.env.CAMPAIGN_DB_PATH = join(root, "campaigns.db");
 
-const { MarkdownCampaignStore, campaignDbPath, assertCampaignSlug } = await import("../agent/lib/campaigns/store.ts");
-const { SqliteCampaignStore } = await import("../agent/lib/campaigns/store-sqlite.ts");
-const { MarkdownNpcStore } = await import("../agent/lib/campaigns/npc.ts");
+const { campaignStore, campaignDbPath, assertCampaignSlug } = await import("../agent/lib/campaigns/store.ts");
+const { npcStore } = await import("../agent/lib/campaigns/npc.ts");
 const { StoreError } = await import("../agent/lib/campaigns/types.ts");
+const { openCampaignDb } = await import("../agent/lib/campaigns/sqlite-db.ts");
 const journal = await import("../agent/lib/campaigns/journal.ts");
 const { default: Database } = await import("better-sqlite3");
 
-type CampaignStore = import("../agent/lib/campaigns/store.ts").CampaignStore;
 type Campaign = import("../agent/lib/campaigns/types.ts").Campaign;
 
-const root = process.env.CAMPAIGN_DATA_DIR!;
 const dbPath = campaignDbPath();
 let failures = 0;
 
@@ -55,13 +53,8 @@ const dm = { userId: "111", username: "dm_user" };
 const player = { userId: "222", username: "player_user" };
 const stranger = { userId: "333" };
 
-interface StoreSuiteHooks {
-  /** Прямая смена статуса кампании в обход интерфейса (тест фильтра статуса). */
-  setStatus(campaignId: string, slug: string, status: string): void;
-}
-
 /** Полный прогон проверок CampaignStore; возвращает основную кампанию. */
-function runStoreSuite(store: CampaignStore, label: string, hooks: StoreSuiteHooks): Campaign {
+function runStoreSuite(store: typeof campaignStore, label: string): Campaign {
   const t = (name: string) => `[${label}] ${name}`;
 
   check(t("создание кампании"), () => {
@@ -243,12 +236,14 @@ function runStoreSuite(store: CampaignStore, label: string, hooks: StoreSuiteHoo
   });
 
   check(t("findByBoundChat c anyStatus находит неактивную кампанию"), () => {
-    hooks.setStatus(campaign.id, campaign.slug, "finished");
+    const db = new Database(dbPath);
     try {
+      db.prepare("UPDATE campaigns SET status = 'finished' WHERE id = ?").run(campaign.id);
       if (store.findByBoundChat("-1001", 7)) throw new Error("finished найдена без anyStatus");
       if (!store.findByBoundChat("-1001", 7, { anyStatus: true })) throw new Error("anyStatus не нашёл finished");
     } finally {
-      hooks.setStatus(campaign.id, campaign.slug, "active");
+      db.prepare("UPDATE campaigns SET status = 'active' WHERE id = ?").run(campaign.id);
+      db.close();
     }
   });
 
@@ -282,50 +277,11 @@ function runStoreSuite(store: CampaignStore, label: string, hooks: StoreSuiteHoo
   return campaign;
 }
 
-// --- Markdown-стор ---
-
-const store = new MarkdownCampaignStore(root);
-
-function mdSetStatus(slug: string, status: string) {
-  const path = join(root, slug, "campaign.md");
-  const doc = readFileSync(path, "utf8");
-  const updated = doc.replace(/status: "[a-z]+"/, `status: "${status}"`);
-  if (updated === doc) throw new Error(`не удалось подменить статус на ${status}`);
-  writeFileSync(path, updated);
-}
-
-const campaign = runStoreSuite(store, "md", {
-  setStatus: (_campaignId, slug, status) => mdSetStatus(slug, status),
-});
-
-// --- SQLite-стор ---
-
-const { campaignStore: defaultStore } = await import("../agent/lib/campaigns/store.ts");
-
-// Дефолтный campaignStore (его же использует npc.ts) создан на той же temp-базе:
-// прогоняем suite через него, чтобы заодно проверить продакшен-путь выбора стора.
-// Если по окружению дефолт — markdown, берём явный SQLite-стор.
-const markdownIsDefault = (process.env.CAMPAIGN_STORE ?? "sqlite").trim().toLowerCase() === "markdown";
-const sqliteStore: CampaignStore = markdownIsDefault ? new SqliteCampaignStore(dbPath) : defaultStore;
-
-function sqliteSetStatus(campaignId: string, status: string) {
-  // Отдельное подключение: WAL допускает конкурентные соединения,
-  // а основное мы не закрываем до конца прогона.
-  const db = new Database(dbPath);
-  try {
-    db.prepare("UPDATE campaigns SET status = ? WHERE id = ?").run(status, campaignId);
-  } finally {
-    db.close();
-  }
-}
-
-const sqliteCampaign = runStoreSuite(sqliteStore, "sqlite", {
-  setStatus: (campaignId, _slug, status) => sqliteSetStatus(campaignId, status),
-});
+const campaign = runStoreSuite(campaignStore, "sqlite");
 
 // --- Квесты и открытые нити ---
 
-function runQuestSuite(store: CampaignStore, campaign: Campaign, label: string) {
+function runQuestSuite(store: typeof campaignStore, campaign: Campaign, label: string) {
   const t = (name: string) => `[${label}] ${name}`;
 
   check(t("создание квеста"), () => {
@@ -415,7 +371,7 @@ function runQuestSuite(store: CampaignStore, campaign: Campaign, label: string) 
     if (reread.rewardPlan?.note !== "должность капитана стражи") throw new Error("note плана потерян");
   });
 
-  check(t("пустой rewardPlan после roundtrip становится undefined (MD и SQLite единообразно)"), () => {
+  check(t("пустой rewardPlan после roundtrip становится undefined"), () => {
     const quest = store.createQuest(campaign.id, {
       title: "Пустая награда",
       objective: "Осмотреть маяк",
@@ -476,8 +432,7 @@ function runQuestSuite(store: CampaignStore, campaign: Campaign, label: string) 
   );
 }
 
-runQuestSuite(store, campaign, "md");
-runQuestSuite(sqliteStore, sqliteCampaign, "sqlite");
+runQuestSuite(campaignStore, campaign, "sqlite");
 
 // --- Защита slug от path traversal ---
 
@@ -560,9 +515,9 @@ check("ключевые события + дедуп", () => {
   if ((events.match(/фамильный молот/g) ?? []).length !== 1) throw new Error("ключевое событие задублировалось");
 });
 
-check("ensureDay создаёт файл нового дня", () => {
+check("ensureDay создаёт запись нового дня", () => {
   journal.ensureDay(campaign.slug, 2);
-  if (!journal.listDays(campaign.slug).includes(2)) throw new Error("файл дня 2 не создан");
+  if (!journal.listDays(campaign.slug).includes(2)) throw new Error("день 2 не создан");
 });
 
 // --- Промпт иллюстраций сцен ---
@@ -583,7 +538,7 @@ check("buildScenePrompt собирает сцену, внешность и се�
 });
 
 check("appearancesForCharacters: case-insensitive, неизвестные имена игнорируются", () => {
-  const sheets = store.listCharacters(campaign.id);
+  const sheets = campaignStore.listCharacters(campaign.id);
   const appearances = scenePrompt.appearancesForCharacters(["торин дубощит", "Кто-То"], sheets);
   if (appearances.length !== 1) throw new Error(`ожидалась 1 внешность, получено ${appearances.length}`);
   if (!appearances[0].includes("braided red beard")) throw new Error("не та внешность");
@@ -592,12 +547,8 @@ check("appearancesForCharacters: case-insensitive, неизвестные име
 
 // --- NPC ---
 
-// npc.ts резолвит кампании через дефолтный campaignStore (теперь SQLite),
-// поэтому NPC-проверки идут по кампании из SQLite-прогона.
-const npcStore = new MarkdownNpcStore(root);
-
 check("создание NPC с отношениями и памятью", () => {
-  const npc = npcStore.upsertNpc(sqliteCampaign.id, {
+  const npc = npcStore.upsertNpc(campaign.id, {
     name: "Бренна Хмурый",
     role: "хозяйка таверны",
     location: "Таверна «Последний очаг»",
@@ -614,7 +565,7 @@ check("создание NPC с отношениями и памятью", () => 
 });
 
 check("getNpc по имени и roundtrip профиля", () => {
-  const npc = npcStore.getNpc(sqliteCampaign.id, "бренна хмурый");
+  const npc = npcStore.getNpc(campaign.id, "бренна хмурый");
   if (!npc) throw new Error("NPC не найден по имени без учёта регистра");
   if (npc.role !== "хозяйка таверны") throw new Error("role потерян");
   const relation = npc.relationships["Торин Дубощит"];
@@ -624,7 +575,7 @@ check("getNpc по имени и roundtrip профиля", () => {
 });
 
 check("обновление NPC дописывает память, не затирая", () => {
-  const npc = npcStore.upsertNpc(sqliteCampaign.id, {
+  const npc = npcStore.upsertNpc(campaign.id, {
     name: "Бренна Хмурый",
     status: "unknown",
     memoryAppend: "Исчезла после ночёвки партии.",
@@ -633,7 +584,7 @@ check("обновление NPC дописывает память, не зати
   if (!npc.memory.includes("сборщиков налогов")) throw new Error("старая память потеряна");
   if (!npc.memory.includes("Исчезла после ночёвки")) throw new Error("новая память не дописана");
   if (npc.status !== "unknown") throw new Error("status не обновился");
-  if (npcStore.listNpcs(sqliteCampaign.id).length !== 1) throw new Error("listNpcs вернул лишнее");
+  if (npcStore.listNpcs(campaign.id).length !== 1) throw new Error("listNpcs вернул лишнее");
 });
 
 // --- Таблицы наград и уровня ---
@@ -742,14 +693,16 @@ check("skillCheck: натуральная 1 — провал всегда", () =
   if (result.success || !result.naturalFailure) throw new Error("натуральная 1 обязана быть провалом");
 });
 
-// Закрываем SQLite-подключение перед удалением файлов (у прокси close
-// делегируется в реальный стор; у Markdown-стора его нет).
-const maybeClose = (sqliteStore as { close?: () => void }).close;
-if (typeof maybeClose === "function") maybeClose.call(sqliteStore);
-rmSync(root, { recursive: true, force: true });
-for (const suffix of ["", "-wal", "-shm"]) {
-  rmSync(dbPath + suffix, { force: true });
+// Закрываем оба SQLite-подключения (стор + общий handle журнала/NPC) перед
+// удалением temp-каталога: на Windows иначе rmSync падает с EPERM.
+const closeStore = (campaignStore as { close?: () => void }).close;
+if (typeof closeStore === "function") closeStore.call(campaignStore);
+try {
+  openCampaignDb().close();
+} catch {
+  // Handle мог быть закрыт раньше — это нормально.
 }
+rmSync(root, { recursive: true, force: true });
 if (failures > 0) {
   console.error(`\n${failures} проверок провалено`);
   process.exit(1);

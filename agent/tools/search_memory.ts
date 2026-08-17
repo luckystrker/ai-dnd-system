@@ -8,9 +8,10 @@ import { StoreError } from "../lib/campaigns/types.ts";
 export default defineTool({
   description:
     "Search the campaign's long-term memory by keywords: transcripts of past in-game days, " +
-    "day/campaign summaries, key events, NPC cards and character sheets. Returns matching " +
-    "snippets with the source file and day number. Use when you need a fact but don't know " +
-    "which in-game day it happened in (read_day only works by day number). Read-only.",
+    "key events, loot ledger, world state, NPCs, locations, factions, characters, quests and " +
+    "campaign info. Returns matching snippets with the source label (e.g. 'транскрипт, день 3', " +
+    "'NPC Марта') and the in-game day number. Use when you need a fact but don't know which " +
+    "in-game day it happened in (read_day only works by day number). Read-only.",
   inputSchema: z.object({
     campaignSlug: z
       .string()

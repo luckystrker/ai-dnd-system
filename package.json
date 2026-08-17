@@ -8,7 +8,6 @@
   "scripts": {
     "build": "eve build",
     "dev": "eve dev",
-    "migrate:sqlite": "node scripts/migrate-md-to-sqlite.ts",
     "poll": "node --env-file=.env scripts/telegram-poll.ts",
     "smoke": "node scripts/smoke-campaigns.ts",
     "start": "eve start",

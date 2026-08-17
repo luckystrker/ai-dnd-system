@@ -1,13 +1,15 @@
 import { test, describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
-import { join } from "node:path";
 
-import { tempDir } from "./helpers.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
+import { tempDb } from "./helpers.ts";
 
-const { root, cleanup } = tempDir("access");
-process.env.CAMPAIGN_DATA_DIR = root;
-process.env.CAMPAIGN_STORE = "markdown";
+const { cleanup } = tempDb("access");
+after(() => {
+  // Закрываем соединение дефолтного стора, чтобы temp-папка удалилась
+  // (Windows не даёт удалить файл с открытым соединением).
+  (campaignStore as { close?: () => void }).close?.();
+});
 after(cleanup);
 
 const { campaignStore } = await import("../agent/lib/campaigns/store.ts");
@@ -40,7 +42,10 @@ const CHAR_CREATION = {
 let campaign: Campaign;
 
 beforeEach(() => {
-  rmSync(join(root, "taynaya-krepost"), { recursive: true, force: true });
+  // Первый вызов стора создаёт схему (конструктор выполняет DDL), затем
+  // чистим кампании — каждый тест начинает с пустой базы.
+  campaignStore.listCampaigns();
+  openCampaignDb().exec("DELETE FROM campaigns;");
   campaign = campaignStore.createCampaign(
     { title: "Тайная крепость", length: "short", setting: "Горы", theme: "осада" },
     { userId: "u-dm" },
