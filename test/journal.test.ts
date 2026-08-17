@@ -141,6 +141,22 @@ describe("appendKeyEvent / readKeyEvents", () => {
     assert.equal(events.match(/Герои нашли артефакт/g)!.length, 1);
   });
 
+  test("дедуплицирует по содержимому, когда явный eventId не передан", () => {
+    appendKeyEvent(slug, 1, "Кормак признался о голосе.");
+    appendKeyEvent(slug, 1, "Кормак признался о голосе.");
+    appendKeyEvent(slug, 2, "Кормак признался о голосе.");
+    const events = readKeyEvents(slug);
+    assert.equal(events.match(/Кормак признался о голосе/g)!.length, 2, "разные дни — разные события");
+    appendKeyEvent(slug, 1, "Кормак признался о голосе.", undefined, true);
+    assert.equal(readKeyEvents(slug).match(/Кормак признался о голосе/g)!.length, 3, "permanent — отдельное событие");
+    // Дедуп держится на колонке event_id, а не на тексте строки.
+    const rows = openCampaignDb()
+      .prepare("SELECT event_id FROM key_events ORDER BY id")
+      .all() as { event_id: string | null }[];
+    assert.ok(rows.every((row) => row.event_id), "все события должны иметь event_id");
+    assert.equal(new Set(rows.map((row) => row.event_id)).size, rows.length, "event_id уникальны");
+  });
+
   test("пропускает пустые события", () => {
     appendKeyEvent(slug, 1, "   \n ");
     assert.equal(readKeyEvents(slug), "");

@@ -15,6 +15,7 @@
  * допускает много NULL в уникальной колонке — записи без маркера не
  * дедуплицируются.
  */
+import { createHash } from "node:crypto";
 import type BetterSqlite3 from "better-sqlite3";
 
 import { openCampaignDb } from "./sqlite-db.ts";
@@ -104,9 +105,54 @@ function db(): BetterSqlite3.Database {
   if (!dbHandle) dbHandle = openCampaignDb();
   if (!schemaReady) {
     dbHandle.exec(SCHEMA);
+    migrateKeyEventDedup(dbHandle);
     schemaReady = true;
   }
   return dbHandle;
+}
+
+/**
+ * Детерминированный id ключевого события по содержимому: используется, когда
+ * вызывающий не передал явный eventId. Позволяет уникальному индексу
+ * (campaign_id, event_id) дедуплицировать повторы одного и того же события
+ * (SQLite считает NULL'ы различными, поэтому без id индекс не работает).
+ */
+function contentEventId(campaignId: string, day: number, clean: string, permanent: boolean): string {
+  return createHash("sha256")
+    .update(`${campaignId}\u0000${day}\u0000${permanent ? "p" : "r"}\u0000${clean}`)
+    .digest("hex")
+    .slice(0, 40);
+}
+
+/** Бэкфилл event_id для старых строк key_events (с NULL): контентный хеш, чтобы
+ *  уникальный индекс реально защищал. Точные дубли содержимого удаляются. */
+function migrateKeyEventDedup(handle: BetterSqlite3.Database): void {
+  const rows = handle.prepare(
+    "SELECT id, campaign_id, day, line, permanent FROM key_events WHERE event_id IS NULL ORDER BY id",
+  ).all() as
+    | { id: number; campaign_id: string; day: number; line: string; permanent: number }[];
+  if (rows.length === 0) return;
+  const seen = new Set<string>();
+  const deleteIds: number[] = [];
+  const updates: Array<[string, number]> = [];
+  for (const row of rows) {
+    const clean = row.line
+      .replace(/^-\s*(\[важно\]\s*)?\*\*День\s+\d+\*\*:\s*/, "")
+      .replace(/\s*\n\s*/g, " ")
+      .trim();
+    if (!clean) continue;
+    const key = `evt:${contentEventId(row.campaign_id, row.day, clean, row.permanent === 1)}`;
+    if (seen.has(key)) {
+      deleteIds.push(row.id);
+    } else {
+      seen.add(key);
+      updates.push([key, row.id]);
+    }
+  }
+  const del = handle.prepare("DELETE FROM key_events WHERE id = ?");
+  for (const id of deleteIds) del.run(id);
+  const upd = handle.prepare("UPDATE key_events SET event_id = ? WHERE id = ?");
+  for (const [key, id] of updates) upd.run(key, id);
 }
 
 /** id кампании по slug; undefined, если кампании нет (тихий no-op). */
@@ -255,15 +301,17 @@ export function readCampaignSummary(campaignSlug: string): string {
 export function appendKeyEvent(campaignSlug: string, day: number, text: string, eventId?: string, permanent = false): void {
   const id = campaignIdOf(campaignSlug);
   if (!id) return;
-  const marker = eventId ? `evt:${eventId}` : undefined;
   const clean = text.replace(/\s*\n\s*/g, " ").trim();
   if (!clean) return;
   const prefix = permanent ? "[важно] " : "";
   let line = `- ${prefix}**День ${day}**: ${clean}`;
-  if (marker) line += ` <!-- ${marker} -->`;
+  // Маркер в тексте строки — только для явного eventId (идемпотентность ретраев).
+  // Для неявного id используем контентный хеш в колонке event_id: строку не засоряем.
+  const dedupId = eventId ?? contentEventId(id, day, clean, permanent);
+  if (eventId) line += ` <!-- evt:${eventId} -->`;
   db().prepare(
     "INSERT OR IGNORE INTO key_events (campaign_id, day, line, permanent, event_id) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, day, line, permanent ? 1 : 0, marker ?? null);
+  ).run(id, day, line, permanent ? 1 : 0, `evt:${dedupId}`);
 }
 
 /** Разделяет ключевые события на permanent (без обрезки) и обычные (хвост). */

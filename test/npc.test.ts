@@ -48,6 +48,32 @@ describe("SqliteNpcStore", () => {
     assert.match(npc.memory, /Борн видел странный свет\./);
   });
 
+  test("upsertNpc не дублирует маркер дня, если memoryAppend уже содержит [День N]", () => {
+    store.upsertNpc(slug, {
+      name: "Борн",
+      memoryAppend: "[День 1] Ночью Дэн вернулся в деревню.",
+      memoryAppendDay: 1,
+    });
+    store.upsertNpc(slug, {
+      name: "Борн",
+      memoryAppend: "[День 2] [День 2] Кормак признался о голосе.",
+      memoryAppendDay: 2,
+    });
+    const npc = store.getNpc(slug, "Борн")!;
+    assert.ok(!npc.memory.includes("[День 1] [День 1]"), "не должно быть двойного маркера: " + npc.memory);
+    assert.ok(!npc.memory.includes("[День 2] [День 2]"), "не должно быть двойного маркера: " + npc.memory);
+    assert.match(npc.memory, /^\- \[День 1\] Ночью Дэн вернулся в деревню\./);
+    assert.match(npc.memory, /\n\- \[День 2\] Кормак признался о голосе\./);
+    assert.ok(npc.memory.split("\n").every((line) => (line.match(/\[День \d+\]/g) ?? []).length <= 1));
+  });
+
+  test("upsertNpc сохраняет встроенную дату, если memoryAppendDay не задан", () => {
+    store.upsertNpc(slug, { name: "Борн", memoryAppend: "[День 3] Борн видел странный свет." });
+    const npc = store.getNpc(slug, "Борн")!;
+    assert.match(npc.memory, /\- \[День 3\] Борн видел странный свет\./);
+    assert.ok(!npc.memory.includes("[День 3] [День 3]"));
+  });
+
   test("upsertNpc обновляет существующего NPC по имени без учёта регистра", () => {
     store.upsertNpc(slug, { name: "Борн", status: "alive", firstSeenDay: 1 });
     const updated = store.upsertNpc(slug, { name: "борн", status: "dead", location: "морг" });

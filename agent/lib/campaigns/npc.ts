@@ -71,9 +71,27 @@ function db(): BetterSqlite3.Database {
   if (!dbHandle) dbHandle = openCampaignDb();
   if (!schemaReady) {
     dbHandle.exec(SCHEMA);
+    repairMemoryDoubleDayMarkers(dbHandle);
     schemaReady = true;
   }
   return dbHandle;
+}
+
+/**
+ * Чинит старые строки памяти NPC с двойным маркером дня
+ * («- [День 1] [День 1] …»): схлопывает повторяющиеся одинаковые маркеры в один.
+ * Идемпотентно — после первого прогона совпадений больше нет.
+ */
+function repairMemoryDoubleDayMarkers(handle: BetterSqlite3.Database): void {
+  const rows = handle.prepare("SELECT id, memory FROM npcs WHERE memory != ''").all() as
+    | { id: string; memory: string }[];
+  if (rows.length === 0) return;
+  const update = handle.prepare("UPDATE npcs SET memory = ?, updated_at = ? WHERE id = ?");
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const fixed = row.memory.replace(/^(- \[День (\d+)\])(\s*\[День \2\])+/gmu, "$1");
+    if (fixed !== row.memory) update.run(fixed, now, row.id);
+  }
 }
 
 function asString(value: unknown): string {
@@ -162,8 +180,15 @@ export class SqliteNpcStore {
     let memory = existing ? existing.memory : "";
     const append = input.memoryAppend?.trim();
     if (append) {
-      const dayMark = input.memoryAppendDay !== undefined ? ` [День ${input.memoryAppendDay}]` : "";
-      const line = `-${dayMark} ${append.replace(/\s*\n\s*/g, " ")}`;
+      // Летописец иногда присылает memoryAppend уже с датой («[День N] …») вместе
+      // с memoryAppendDay — вытаскиваем встроенную дату и ставим один маркер,
+      // чтобы в памяти не было двойных «[День N] [День N]».
+      const dayRun = append.match(/^\s*(\[\s*День\s+\d+\s*\]\s*)+/u);
+      const inlineDay = dayRun ? dayRun[0].match(/День\s+(\d+)/u)?.[1] : undefined;
+      const clean = dayRun ? append.slice(dayRun[0].length).trim() : append;
+      const day = input.memoryAppendDay ?? (inlineDay ? Number(inlineDay) : undefined);
+      const dayMark = day !== undefined ? ` [День ${day}]` : "";
+      const line = `-${dayMark} ${clean.replace(/\s*\n\s*/g, " ")}`;
       memory = memory ? `${memory}\n${line}` : line;
     }
     this.writeNpc(profile, memory);
