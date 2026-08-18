@@ -1,11 +1,16 @@
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 
-import { appendKeyEvent, appendTranscriptEntry } from "../agent/lib/campaigns/journal.ts";
+import { appendKeyEvent, appendLedgerRow, appendTranscriptEntry } from "../agent/lib/campaigns/journal.ts";
 import { SqliteFactionStore } from "../agent/lib/campaigns/factions.ts";
 import { SqliteLocationStore } from "../agent/lib/campaigns/locations.ts";
 import { SqliteNpcStore } from "../agent/lib/campaigns/npc.ts";
-import { queryTerms, searchCampaignMemory } from "../agent/lib/campaigns/search.ts";
+import {
+  buildMatchQuery,
+  queryTerms,
+  searchCampaignMemory,
+} from "../agent/lib/campaigns/search.ts";
+import { openCampaignDb } from "../agent/lib/campaigns/sqlite-db.ts";
 import { SqliteCampaignStore } from "../agent/lib/campaigns/store-sqlite.ts";
 import { campaignStore } from "../agent/lib/campaigns/store.ts";
 import { tempDb } from "./helpers.ts";
@@ -122,5 +127,124 @@ describe("searchCampaignMemory", () => {
 
   test("запрос только из коротких слов ничего не ищет", () => {
     assert.deepEqual(searchCampaignMemory(slug, "а у"), []);
+  });
+});
+
+// --- FTS5: морфология, скопинг, инкрементальный catch-up, fallback ---
+
+describe("buildMatchQuery (FTS5)", () => {
+  test("кавычки + префикс-звёздочка снаружи + AND-склейка", () => {
+    assert.equal(buildMatchQuery(["тело", "ян"]), '"тело"* AND "ян"*');
+  });
+  test("пустой список термов даёт пустой запрос", () => {
+    assert.equal(buildMatchQuery([]), "");
+  });
+});
+
+describe("searchCampaignMemory (FTS5)", () => {
+  test("префиксное совпадение словоформ: «прокляти» находит «проклятие»", () => {
+    const hits = searchCampaignMemory(slug, "прокляти");
+    assert.ok(hits.length >= 1, `expected hits, got ${JSON.stringify(hits)}`);
+    assert.ok(
+      hits.some((h) => h.source === "транскрипт, день 3" && h.snippet.includes("проклятие")),
+      `missing day-3 transcript hit: ${JSON.stringify(hits)}`,
+    );
+  });
+
+  test("AND через FTS: строка без одного терма не попадает в выдачу", () => {
+    const hits = searchCampaignMemory(slug, "часовн каэль");
+    assert.ok(hits.length >= 1, `expected hits, got ${JSON.stringify(hits)}`);
+    assert.ok(hits.some((h) => h.snippet.includes("часовн")), `no chapel hit: ${JSON.stringify(hits)}`);
+    // Ключевое событие «Каэль дал клятву» не содержит «часовн» — его нет.
+    assert.ok(
+      !hits.some((h) => h.source.startsWith("ключевое")),
+      `key event without chapel leaked: ${JSON.stringify(hits)}`,
+    );
+  });
+
+  test("fallback на JS-скан: совпадение внутри слова («эль» → «Каэль»)", () => {
+    const hits = searchCampaignMemory(slug, "эль");
+    assert.ok(hits.length >= 1, `expected substring hits, got ${JSON.stringify(hits)}`);
+    assert.ok(hits.some((h) => h.snippet.includes("Каэль")), `no Каэль hit: ${JSON.stringify(hits)}`);
+  });
+
+  test("скопинг по кампании: записи другой кампании не всплывают", () => {
+    const otherSlug = "other-campaign";
+    store.createCampaign(
+      { title: "other-campaign", length: "medium", setting: "Пустыня", theme: "выживание" },
+      { userId: "u-dm" },
+    );
+    appendTranscriptEntry(otherSlug, 5, { kind: "dm", text: "Каэль — злой близнец в другом мире." });
+    const hits = searchCampaignMemory(slug, "близнец");
+    assert.deepEqual(hits, []);
+    const own = searchCampaignMemory(slug, "Каэль");
+    assert.ok(!own.some((h) => h.snippet.includes("близнец")), `foreign hit leaked: ${JSON.stringify(own)}`);
+  });
+
+  test("инкрементальный catch-up: новая запись находится вторым поиском", () => {
+    appendTranscriptEntry(slug, 4, { kind: "dm", text: "Артефакт спрятан под алтарём." });
+    const hits = searchCampaignMemory(slug, "артефакт");
+    assert.ok(hits.length >= 1, `expected hit, got ${JSON.stringify(hits)}`);
+    assert.ok(
+      hits.some((h) => h.source === "транскрипт, день 4"),
+      `missing day-4 hit: ${JSON.stringify(hits)}`,
+    );
+  });
+
+  test("catch-up идемпотентен: повторный поиск и новые записи не дублируют хиты", () => {
+    const before = searchCampaignMemory(slug, "артефакт").length;
+    appendTranscriptEntry(slug, 4, { kind: "dm", text: "Каэль вспоминает про артефакт." });
+    const after = searchCampaignMemory(slug, "артефакт").length;
+    assert.ok(after > before, `expected new hit, got ${before} -> ${after}`);
+    assert.equal(searchCampaignMemory(slug, "артефакт").length, after, "third search must not duplicate");
+  });
+
+  test("первый catch-up индексирует всю историю (fts_meta догоняет max id)", () => {
+    const handle = openCampaignDb();
+    const meta = handle.prepare(
+      "SELECT last_source_id FROM fts_meta WHERE source = 'transcript_entries'",
+    ).get() as { last_source_id: number } | undefined;
+    assert.ok(meta, "fts_meta row for transcript_entries missing");
+    const max = handle.prepare("SELECT MAX(id) AS m FROM transcript_entries").get() as { m: number | null };
+    assert.ok(meta!.last_source_id >= (max.m ?? 0), `stale index: ${meta!.last_source_id} < ${max.m}`);
+  });
+
+  test("FTS покрывает журнал лута", () => {
+    appendLedgerRow(slug, { day: 2, type: "found", itemOrGold: "Серебряный медальон" });
+    const hits = searchCampaignMemory(slug, "медальон");
+    assert.ok(
+      hits.some((h) => h.source === "журнал лута, день 2"),
+      `missing ledger hit: ${JSON.stringify(hits)}`,
+    );
+  });
+
+  test("DELETE-триггер вычищает удалённые строки из индекса", () => {
+    appendKeyEvent(slug, 2, "Древний клинок блестит во тьме.");
+    const before = searchCampaignMemory(slug, "клинок");
+    assert.ok(before.some((h) => h.source.startsWith("ключевое")), `no key-event hit: ${JSON.stringify(before)}`);
+    const handle = openCampaignDb();
+    handle.prepare("DELETE FROM key_events WHERE line LIKE '%клинок%'").run();
+    const after = searchCampaignMemory(slug, "клинок");
+    assert.ok(
+      !after.some((h) => h.source.startsWith("ключевое")),
+      `stale index hit after delete: ${JSON.stringify(after)}`,
+    );
+  });
+
+  test("свежесть perSource: при избытке совпадений берутся самые новые дни", () => {
+    for (const [day, text] of [
+      [4, "Каэль идёт в лес."],
+      [5, "Каэль находит следы."],
+      [6, "Каэль встречает волков."],
+      [7, "Каэль возвращается к часовне."],
+    ] as const) {
+      appendTranscriptEntry(slug, day, { kind: "dm", text });
+    }
+    const hits = searchCampaignMemory(slug, "Каэль", { perSource: 3 });
+    const transcriptDays = hits
+      .filter((h) => h.source.startsWith("транскрипт"))
+      .map((h) => h.day!)
+      .sort((a, b) => b - a);
+    assert.deepEqual(transcriptDays, [7, 6, 5], `expected newest 3 days, got ${transcriptDays}`);
   });
 });
