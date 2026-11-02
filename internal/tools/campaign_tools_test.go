@@ -79,6 +79,35 @@ func TestPlayerCanWriteCampaignMemory(t *testing.T) {
 	}
 }
 
+// Выдача предметов/золота и запись журнала идут одной транзакцией: после
+// успешного вызова журнал содержит обе строки, а повтор с тем же днём и
+// суммой не дублирует их.
+func TestGrantCharacterWritesLedgerAtomically(t *testing.T) {
+	env := newTestEnv(t)
+	args := grantCharacterArgs{
+		Character: "Ария", Items: []string{"зелье лечения"}, Gold: ptr(15), XP: ptr(30),
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := env.deps.grantCharacter(env.player, args); err != nil {
+			t.Fatalf("grantCharacter, попытка %d: %v", attempt, err)
+		}
+	}
+	ledger, err := env.store.ReadLedger(env.campaign.Slug, nil, 0)
+	if err != nil {
+		t.Fatalf("ReadLedger: %v", err)
+	}
+	if len(ledger) != 2 {
+		t.Fatalf("строк журнала = %d, want 2: %v", len(ledger), ledger)
+	}
+	sheets, err := env.store.ListCharacters(env.campaign.ID)
+	if err != nil || len(sheets) != 1 {
+		t.Fatalf("ListCharacters: %v, %v", sheets, err)
+	}
+	if sheets[0].Gold == nil || *sheets[0].Gold != 30 {
+		t.Fatalf("золото = %v, want 30 (по 15 за вызов)", sheets[0].Gold)
+	}
+}
+
 func TestOutsiderDenied(t *testing.T) {
 	env := newTestEnv(t)
 

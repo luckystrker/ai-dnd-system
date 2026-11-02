@@ -462,32 +462,37 @@ func (d Deps) grantCharacter(sess *Session, args grantCharacterArgs) (any, error
 	if args.XP != nil {
 		xp = *args.XP
 	}
-	sheet, err := d.DB.GrantCharacter(campaign.ID, args.Character, store.CharacterGrantPatch{
-		Inventory: args.Items, Abilities: abilitiesFromArgs(args.Abilities),
-		Gold: gold, XP: xp, Conditions: args.Conditions,
-	})
-	if err != nil {
-		return nil, fromStoreError(err)
-	}
 	day := 1
 	if campaign.CurrentDay != nil {
 		day = *campaign.CurrentDay
 	}
+	ledger := []store.GrantLedgerRow{}
 	if args.Gold != nil && *args.Gold > 0 {
 		eventID := fmt.Sprintf("grant:%s:gold:%d:%d", args.Character, day, *args.Gold)
-		if err := d.DB.AppendLedgerRow(campaign.Slug, store.LedgerRow{
-			Day: day, Type: store.LedgerFound, ItemOrGold: fmt.Sprintf("%d золотых", *args.Gold), By: &args.Character,
-		}, &eventID); err != nil {
-			return nil, fromStoreError(err)
-		}
+		ledger = append(ledger, store.GrantLedgerRow{
+			Row: store.LedgerRow{
+				Day: day, Type: store.LedgerFound, ItemOrGold: fmt.Sprintf("%d золотых", *args.Gold), By: &args.Character,
+			},
+			EventID: &eventID,
+		})
 	}
 	if len(args.Items) > 0 {
 		eventID := fmt.Sprintf("grant:%s:items:%d:%d", args.Character, day, len(args.Items))
-		if err := d.DB.AppendLedgerRow(campaign.Slug, store.LedgerRow{
-			Day: day, Type: store.LedgerFound, ItemOrGold: strings.Join(args.Items, ", "), By: &args.Character,
-		}, &eventID); err != nil {
-			return nil, fromStoreError(err)
-		}
+		ledger = append(ledger, store.GrantLedgerRow{
+			Row: store.LedgerRow{
+				Day: day, Type: store.LedgerFound, ItemOrGold: strings.Join(args.Items, ", "), By: &args.Character,
+			},
+			EventID: &eventID,
+		})
+	}
+	// Лист и журнал пишутся одной транзакцией: повтор не оставит выдачу без
+	// записи в журнале (и наоборот).
+	sheet, err := d.DB.GrantCharacterWithLedger(campaign.ID, args.Character, store.CharacterGrantPatch{
+		Inventory: args.Items, Abilities: abilitiesFromArgs(args.Abilities),
+		Gold: gold, XP: xp, Conditions: args.Conditions,
+	}, ledger)
+	if err != nil {
+		return nil, fromStoreError(err)
 	}
 	return map[string]any{
 		"ok": true, "character": characterCardMap(*sheet),

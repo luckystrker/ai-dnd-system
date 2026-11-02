@@ -793,33 +793,24 @@ func (d Deps) levelUp(sess *Session, args levelUpArgs) (any, error) {
 		newMaxHP = &value
 		hpGain = perLevel * delta
 	}
-	if _, err := d.DB.UpdateCharacter(campaign.ID, sheet.Name, store.CharacterStatePatch{
-		Level: &newLevel, MaxHP: newMaxHP,
-	}); err != nil {
-		return nil, fromStoreError(err)
-	}
-	gained := any(nil)
-	if args.Ability != nil {
-		level := newLevel
-		if _, err := d.DB.GrantCharacter(campaign.ID, sheet.Name, store.CharacterGrantPatch{
-			Abilities: []store.CharacterAbility{{Name: args.Ability.Name, Description: args.Ability.Description, Level: &level}},
-		}); err != nil {
-			return nil, fromStoreError(err)
-		}
-		gained = args.Ability.Name
-	}
 	day := 1
 	if campaign.CurrentDay != nil {
 		day = *campaign.CurrentDay
 	}
-	eventID := fmt.Sprintf("evt:levelup:%s:%d", sheet.ID, newLevel)
-	text := fmt.Sprintf("%s достиг %d уровня.", sheet.Name, newLevel)
-	if err := d.DB.AppendKeyEvent(campaign.Slug, day, text, &eventID, false); err != nil {
-		return nil, fromStoreError(err)
+	var ability *store.CharacterAbility
+	gained := any(nil)
+	if args.Ability != nil {
+		level := newLevel
+		ability = &store.CharacterAbility{Name: args.Ability.Name, Description: args.Ability.Description, Level: &level}
+		gained = args.Ability.Name
 	}
-	transcriptID := fmt.Sprintf("evt:levelup:%s:%d", sheet.ID, newLevel)
-	if err := d.DB.AppendTranscriptEntry(campaign.Slug, day, store.TranscriptEntry{
-		Kind: "action", Text: text, EventID: &transcriptID,
+	// Уровень, способность, ключевое событие и транскрипт — одна транзакция:
+	// сбой посередине не оставит полуповышенного персонажа.
+	eventID := fmt.Sprintf("levelup:%s:%d", sheet.ID, newLevel)
+	text := fmt.Sprintf("%s достиг %d уровня.", sheet.Name, newLevel)
+	if _, err := d.DB.LevelUpCharacter(campaign.ID, sheet.Name, day, store.LevelUpInput{
+		NewLevel: newLevel, MaxHP: newMaxHP, Ability: ability,
+		KeyEventText: text, KeyEventID: eventID, TranscriptText: text,
 	}); err != nil {
 		return nil, fromStoreError(err)
 	}
