@@ -459,7 +459,7 @@ func dayTailSection(record *store.DayRecord, historyText string) string {
 		}
 		// Не дублируем то, что уже видно модели в окне истории: блок памяти
 		// добавляется в хвост, а не заменяет собой транскрипт.
-		if historyText != "" && strings.Contains(historyText, core) {
+		if historyText != "" && strings.Contains(normalizeForCompare(historyText), normalizeForCompare(core)) {
 			continue
 		}
 		entries = append(entries, entry)
@@ -498,6 +498,12 @@ func transcriptCore(line string) string {
 		return line
 	}
 	return strings.TrimSpace(line)
+}
+
+// normalizeForCompare сводит пробелы и переводы строк к одному пробелу:
+// транскрипт схлопывает переводы строк, а история — нет.
+func normalizeForCompare(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func capTail(text string, max int) string {

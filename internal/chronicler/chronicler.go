@@ -132,6 +132,9 @@ func (c *Chronicler) CloseDay(ctx context.Context, campaign *store.Campaign, day
 		}
 		campaign = loaded
 	}
+	if campaign.ID != c.session.CampaignID {
+		return Report{}, fmt.Errorf("chronicler: campaign %s is not the session campaign %s", campaign.ID, c.session.CampaignID)
+	}
 	before, err := c.snapshot(campaign, day)
 	if err != nil {
 		return Report{}, err

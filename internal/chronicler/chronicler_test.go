@@ -169,3 +169,20 @@ func TestCloseDaySecondRunDoesNotDoubleCount(t *testing.T) {
 		t.Fatal("note не заполнен из ответа модели")
 	}
 }
+
+// Летописец не закрывает чужую кампанию, даже если её передали напрямую.
+func TestCloseDayRejectsForeignCampaign(t *testing.T) {
+	t.Parallel()
+
+	st := newStore(t)
+	own := newCampaign(t, st, "Своя")
+	other := newCampaign(t, st, "Чужая")
+	cfg := agotest.NewTestConfig(reply("не должно дойти"))
+	agent, err := chronicler.New(chronicler.Config{Model: cfg, Store: st, CampaignID: own.ID})
+	if err != nil {
+		t.Fatalf("chronicler: %v", err)
+	}
+	if _, err := agent.CloseDay(context.Background(), other, 1, ""); err == nil {
+		t.Fatal("ожидался отказ для чужой кампании")
+	}
+}
