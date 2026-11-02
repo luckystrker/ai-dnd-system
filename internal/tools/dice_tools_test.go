@@ -184,6 +184,30 @@ func TestCombatDamagePersistsSheet(t *testing.T) {
 	}
 }
 
+func TestCombatDamageUsesSheetHP(t *testing.T) {
+	env := newTestEnv(t)
+	env.deps.Random = randomSeq(d20Face(15), d20Face(10))
+	if _, err := env.deps.initiative(env.dm, initiativeArgs{Combatants: []initiativeCombatantArg{
+		{Name: "Ария", Side: "party"},
+		{Name: "Гоблин", Side: "enemy", HP: ptr(10), AC: ptr(10)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	// Лечение мимо combat: лист 10, снимок всё ещё 10 — затем урон 3.
+	if _, err := env.store.UpdateCharacter(env.campaign.ID, "Ария", store.CharacterStatePatch{HP: ptr(10)}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := env.deps.combat(env.player, combatArgs{
+		Action: "damage", Target: ptr("Ария"), Amount: ptr(3),
+	})
+	if err != nil {
+		t.Fatalf("damage: %v", err)
+	}
+	if !strings.Contains(result.(string), "7/10") {
+		t.Fatalf("урон посчитан не от листа: %q", result)
+	}
+}
+
 func TestCombatDodgeNextStatusEnd(t *testing.T) {
 	env := newTestEnv(t)
 	env.deps.Random = randomSeq(d20Face(15), d20Face(10))

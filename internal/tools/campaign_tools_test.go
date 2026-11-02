@@ -122,17 +122,28 @@ func TestChroniclerTrustedWritesOnlyOwnCampaign(t *testing.T) {
 	if _, err := env.deps.upsertNpc(chronicler, upsertNpcArgs{Name: "Свидетель", MemoryAppend: ptr("Видел партию.")}); err != nil {
 		t.Fatalf("chronicler npc: %v", err)
 	}
-	// Вторая кампания недоступна: смена CampaignID — это смена сессии кодом,
-	// аргументов модели для этого нет.
+
+	// Вторая кампания содержит персонажа с тем же именем: запись из сессии A
+	// не должна затронуть чужие данные.
 	other, err := env.store.CreateCampaign(store.NewCampaignInput{
 		Title: "Другая", Length: store.LengthShort, Setting: "s", Theme: "t",
 	}, store.NewOwnerInput{UserID: "u-other"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	chronicler.CampaignID = other.ID
-	if _, err := env.deps.updateCharacter(chronicler, updateCharacterArgs{Character: "Ария"}); err == nil {
-		t.Fatal("чужой персонаж не должен обновляться из чужой кампании")
+	if _, err := env.store.SaveCharacter(other.ID, "u-other", store.NewCharacterInput{
+		Name: "Ария", CharacterClass: "плут", Race: "эльф", Stats: map[string]float64{"dex": 10},
+		MaxHP: ptr(10), HP: ptr(10),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	otherSheet, _ := env.store.ListCharacters(other.ID)
+	if _, err := env.deps.updateCharacter(chronicler, updateCharacterArgs{Character: "Ария", HP: ptr(9)}); err != nil {
+		t.Fatalf("chronicler update: %v", err)
+	}
+	otherAfter, _ := env.store.ListCharacters(other.ID)
+	if otherAfter[0].HP == nil || *otherAfter[0].HP != 10 || otherSheet[0].HP == nil {
+		t.Fatalf("чужая кампания изменена: %+v", otherAfter[0])
 	}
 }
 

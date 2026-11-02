@@ -57,6 +57,34 @@ func TestAdvanceDayAndDayCloser(t *testing.T) {
 	}
 }
 
+type failingDayCloser struct{ calls int }
+
+func (f *failingDayCloser) CloseDay(context.Context, *store.Campaign, int) error {
+	f.calls++
+	return context.DeadlineExceeded
+}
+
+func TestAdvanceDayCloserFailureDoesNotAskRetry(t *testing.T) {
+	env := newTestEnv(t)
+	closer := &failingDayCloser{}
+	env.deps.DayCloser = closer
+	result, err := env.deps.advanceDay(env.player, advanceDayArgs{})
+	if err != nil {
+		t.Fatalf("advanceDay не должен падать после сдвига дня: %v", err)
+	}
+	payload := result.(map[string]any)
+	if payload["closed"] != false || !strings.Contains(payload["note"].(string), "повторный вызов advance_day не нужен") {
+		t.Fatalf("result = %+v", payload)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("closer calls = %d", closer.calls)
+	}
+	updated, _ := env.store.GetCampaign(env.campaign.ID)
+	if updated.CurrentDay == nil || *updated.CurrentDay != 2 {
+		t.Fatalf("день сдвинут неправильно: %+v", updated.CurrentDay)
+	}
+}
+
 func TestAdvanceDayForbiddenForOutsider(t *testing.T) {
 	env := newTestEnv(t)
 	_, err := env.deps.advanceDay(env.outsider, advanceDayArgs{})

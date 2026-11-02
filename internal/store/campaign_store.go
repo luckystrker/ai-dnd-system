@@ -183,7 +183,8 @@ func (s *Store) BindAndActivate(campaignID, actorUserID string, chat BoundChat) 
 	return s.mustGetCampaign(campaign.ID)
 }
 
-// AdvanceDay увеличивает игровой день и начинает его утром.
+// AdvanceDay увеличивает игровой день и начинает его утром (dm-вариант для
+// административных сценариев и обратной совместимости).
 func (s *Store) AdvanceDay(campaignID, actorUserID string) (*Campaign, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,38 +195,43 @@ func (s *Store) AdvanceDay(campaignID, actorUserID string) (*Campaign, error) {
 	if err := requireRole(campaign, actorUserID, RoleDM); err != nil {
 		return nil, err
 	}
-	if campaign.Status != StatusActive {
-		return nil, storeError("Игровые дни можно двигать только в активной кампании.", ErrConflict)
-	}
-	if _, err := s.db.Exec(
-		"UPDATE campaigns SET current_day = COALESCE(current_day, 1) + 1, time_of_day = 'morning' WHERE id = ?",
-		campaign.ID,
-	); err != nil {
-		return nil, err
-	}
-	return s.mustGetCampaign(campaign.ID)
+	updated, _, err := s.advanceDayLocked(campaign)
+	return updated, err
 }
 
 // AdvanceDayForMember двигает день без проверки роли dm: по новой
 // авторизации день — операция памяти кампании, её может делать любой участник;
-// роль dm осталась только у административных команд.
-func (s *Store) AdvanceDayForMember(campaignID string) (*Campaign, error) {
+// роль dm осталась только у административных команд. Возвращает и номер
+// закрытого дня — previous читается под тем же мьютексом, что и запись.
+func (s *Store) AdvanceDayForMember(campaignID string) (*Campaign, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	return s.advanceDayLocked(campaign)
+}
+
+func (s *Store) advanceDayLocked(campaign *Campaign) (*Campaign, int, error) {
 	if campaign.Status != StatusActive {
-		return nil, storeError("Игровые дни можно двигать только в активной кампании.", ErrConflict)
+		return nil, 0, storeError("Игровые дни можно двигать только в активной кампании.", ErrConflict)
+	}
+	previous := 1
+	if campaign.CurrentDay != nil {
+		previous = *campaign.CurrentDay
 	}
 	if _, err := s.db.Exec(
 		"UPDATE campaigns SET current_day = COALESCE(current_day, 1) + 1, time_of_day = 'morning' WHERE id = ?",
 		campaign.ID,
 	); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return s.mustGetCampaign(campaign.ID)
+	updated, err := s.mustGetCampaign(campaign.ID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return updated, previous, nil
 }
 
 // SetEnvironment обновляет игровое время/окружение.

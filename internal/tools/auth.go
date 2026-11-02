@@ -32,25 +32,6 @@ func (d Deps) campaign(sess *Session) (*store.Campaign, error) {
 	return campaign, nil
 }
 
-// campaignForWrite — кампания сессии для записи в память: любой участник,
-// роль dm не требуется.
-func (d Deps) campaignForWrite(sess *Session) (*store.Campaign, error) {
-	return d.campaign(sess)
-}
-
-// campaignAdmin — кампания сессии для административной операции (dm).
-func (d Deps) campaignAdmin(sess *Session) (*store.Campaign, error) {
-	campaign, err := d.campaign(sess)
-	if err != nil {
-		return nil, err
-	}
-	member := memberOf(campaign, sess.UserID)
-	if member == nil || member.Role != store.RoleDM {
-		return nil, errDMOnly()
-	}
-	return campaign, nil
-}
-
 // campaignByID — явная цель админ-тула (start/invite/finish).
 func (d Deps) campaignByID(idOrSlug string) (*store.Campaign, error) {
 	campaign, err := d.DB.GetCampaign(idOrSlug)

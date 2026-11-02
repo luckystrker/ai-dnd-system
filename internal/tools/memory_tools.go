@@ -17,7 +17,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("create_quest",
-			"Create a quest in the campaign: register an offered/accepted quest with its objective difficulty and optional reward plan. Use when an NPC offers the party a task or the players take one on. The quest then lives in the campaign store and is shown in the injected memory. Rewards: fill rewardPlan for special rewards; empty fields are computed from tables on completion.",
+			`Create a quest in the campaign: register an offered/accepted quest with its objective, difficulty and optional reward plan. Use when an NPC offers the party a task or the players take one on. The quest then lives in the campaign store and is shown in the injected memory. Rewards: fill rewardPlan for special rewards; empty fields are computed from tables on completion.`,
 			func(args createQuestArgs) (any, error) { return d.createQuest(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -27,7 +27,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("complete_quest",
-			"Complete (or fail/abandon) a quest: closes the quest grants the rewards to the whole party (XP to each member, gold split across the party, planned items) and records a key event. Rewards come from the quest's rewardPlan; empty fields are computed from tables by quest difficulty and party level. Reports level-ups found — call level_up for each affected character.",
+			`Complete (or fail/abandon) a quest: closes the quest, grants the rewards to the whole party (XP to each member, gold split across the party, planned items) and records a key event. Rewards come from the quest's rewardPlan; empty fields are computed from tables by quest difficulty and party level. Reports level-ups found — call level_up for each affected character.`,
 			func(args completeQuestArgs) (any, error) { return d.completeQuest(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -37,7 +37,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("append_thread",
-			"Append an open thread to the campaign ledger: a promise, mystery, debt or unresolved matter that must resurface later. Open threads are injected into the DM memory every turn so old hooks stay alive. Close them with resolve_thread when the story resolves them.",
+			`Append an open thread to the campaign ledger: a promise, mystery, debt or unresolved matter that must resurface later ("promised the mayor", "who is the hooded man", "owe a favor"). Open threads are injected into the DM memory every turn, so old hooks stay alive. Close them with resolve_thread when the story resolves them.`,
 			func(args appendThreadArgs) (any, error) { return d.appendThread(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -52,7 +52,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("append_key_event",
-			"Save one key moment of the campaign into long-term memory. Use for turning points, promises, betrayals, discovered secrets — facts the DM must remember sessions later. One call = one concise event. Set permanent=true for the few pivotal facts (deaths, alliances, revealed secrets, oaths) that must NEVER fall out of the memory block as the campaign grows long.",
+			`Save one key moment of the campaign into long-term memory. Use for turning points, promises, betrayals, discovered secrets — facts the DM must remember sessions later. One call = one concise event. Set permanent=true for the few pivotal facts (deaths, alliances, revealed secrets, oaths) that must NEVER fall out of the memory block as the campaign grows long — permanent events are shown in full every turn; regular ones are truncated to the recent tail.`,
 			func(args appendKeyEventArgs) (any, error) { return d.appendKeyEvent(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -62,7 +62,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("update_day_summary",
-			"Write the short summary of one in-game day. Call when closing a day (usually via the chronicler) so later sessions can recall the day without reading the full transcript. The optional headline is a one-line (<=140 chars) title of the day shown for EVERY past day in the memory block so the full campaign arc stays visible.",
+			`Write the short summary of one in-game day. Call when closing a day (usually via the chronicler) so later sessions can recall the day without reading the full transcript. The optional headline is a one-line (<=140 chars) title of the day shown for EVERY past day in the memory block, so the full campaign arc stays visible regardless of how long the campaign grows.`,
 			func(args updateDaySummaryArgs) (any, error) { return d.updateDaySummary(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -72,7 +72,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("search_memory",
-			"Search the campaign's long-term memory by keywords: transcripts of past in-game days, key events, loot ledger, world state, NPCs, locations, factions, characters, quests and campaign info. Returns matching snippets with the source label and the in-game day number. Use when you need a fact but do not know which in-game day it happened in. Read-only.",
+			`Search the campaign's long-term memory by keywords: transcripts of past in-game days, key events, loot ledger, world state, NPCs, locations, factions, characters, quests and campaign info. Returns matching snippets with the source label (e.g. 'транскрипт, день 3', 'NPC Марта') and the in-game day number. Use when you need a fact but don't know which in-game day it happened in (read_day only works by day number). Read-only.`,
 			func(args searchMemoryArgs) (any, error) { return d.searchMemory(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -122,7 +122,7 @@ func memoryTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("record_world_change",
-			"Record a durable change to the world's current state — the opposite of an append-only log: it holds what is true NOW, grouped by category. Use for deaths (category «Погибшие»), destroyed/built places, decisions taken, alliance shifts. Prevents the world from contradicting itself. Idempotent by text within a category.",
+			`Record a durable change to the world's current state — the opposite of an append-only log: it holds what is true NOW, grouped by category. Use for deaths (category «Погибшие»), destroyed/built places, decisions taken, alliance shifts. Prevents the world from contradicting itself (e.g. reviving a dead NPC). Idempotent by text within a category.`,
 			func(args recordWorldChangeArgs) (any, error) { return d.recordWorldChange(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -174,7 +174,7 @@ type createQuestArgs struct {
 }
 
 func (d Deps) createQuest(sess *Session, args createQuestArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ type updateQuestArgs struct {
 }
 
 func (d Deps) updateQuest(sess *Session, args updateQuestArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +256,7 @@ type completeQuestArgs struct {
 }
 
 func (d Deps) completeQuest(sess *Session, args completeQuestArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +489,7 @@ type appendThreadArgs struct {
 }
 
 func (d Deps) appendThread(sess *Session, args appendThreadArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +543,7 @@ type resolveThreadArgs struct {
 }
 
 func (d Deps) resolveThread(sess *Session, args resolveThreadArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +594,7 @@ type appendKeyEventArgs struct {
 }
 
 func (d Deps) appendKeyEvent(sess *Session, args appendKeyEventArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -619,7 +619,7 @@ type appendCampaignSummaryArgs struct {
 }
 
 func (d Deps) appendCampaignSummary(sess *Session, args appendCampaignSummaryArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +637,7 @@ type updateDaySummaryArgs struct {
 }
 
 func (d Deps) updateDaySummary(sess *Session, args updateDaySummaryArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -803,7 +803,7 @@ type upsertNpcArgs struct {
 }
 
 func (d Deps) upsertNpc(sess *Session, args upsertNpcArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -916,7 +916,7 @@ type upsertLocationArgs struct {
 }
 
 func (d Deps) upsertLocation(sess *Session, args upsertLocationArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +945,7 @@ type movePartyArgs struct {
 }
 
 func (d Deps) moveParty(sess *Session, args movePartyArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -991,7 +991,7 @@ type upsertFactionArgs struct {
 }
 
 func (d Deps) upsertFaction(sess *Session, args upsertFactionArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -1011,7 +1011,7 @@ type adjustStandingArgs struct {
 }
 
 func (d Deps) adjustStanding(sess *Session, args adjustStandingArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,7 +1055,7 @@ type recordWorldChangeArgs struct {
 }
 
 func (d Deps) recordWorldChange(sess *Session, args recordWorldChangeArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}

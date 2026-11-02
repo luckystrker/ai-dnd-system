@@ -388,7 +388,7 @@ type updateCharacterArgs struct {
 }
 
 func (d Deps) updateCharacter(sess *Session, args updateCharacterArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +429,7 @@ type grantCharacterArgs struct {
 }
 
 func (d Deps) grantCharacter(sess *Session, args grantCharacterArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -483,13 +483,13 @@ func (d Deps) getGameContext(sess *Session) (any, error) {
 		return nil, errNoIdentity()
 	}
 	campaign, err := d.campaign(sess)
+	if err == noCampaignError {
+		return map[string]any{
+			"ok": true, "campaign": nil,
+			"note": "В этом чате нет привязанной кампании. Можно создать новую (/newcampaign) или запустить существующую (/startcampaign).",
+		}, nil
+	}
 	if err != nil {
-		if toolErr, ok := err.(*ToolError); ok && toolErr.Code == CodeAccessDenied && strings.Contains(toolErr.Message, "нет привязанной") {
-			return map[string]any{
-				"ok": true, "campaign": nil,
-				"note": "В этом чате нет привязанной кампании. Можно создать новую (/newcampaign) или запустить существующую (/startcampaign).",
-			}, nil
-		}
 		return nil, err
 	}
 	characters, err := d.DB.ListCharacters(campaign.ID)

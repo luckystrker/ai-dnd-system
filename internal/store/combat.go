@@ -88,6 +88,41 @@ func (s *Store) LoadCombatState(campaignSlug string) (*CombatSnapshot, error) {
 	return &CombatSnapshot{Combat: combat, Enemies: enemies}, nil
 }
 
+// ApplyCombatSnapshotHP атомарно пишет HP персонажа в лист и боевой снимок:
+// один s.mu и одна транзакция. Если запись снимка падает, HP листа
+// откатывается — источник истины и кэш боя не расходятся.
+func (s *Store) ApplyCombatSnapshotHP(campaignIDOrSlug, nameOrSlug string, hp int, snapshot CombatSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
+	if err != nil {
+		return err
+	}
+	row, err := s.findCharacterRow(campaign.ID, nameOrSlug)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		"UPDATE characters SET hp = ?, updated_at = ? WHERE id = ?",
+		hp, nowISO(), row.ID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		"INSERT OR REPLACE INTO combat_snapshot (campaign_id, combat, enemies, saved_at) VALUES (?, ?, ?, ?)",
+		campaign.ID, marshalJSON(engine.SerializeCombatOrder(snapshot.Combat)),
+		marshalJSON(snapshot.Enemies), nowISO(),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ClearCombatState удаляет снимок боя; идемпотентно.
 func (s *Store) ClearCombatState(campaignSlug string) error {
 	s.mu.Lock()

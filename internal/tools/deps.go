@@ -72,6 +72,9 @@ type Deps struct {
 	Images    ImageGenerator
 	Poster    ImagePoster
 	DayCloser DayCloser
+	// CombatLocks сериализует read-modify-write боевого снимка по кампании:
+	// ago исполняет вызовы одного ответа параллельно.
+	CombatLocks *KeyedMutex
 }
 
 func (d Deps) withDefaults() Deps {
@@ -81,12 +84,23 @@ func (d Deps) withDefaults() Deps {
 	if d.Dice == nil {
 		d.Dice = NewDiceHistory()
 	}
+	if d.CombatLocks == nil {
+		d.CombatLocks = NewKeyedMutex()
+	}
 	if d.Images == nil {
 		if config := RunwareFromEnv(os.Getenv); config != nil {
 			d.Images = NewRunwareClient(*config)
 		}
 	}
 	return d
+}
+
+// lockCampaign берёт замок кампании и возвращает unlock.
+func (d Deps) lockCampaign(campaignID string) func() {
+	if d.CombatLocks == nil {
+		return func() {}
+	}
+	return d.CombatLocks.Lock(campaignID)
 }
 
 func (d Deps) random() engine.RandomSource {
@@ -128,4 +142,29 @@ func (h *DiceHistory) Append(key string, roll int) {
 		values = values[len(values)-4:]
 	}
 	h.values[key] = values
+}
+
+// KeyedMutex — набор мьютексов по ключу (кампании). Записи не удаляются:
+// число кампаний мало, а гонка с удалением сложнее пользы.
+type KeyedMutex struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+// NewKeyedMutex создаёт пустой набор.
+func NewKeyedMutex() *KeyedMutex {
+	return &KeyedMutex{locks: map[string]*sync.Mutex{}}
+}
+
+// Lock блокирует ключ до вызова возвращённой функции.
+func (k *KeyedMutex) Lock(key string) func() {
+	k.mu.Lock()
+	lock, ok := k.locks[key]
+	if !ok {
+		lock = &sync.Mutex{}
+		k.locks[key] = lock
+	}
+	k.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }

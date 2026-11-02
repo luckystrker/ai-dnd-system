@@ -116,3 +116,44 @@ func TestCombatStateUnknownCampaign(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestApplyCombatSnapshotHPIsAtomic(t *testing.T) {
+	store := newTestStore(t)
+	campaign := newCampaign(t, store, "persist-campaign")
+	sheet, err := store.SaveCharacter(campaign.ID, "u-dm", NewCharacterInput{
+		Name: "Ария", CharacterClass: "плуг", Race: "эльф", MaxHP: ptr(10), HP: ptr(10),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := CombatSnapshot{
+		Combat: engine.CombatOrder{Started: true, Round: 1, Current: 0, Order: []engine.CombatantEntry{
+			{ID: sheet.ID, Name: "Ария", Side: engine.SideParty, HP: ptr(10), MaxHP: ptr(10)},
+		}},
+		Enemies: []SerializedEnemy{{ID: "g", Name: "Гоблин", HP: 10, AC: 10}},
+	}
+	snapshot.Combat.Order[0].HP = ptr(6)
+	if err := store.ApplyCombatSnapshotHP(campaign.Slug, "Ария", 6, snapshot); err != nil {
+		t.Fatalf("ApplyCombatSnapshotHP: %v", err)
+	}
+	sheets, _ := store.ListCharacters(campaign.ID)
+	if sheets[0].HP == nil || *sheets[0].HP != 6 {
+		t.Fatalf("sheet hp = %+v", sheets[0].HP)
+	}
+	loaded, err := store.LoadCombatState(campaign.Slug)
+	if err != nil || loaded == nil || loaded.Combat.Order[0].HP == nil || *loaded.Combat.Order[0].HP != 6 {
+		t.Fatalf("snapshot = %+v, %v", loaded, err)
+	}
+
+	// Если запись снимка падает, HP листа должен откатиться.
+	if _, err := store.db.Exec("DROP TABLE combat_snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyCombatSnapshotHP(campaign.Slug, "Ария", 2, snapshot); err == nil {
+		t.Fatal("ожидалась ошибка записи снимка")
+	}
+	sheets, _ = store.ListCharacters(campaign.ID)
+	if sheets[0].HP == nil || *sheets[0].HP != 6 {
+		t.Fatalf("HP листа не откатился: %+v", sheets[0].HP)
+	}
+}

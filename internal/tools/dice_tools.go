@@ -17,7 +17,7 @@ func diceTools(d Deps) ([]namedTool, error) {
 
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("roll_dice",
-			"Roll dice using standard notation (e.g. '4d20' '2d6+1d8+3' '1d20+5' 'd8'). Use for any uncertain game outcome: enemy attacks vs a player's AC, random tables, damage outside the combat tool, loot, etc. Advantage/disadvantage applies to d20 dice ONLY (each d20 is rolled twice, keeping the higher for advantage or the lower for disadvantage). Group modifiers: khN/klN keep the highest/lowest N, dhN/dlN drop the highest/lowest N, and '!' rolls exploding dice. Never use invented results.",
+			`Roll dice using standard notation (e.g. '4d20', '2d6+1d8+3', '1d20+5', 'd8'). Use for any uncertain game outcome: enemy attacks vs a player's AC, random tables, damage outside the combat tool, loot, etc. Advantage/disadvantage applies to d20 dice ONLY (each d20 is rolled twice, keeping the higher for advantage or the lower for disadvantage). Group modifiers: khN/klN keep the highest/lowest N (e.g. '4d6kh3' rolls 4d6 and keeps the 3 highest), dhN/dlN drop the highest/lowest N (e.g. '4d6dl1' drops the lowest, same as keep-highest-3 — use for ability score generation), and '!' rolls exploding dice (a die on its max face adds another, e.g. '8d6!'). Never use invented results.`,
 			func(args rollDiceArgs) (any, error) { return d.rollDice(args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -32,7 +32,7 @@ func diceTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("combat",
-			"Resolve turn-based combat tracked by the initiative tool. actions: attack — the CURRENT combatant of the party attacks an enemy by its id or name (d20 + ability modifier + proficiency vs enemy AC; natural 20 crits with double damage, natural 1 misses; damage dice come from the weapon in the character's inventory); only one attack per turn, the turn then advances; pass the id (from initiative) for an exact match — names are a tolerant fallback; damage — apply damage (or heal) to a party member's HP in the turn order by id or name and persist it to the character sheet; dodge — the current party combatant takes the Dodge action: incoming attacks against them have disadvantage until their next turn; the turn advances; next — advance to the next combatant without an attack; status — show the current order, HP and whose turn it is; end — end the combat and clear all enemies.",
+			`Resolve turn-based combat tracked by the initiative tool. actions: attack — the CURRENT combatant of the party attacks an enemy by its id or name (d20 + ability modifier + proficiency vs enemy AC; natural 20 crits with double damage, natural 1 misses; damage dice come from the weapon in the character's inventory); only one attack per turn, the turn then advances; pass the id (from initiative) for an exact match — names are a tolerant fallback; damage — apply damage (or heal) to a party member's HP in the turn order by id or name and persist it to the character sheet; dodge — the current party combatant takes the Dodge action: incoming attacks against them have disadvantage until their next turn (roll the enemy's attack with roll_dice advantage='disadvantage'); the turn advances; next — advance to the next combatant without an attack (after enemy turns, movement, Dash/Disengage, etc.); status — show the current order, HP and whose turn it is; end — end the combat and clear all enemies.`,
 			func(args combatArgs) (any, error) { return d.combat(args.Session, args) })
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
@@ -150,6 +150,8 @@ func (d Deps) initiative(sess *Session, args initiativeArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := d.lockCampaign(campaign.ID)
+	defer unlock()
 	if len(args.Combatants) == 0 {
 		return nil, errInvalid("Список участников пуст.",
 			"Pass every combatant including party characters and enemies with hp and ac.")
@@ -252,18 +254,29 @@ func (d Deps) combat(sess *Session, args combatArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := d.lockCampaign(campaign.ID)
+	defer unlock()
 	snapshot, err := d.DB.LoadCombatState(campaign.Slug)
 	if err != nil {
 		return nil, fromStoreError(err)
 	}
+	sheets, err := d.DB.ListCharacters(campaign.ID)
+	if err != nil {
+		return nil, fromStoreError(err)
+	}
+	statuses := partyStatuses(sheets)
 	if args.Action == "status" {
 		if snapshot == nil {
 			return combatNotStarted, nil
 		}
-		return combatStatusText(*snapshot), nil
+		return combatStatusText(*snapshot, statuses), nil
 	}
 	if snapshot == nil || !snapshot.Combat.Started || len(snapshot.Combat.Order) == 0 {
 		return nil, errConflict(combatNotStarted, "Call initiative with all participants first.")
+	}
+	if snapshot.Combat.Current < 0 || snapshot.Combat.Current >= len(snapshot.Combat.Order) {
+		return nil, errConflict("Снимок боя повреждён: текущий ход вне порядка инициативы.",
+			"Restart combat with initiative.")
 	}
 	switch args.Action {
 	case "end":
@@ -272,7 +285,7 @@ func (d Deps) combat(sess *Session, args combatArgs) (any, error) {
 		}
 		return "Бой окончен: порядок ходов и враги сброшены.", nil
 	case "next":
-		advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot))
+		advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot, statuses))
 		snapshot.Combat = advanced
 		if err := d.DB.SaveCombatState(campaign.Slug, *snapshot); err != nil {
 			return nil, fromStoreError(err)
@@ -287,26 +300,26 @@ func (d Deps) combat(sess *Session, args combatArgs) (any, error) {
 			return nil, errInvalid("Для action=damage нужны target и amount.",
 				"Pass target (party member) and amount.")
 		}
-		return d.combatDamage(campaign, snapshot, *args.Target, *args.Amount, args.Heal != nil && *args.Heal)
+		return d.combatDamage(campaign, snapshot, *args.Target, *args.Amount, args.Heal != nil && *args.Heal, statuses)
 	case "dodge":
 		if args.Attacker == nil {
 			return nil, errInvalid("Для action=dodge нужен attacker.",
 				"Pass the current party combatant as attacker.")
 		}
-		return d.combatDodge(campaign, snapshot, *args.Attacker, sess)
+		return d.combatDodge(campaign, snapshot, *args.Attacker, sess, statuses)
 	case "attack":
 		if args.Attacker == nil || args.Enemy == nil {
 			return nil, errInvalid("Для action=attack нужны attacker и enemy.",
 				"Pass the current party combatant and the enemy id.")
 		}
-		return d.combatAttack(campaign, snapshot, args, sess)
+		return d.combatAttack(campaign, snapshot, args, sess, statuses)
 	default:
 		return nil, errInvalid("Неизвестное действие combat «"+args.Action+"».",
 			"Use attack, damage, dodge, next, status or end.")
 	}
 }
 
-func (d Deps) combatAttack(campaign *store.Campaign, snapshot *store.CombatSnapshot, args combatArgs, sess *Session) (any, error) {
+func (d Deps) combatAttack(campaign *store.Campaign, snapshot *store.CombatSnapshot, args combatArgs, sess *Session, statuses map[string]partyHP) (any, error) {
 	attackerRef := *args.Attacker
 	sheet, err := d.characterByName(campaign.ID, attackerRef)
 	if err != nil {
@@ -320,6 +333,10 @@ func (d Deps) combatAttack(campaign *store.Campaign, snapshot *store.CombatSnaps
 		return nil, err
 	}
 	currentEntry := snapshot.Combat.Order[snapshot.Combat.Current]
+	if snapshot.Combat.Acted {
+		return nil, errConflict("Участник уже атаковал в этом ходу. Заверши ход через combat action=next.",
+			"Call combat action=next before another attack.")
+	}
 	if !matchesEntry(currentEntry, attackerRef) {
 		return nil, errConflict(fmt.Sprintf("Сейчас ход %s — атаковать может только участник, чей ход наступил.", currentEntry.Name),
 			"Wait for the attacker's turn or use combat action=next.")
@@ -452,7 +469,7 @@ func (d Deps) combatAttack(campaign *store.Campaign, snapshot *store.CombatSnaps
 		return resultLine + "\nВсе враги повержены. Бой окончен.", nil
 	}
 	snapshot.Enemies = enemies
-	advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot))
+	advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot, statuses))
 	snapshot.Combat = advanced
 	if err := d.DB.SaveCombatState(campaign.Slug, *snapshot); err != nil {
 		return nil, fromStoreError(err)
@@ -464,7 +481,7 @@ func (d Deps) combatAttack(campaign *store.Campaign, snapshot *store.CombatSnaps
 	return resultLine, nil
 }
 
-func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnapshot, ref string, amount int, heal bool) (any, error) {
+func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnapshot, ref string, amount int, heal bool, statuses map[string]partyHP) (any, error) {
 	index := -1
 	for i, entry := range snapshot.Combat.Order {
 		if entry.Side == engine.SideParty && matchesEntry(entry, ref) {
@@ -481,13 +498,14 @@ func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnaps
 	if err != nil {
 		return nil, err
 	}
-	currentHP := entry.HP
-	if currentHP == nil && sheet != nil {
-		currentHP = sheet.HP
+	if sheet == nil {
+		return nil, errNotFound("Персонаж «"+entry.Name+"» не найден в кампании.",
+			"Restart initiative so the sheet is loaded.")
 	}
+	currentHP := sheet.HP
 	if currentHP == nil {
-		return nil, errConflict("У «"+entry.Name+"» нет HP в порядке ходов.",
-			"Restart initiative so the sheet HP is loaded.")
+		return nil, errConflict("У «"+entry.Name+"» нет HP в листе персонажа.",
+			"Set HP with update_character or restart initiative after fixing the sheet.")
 	}
 	nextHP := *currentHP
 	if heal {
@@ -499,12 +517,7 @@ func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnaps
 		}
 	}
 	snapshot.Combat.Order[index].HP = &nextHP
-	if sheet != nil {
-		if _, err := d.DB.UpdateCharacter(campaign.ID, sheet.Name, store.CharacterStatePatch{HP: &nextHP}); err != nil {
-			return nil, fromStoreError(err)
-		}
-	}
-	if err := d.DB.SaveCombatState(campaign.Slug, *snapshot); err != nil {
+	if err := d.DB.ApplyCombatSnapshotHP(campaign.ID, sheet.Name, nextHP, *snapshot); err != nil {
 		return nil, fromStoreError(err)
 	}
 	label := "урон"
@@ -512,8 +525,8 @@ func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnaps
 		label = "лечение"
 	}
 	maxHP := "?"
-	if entry.MaxHP != nil {
-		maxHP = strconv.Itoa(*entry.MaxHP)
+	if state, ok := statuses[strings.ToLower(entry.Name)]; ok && state.MaxHP != nil {
+		maxHP = strconv.Itoa(*state.MaxHP)
 	}
 	fall := ""
 	if nextHP == 0 && !heal {
@@ -522,7 +535,7 @@ func (d Deps) combatDamage(campaign *store.Campaign, snapshot *store.CombatSnaps
 	return fmt.Sprintf("%s: %s %d HP → %d/%s.%s", entry.Name, label, amount, nextHP, maxHP, fall), nil
 }
 
-func (d Deps) combatDodge(campaign *store.Campaign, snapshot *store.CombatSnapshot, attackerRef string, sess *Session) (any, error) {
+func (d Deps) combatDodge(campaign *store.Campaign, snapshot *store.CombatSnapshot, attackerRef string, sess *Session, statuses map[string]partyHP) (any, error) {
 	current := snapshot.Combat.Order[snapshot.Combat.Current]
 	if current.Side != engine.SideParty {
 		return nil, errConflict("Уклоняться может только персонаж партии. Сейчас ход "+current.Name+".",
@@ -536,7 +549,7 @@ func (d Deps) combatDodge(campaign *store.Campaign, snapshot *store.CombatSnapsh
 		return nil, err
 	}
 	snapshot.Combat.Order[snapshot.Combat.Current].Dodging = true
-	advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot))
+	advanced := engine.NextCombatant(snapshot.Combat, combatAlive(*snapshot, statuses))
 	snapshot.Combat = advanced
 	if err := d.DB.SaveCombatState(campaign.Slug, *snapshot); err != nil {
 		return nil, fromStoreError(err)
@@ -549,7 +562,31 @@ func (d Deps) combatDodge(campaign *store.Campaign, snapshot *store.CombatSnapsh
 	return base + "\n" + turn, nil
 }
 
-func combatAlive(snapshot store.CombatSnapshot) func(engine.CombatantEntry) bool {
+// partyHP — HP/MaxHP партии из листов SQLite (единственный источник истины).
+type partyHP struct {
+	HP    *int
+	MaxHP *int
+}
+
+func partyStatuses(sheets []store.CharacterSheet) map[string]partyHP {
+	statuses := make(map[string]partyHP, len(sheets)*2)
+	for _, sheet := range sheets {
+		state := partyHP{HP: sheet.HP, MaxHP: sheet.MaxHP}
+		statuses[sheet.ID] = state
+		statuses[strings.ToLower(sheet.Name)] = state
+	}
+	return statuses
+}
+
+func statusFor(entry engine.CombatantEntry, statuses map[string]partyHP) (partyHP, bool) {
+	if state, ok := statuses[entry.ID]; ok {
+		return state, true
+	}
+	state, ok := statuses[strings.ToLower(entry.Name)]
+	return state, ok
+}
+
+func combatAlive(snapshot store.CombatSnapshot, statuses map[string]partyHP) func(engine.CombatantEntry) bool {
 	return func(entry engine.CombatantEntry) bool {
 		if entry.Side == engine.SideEnemy {
 			for _, enemy := range snapshot.Enemies {
@@ -559,11 +596,14 @@ func combatAlive(snapshot store.CombatSnapshot) func(engine.CombatantEntry) bool
 			}
 			return false
 		}
+		if state, ok := statusFor(entry, statuses); ok && state.HP != nil {
+			return *state.HP > 0
+		}
 		return entry.HP == nil || *entry.HP > 0
 	}
 }
 
-func combatStatusText(snapshot store.CombatSnapshot) string {
+func combatStatusText(snapshot store.CombatSnapshot, statuses map[string]partyHP) string {
 	combat := snapshot.Combat
 	if !combat.Started || len(combat.Order) == 0 {
 		return combatNotStarted
@@ -582,7 +622,7 @@ func combatStatusText(snapshot store.CombatSnapshot) string {
 		if entry.Dodging {
 			dodge = " [уклоняется]"
 		}
-		lines = append(lines, fmt.Sprintf("%s%d. %s [%s] (%d)%s%s", marker, index+1, entry.Name, entry.ID, entry.Total, hpNote(entry, snapshot), dodge))
+		lines = append(lines, fmt.Sprintf("%s%d. %s [%s] (%d)%s%s", marker, index+1, entry.Name, entry.ID, entry.Total, hpNote(entry, snapshot, statuses), dodge))
 	}
 	parts := append([]string{"Порядок ходов:"}, lines...)
 	if turn := currentTurnText(combat); turn != "" {
@@ -603,7 +643,7 @@ func currentTurnText(combat engine.CombatOrder) string {
 	return fmt.Sprintf("Раунд %d. Ход: %s (%d)%s.", combat.Round, entry.Name, entry.Total, dodge)
 }
 
-func hpNote(entry engine.CombatantEntry, snapshot store.CombatSnapshot) string {
+func hpNote(entry engine.CombatantEntry, snapshot store.CombatSnapshot, statuses map[string]partyHP) string {
 	if entry.Side == engine.SideEnemy {
 		for _, enemy := range snapshot.Enemies {
 			if enemy.ID == entry.ID {
@@ -612,12 +652,12 @@ func hpNote(entry engine.CombatantEntry, snapshot store.CombatSnapshot) string {
 		}
 		return ""
 	}
-	if entry.HP != nil {
+	if state, ok := statusFor(entry, statuses); ok && state.HP != nil {
 		maxHP := "?"
-		if entry.MaxHP != nil {
-			maxHP = strconv.Itoa(*entry.MaxHP)
+		if state.MaxHP != nil {
+			maxHP = strconv.Itoa(*state.MaxHP)
 		}
-		return fmt.Sprintf(", HP %d/%s", *entry.HP, maxHP)
+		return fmt.Sprintf(", HP %d/%s", *state.HP, maxHP)
 	}
 	return ""
 }
@@ -716,7 +756,7 @@ type levelUpArgs struct {
 }
 
 func (d Deps) levelUp(sess *Session, args levelUpArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}

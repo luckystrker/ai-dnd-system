@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"log"
 
 	agotools "github.com/luckystrker/ago/tools"
 )
@@ -45,6 +46,7 @@ func (d Deps) illustrateScene(sess *Session, args illustrateArgs) (any, error) {
 	})
 	imageURL, err := d.Images.Generate(context.Background(), prompt)
 	if err != nil {
+		log.Printf("tools: illustrate_scene: generation failed for campaign %s: %v", campaign.ID, err)
 		return nil, errUnavailable("Не получилось сгенерировать картинку. Продолжи сцену текстом.",
 			"Continue the scene in text; retry illustration only for a new significant scene.")
 	}
@@ -54,6 +56,7 @@ func (d Deps) illustrateScene(sess *Session, args illustrateArgs) (any, error) {
 	}
 	caption := truncateRunes(args.SceneDescription, telegramCaptionMaxLength)
 	if err := d.Poster.PostImage(context.Background(), campaign.BoundChat.ChatID, campaign.BoundChat.MessageThreadID, imageURL, caption); err != nil {
+		log.Printf("tools: illustrate_scene: post failed for campaign %s: %v", campaign.ID, err)
 		return nil, errUnavailable("Картинка сгенерирована но отправить её в чат не вышло. Продолжи текстом.",
 			"Continue the scene in text; the image URL is available in the result.")
 	}

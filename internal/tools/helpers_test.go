@@ -30,6 +30,7 @@ func d20Face(face int) float64 { return (float64(face) - 0.5) / 20 }
 type testEnv struct {
 	deps     Deps
 	store    *store.Store
+	path     string
 	campaign *store.Campaign
 	dm       *Session
 	player   *Session
@@ -39,7 +40,8 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "campaigns.db"))
+	path := filepath.Join(t.TempDir(), "campaigns.db")
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -68,8 +70,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	return &testEnv{
-		deps:     Deps{DB: db, Dice: NewDiceHistory()},
+		deps:     Deps{DB: db, Dice: NewDiceHistory(), CombatLocks: NewKeyedMutex()},
 		store:    db,
+		path:     path,
 		campaign: campaign,
 		dm: &Session{CampaignID: campaign.ID, CampaignSlug: campaign.Slug, UserID: "u-dm",
 			ChatID: "chat-1", MessageThreadID: ptr(7)},

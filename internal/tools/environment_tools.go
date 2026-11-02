@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log"
 
 	agotools "github.com/luckystrker/ago/tools"
 
@@ -24,7 +25,7 @@ func environmentTools(d Deps) ([]namedTool, error) {
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("set_weather",
-			"Set the current weather/environment of the campaign (e.g. «ясно» «туман» «шторм» «сильный ветер»). Weather has mechanical effects: fog/reduced visibility gives disadvantage on sight-based checks (Perception/Investigation/Survival); strong wind/storm gives disadvantage on ranged attacks.",
+			`Set the current weather/environment of the campaign (e.g. «ясно», «туман», «шторм», «сильный ветер»). Weather has mechanical effects: fog/reduced visibility gives disadvantage on sight-based checks (Perception/Investigation/Survival); strong wind/storm gives disadvantage on ranged attacks.`,
 			func(args setWeatherArgs) (any, error) { return d.setWeather(args.Session, args) })
 	})
 
@@ -45,15 +46,13 @@ type advanceDayArgs struct {
 }
 
 func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
-	previous := 1
-	if campaign.CurrentDay != nil {
-		previous = *campaign.CurrentDay
-	}
-	updated, err := d.DB.AdvanceDayForMember(campaign.ID)
+	// previous читается внутри блокировки store: два одновременных вызова не
+	// закроют один и тот же день дважды.
+	updated, previous, err := d.DB.AdvanceDayForMember(campaign.ID)
 	if err != nil {
 		return nil, fromStoreError(err)
 	}
@@ -65,19 +64,27 @@ func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
 		return nil, fromStoreError(err)
 	}
 	closed := false
+	closeFailed := false
 	if d.DayCloser != nil {
 		if err := d.DayCloser.CloseDay(context.Background(), updated, previous); err != nil {
-			return nil, errUnavailable("Не удалось закрыть день "+fmt.Sprint(previous)+" летописцем.",
-				"Day is advanced but the chronicler failed; retry closing the day or continue and retry later.")
+			// День уже сдвинут: не просим модель повторить advance_day (это
+			// сдвинуло бы день ещё раз). Закрытие повторит код/очередь слайса 5.
+			log.Printf("tools: advance_day: DayCloser failed for campaign %s day %d: %v", updated.ID, previous, err)
+			closeFailed = true
+		} else {
+			closed = true
 		}
-		closed = true
 	}
 	result := map[string]any{
 		"ok": true, "campaignSlug": updated.Slug, "previousDay": previous, "day": day,
+		"closed": closed,
 	}
-	if closed {
+	switch {
+	case closed:
 		result["note"] = fmt.Sprintf("Наступил игровой день %d. День %d закрыт летописцем.", day, previous)
-	} else {
+	case closeFailed:
+		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрыть день %d сразу не удалось; день уже сдвинут, повторный вызов advance_day не нужен — закрытие повторит код.", day, previous)
+	default:
 		result["note"] = fmt.Sprintf("Наступил игровой день %d. Теперь вызови субагента chronicler, чтобы закрыть день %d: передай ему slug кампании номер закрытого дня и попроси записать саммари дня ключевые события и изменения NPC и персонажей.", day, previous)
 	}
 	return result, nil
@@ -92,7 +99,7 @@ type advanceTimeArgs struct {
 var dayOrder = []store.TimeOfDay{store.TimeMorning, store.TimeDay, store.TimeEvening, store.TimeNight}
 
 func (d Deps) advanceTime(sess *Session, args advanceTimeArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +158,7 @@ type setWeatherArgs struct {
 }
 
 func (d Deps) setWeather(sess *Session, args setWeatherArgs) (any, error) {
-	campaign, err := d.campaignForWrite(sess)
+	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
 	}

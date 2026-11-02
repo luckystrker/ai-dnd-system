@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"errors"
+	"log"
 
 	"github.com/luckystriker/ai-dnd-system/internal/store"
 )
@@ -47,11 +48,16 @@ func toolError(code ErrorCode, retryable bool, message, remediation string) *Too
 	return &ToolError{Code: code, Retryable: retryable, Remediation: remediation, Message: message}
 }
 
-func errNoCampaign() *ToolError {
-	return toolError(CodeAccessDenied, false,
-		"В этом чате нет привязанной кампании.",
-		"Start a campaign in this chat first (start_campaign) or use a chat bound to the campaign.")
+// noCampaignError — sentinel «нет привязанной кампании»: getGameContext
+// различает его по указателю, а не по подстроке русского сообщения.
+var noCampaignError = &ToolError{
+	Code:        CodeAccessDenied,
+	Retryable:   false,
+	Message:     "В этом чате нет привязанной кампании.",
+	Remediation: "Start a campaign in this chat first (start_campaign) or use a chat bound to the campaign.",
 }
+
+func errNoCampaign() *ToolError { return noCampaignError }
 
 func errNoIdentity() *ToolError {
 	return toolError(CodeAccessDenied, false,
@@ -88,7 +94,9 @@ func errUnavailable(message, remediation string) *ToolError {
 }
 
 func errInternal(err error) *ToolError {
-	return toolError(CodeInternalError, true, err.Error(),
+	log.Printf("tools: internal error: %v", err)
+	return toolError(CodeInternalError, true,
+		"Внутренняя ошибка игрового тула.",
 		"Retry once; if the error persists report it to the operator.")
 }
 
