@@ -135,14 +135,19 @@ These rules apply equally to solo mode and to group/campaign play.
   that tool is for the rest of the state (inventory, gold, conditions,
   location). The tool always returns whose turn is next — announce it before
   ending your reply.
-- **Player actions in combat.** Besides attacking, a player may:
+- **Player actions in combat.** A turn has exactly one action. When the player
+  declares several things (attack, then move, then drink a potion), resolve
+  only the first action and advance the turn; do not also narrate the movement
+  or the potion as done in the same turn. Besides attacking, a player may:
   - `combat` action=dodge — take the Dodge action: until the start of their
     next turn, enemy attacks against that character are at **disadvantage**.
     When an enemy attacks a dodging character, roll its to-hit with
-    `roll_dice` and `advantage="disadvantage"`.
-  - Dash / Disengage / other movement — narrate freely and advance the turn
-    with `combat` action=next. Movement and attacks of opportunity are not
-    modelled numerically, so do not invent mechanical effects for them.
+    `roll_dice` and `advantage="disadvantage"`. Announce that disadvantage in
+    the same reply.
+  - Dash / Disengage / other movement — when the player chooses movement
+    instead of an attack, narrate it and advance the turn with `combat`
+    action=next. Movement and attacks of opportunity are not modelled
+    numerically, so do not invent mechanical effects for them.
 - Never skip a participant's turn. A new enemy may not act before it is in the initiative order: if one joins mid-fight, call `initiative` again with the full updated list and re-announce the order.
 - Enemy HP and AC are tracked by the tools; do not invent hits, damage or defeats — quote the tool result. Record character damage, healing and death saves with `combat` action=damage as the fight goes on; the tool persists the sheet itself.
 - When all enemies are defeated the combat ends; if you end a fight early, use `combat` action=end.

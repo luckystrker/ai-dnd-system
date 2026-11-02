@@ -1,6 +1,7 @@
 package dm
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"sync"
@@ -10,23 +11,25 @@ import (
 	"github.com/luckystrker/ago/middleware"
 )
 
-// rollQuoteMW гарантирует публичность бросков: если модель вызвала
-// skill_check или roll_dice, но не назвала в ответе d20/итог/DC, точный
-// результат тула дописывается в конец ответа. Промпт требует цитировать
-// каждый бросок, но на длинных ходах модель это пропускает; правило важнее
-// стиля, а числа уже есть в результате тула.
+// rollQuoteMW гарантирует публичность бросков и боевых эффектов: если модель
+// вызвала skill_check или roll_dice, но не назвала в ответе d20/итог/DC, или
+// взяла Dodge и не объявила помеху, точный результат тула дописывается в
+// конец ответа. Промпт требует это делать, но на длинных ходах модель
+// пропускает; правило важнее стиля, а текст уже есть в результате тула.
 //
-// Тулы initiative и combat не трогаем: их результат — многострочный порядок
-// ходов, и модель пересказывает его сама; для них достаточно промпта.
+// Остальные результаты combat и initiative не трогаем: это многострочный
+// порядок ходов, и модель пересказывает его сама.
 type rollQuoteMW struct {
 	middleware.Base
 	mu      sync.Mutex
 	results []string
+	dodges  []string
 }
 
 func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
 	m.mu.Lock()
 	m.results = nil
+	m.dodges = nil
 	m.mu.Unlock()
 
 	response, err := next(ev, cx)
@@ -35,15 +38,21 @@ func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, 
 	}
 	m.mu.Lock()
 	results := append([]string(nil), m.results...)
+	dodges := append([]string(nil), m.dodges...)
 	m.mu.Unlock()
-	if len(results) == 0 || response.Message == nil || len(response.ToolCalls.Calls) > 0 {
+	if (len(results) == 0 && len(dodges) == 0) || response.Message == nil || len(response.ToolCalls.Calls) > 0 {
 		return response, nil
 	}
 
 	body := response.Message.Content
-	missing := make([]string, 0, len(results))
+	missing := make([]string, 0, len(results)+len(dodges))
 	for _, result := range results {
 		if !rollResultQuoted(body, result) {
+			missing = append(missing, result)
+		}
+	}
+	for _, result := range dodges {
+		if !dodgeQuoted(body) {
 			missing = append(missing, result)
 		}
 	}
@@ -62,18 +71,43 @@ func (m *rollQuoteMW) OnToolExecution(next middleware.ToolExecFunc, ev *events.T
 	if err != nil {
 		return result, err
 	}
-	if ev.Name != "skill_check" && ev.Name != "roll_dice" {
+	if ev.Name != "skill_check" && ev.Name != "roll_dice" && ev.Name != "combat" {
 		return result, nil
 	}
 	if _, failed := events.AsValue(result).(events.ToolErrorEvent); failed {
 		return result, nil
 	}
-	if text := toolResultText(result); text != "" {
-		m.mu.Lock()
-		m.results = append(m.results, text)
-		m.mu.Unlock()
+	text := toolResultText(result)
+	if text == "" {
+		return result, nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ev.Name == "combat" {
+		if isDodgeCall(ev.Arguments) {
+			m.dodges = append(m.dodges, text)
+		}
+		return result, nil
+	}
+	m.results = append(m.results, text)
 	return result, nil
+}
+
+func isDodgeCall(arguments string) bool {
+	var args struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return false
+	}
+	return args.Action == "dodge"
+}
+
+// dodgeQuoted — ответ назвал помеху от Уклонения. Достаточно слова
+// «помеха»/«disadvantage»: цифр у Dodge нет.
+func dodgeQuoted(answer string) bool {
+	answer = strings.ToLower(strings.NewReplacer("*", "", "`", "").Replace(answer))
+	return strings.Contains(answer, "помех") || strings.Contains(answer, "disadvantage")
 }
 
 var (

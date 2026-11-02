@@ -12,8 +12,13 @@ import (
 // затем модель пишет ответ. Возвращает итоговый текст игроку.
 func runRollQuote(t *testing.T, toolName, result, answer string) string {
 	t.Helper()
+	return runToolQuote(t, toolName, "{}", result, answer)
+}
+
+func runToolQuote(t *testing.T, toolName, arguments, result, answer string) string {
+	t.Helper()
 	mw := &rollQuoteMW{}
-	call := events.ToolCallEvent{ID: "call-1", Name: toolName}
+	call := events.ToolCallEvent{ID: "call-1", Name: toolName, Arguments: arguments}
 	execNext := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
 		return events.FromResultCall(call, events.NewToolResult(false, result)), nil
 	}
@@ -68,6 +73,30 @@ func TestRollQuoteAppendsDiceTotal(t *testing.T) {
 	reply := runRollQuote(t, "roll_dice", result, "Ты находишь двенадцать монет.")
 	if !strings.Contains(reply, "Итого: 12") {
 		t.Fatalf("в ответе нет итога броска:\n%s", reply)
+	}
+}
+
+// Уклонение без слова «помеха» в ответе дописывает результат combat: правило
+// Dodge требует объявить помеху игрокам.
+func TestDodgeQuoteAppendsMissingDisadvantage(t *testing.T) {
+	t.Parallel()
+
+	result := "Дэн уклоняется (Dodge): до его следующего хода атаки по нему идут с помехой. Следующий ход: Лиса (lisa)."
+	reply := runToolQuote(t, "combat", `{"action":"dodge","attacker":"Дэн"}`, result, "Дэн пригибается и ждёт.")
+	if !strings.Contains(strings.ToLower(reply), "помех") {
+		t.Fatalf("в ответе нет помехи:\n%s", reply)
+	}
+}
+
+// Если помеха уже названа, результат не дублируется.
+func TestDodgeQuoteKeepsStatedDisadvantage(t *testing.T) {
+	t.Parallel()
+
+	result := "Дэн уклоняется (Dodge): до его следующего хода атаки по нему идут с помехой. Следующий ход: Лиса (lisa)."
+	answer := "Дэн уклоняется — атаки по нему до его следующего хода идут с помехой. Ход Лисы."
+	reply := runToolQuote(t, "combat", `{"action":"dodge","attacker":"Дэн"}`, result, answer)
+	if reply != answer {
+		t.Fatalf("ответ изменился при названной помехе:\nбыло: %s\nстало: %s", answer, reply)
 	}
 }
 
