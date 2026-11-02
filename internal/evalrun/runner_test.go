@@ -60,6 +60,9 @@ func TestRunnerRealToolkitWritesMemoryOnPlayerTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	if report.FinishedAt.Before(report.StartedAt) {
+		t.Fatalf("FinishedAt %v раньше StartedAt %v", report.FinishedAt, report.StartedAt)
+	}
 	if !report.Cases[0].PassPowK {
 		t.Fatalf("кейс должен пройти на настоящих тулах, провал: %+v", report.Cases[0].Runs)
 	}

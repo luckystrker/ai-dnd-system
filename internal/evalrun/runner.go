@@ -106,6 +106,7 @@ type RunOptions struct {
 
 // Run исполняет набор.
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*evalgame.Report, error) {
+	started := time.Now()
 	slice := opts.Slice
 	if slice == 0 {
 		slice = evalgame.DefaultSlice
@@ -143,7 +144,9 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*evalgame.Report, er
 	}
 	wg.Wait()
 
-	return evalgame.BuildReport(plans, results, slice, r.cfg.Repeats, r.suite.MetaFor), nil
+	report := evalgame.BuildReport(plans, results, slice, r.cfg.Repeats, r.suite.MetaFor)
+	report.StartedAt = started
+	return report, nil
 }
 
 // runRepeat — один независимый прогон: временная БД, фикстура, DM, ход,
