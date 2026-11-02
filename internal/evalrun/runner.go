@@ -250,6 +250,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 		report.Err = trace.Err
 	}
 	report.Tokens = tokenTotal(trace)
+	report.ToolCalls = trace.ToolCalls
 
 	for _, scorer := range plan.Case.Scorers {
 		report.Scores = append(report.Scores, eval.ScoreWith(ctx, scorer, trace))
@@ -446,13 +447,15 @@ func buildFixture(st *store.Store, caseName string, meta evalgame.CaseMeta) (fix
 		UserID: speaker.ID, Username: speaker.Username, Name: speaker.Name,
 		ChatID: EvalChatID, ChatType: "supergroup",
 	}
-	if err := seedCombat(st, campaign.Slug); err != nil {
-		return fixture{}, err
-	}
-	// Бой виден модели только через транскрипт: в настоящей сессии инициатива
-	// и начало боя уже записаны прошлыми ходами, и DM знает, что бой идёт.
-	if err := seedCombatTranscript(st, campaign.Slug); err != nil {
-		return fixture{}, err
+	if needsCombat(meta.Category, caseName) {
+		if err := seedCombat(st, campaign.Slug, combatCurrent(caseName)); err != nil {
+			return fixture{}, err
+		}
+		// Бой виден модели только через транскрипт: в настоящей сессии
+		// инициатива и начало боя уже записаны прошлыми ходами.
+		if err := seedCombatTranscript(st, campaign.Slug); err != nil {
+			return fixture{}, err
+		}
 	}
 	return fixture{campaignID: campaign.ID, session: session}, nil
 }
@@ -470,6 +473,31 @@ func fixtureSpeaker(meta evalgame.CaseMeta) fixtureUser {
 	default:
 		return fixtureDen
 	}
+}
+
+// needsCombat — нужен ли кейсу уже идущий бой. Глобальный бой нельзя
+// ставить всем: он попадает в блок памяти, и модель начинает каждую сцену с
+// гоблинами (таверна, проверки, закрытие дня — всё превращается в бой).
+// Бой нужен только кейсам, чей вход продолжает уже начавшийся бой.
+func needsCombat(category, caseName string) bool {
+	switch caseName {
+	case "combat-02-target-by-id", "combat-03-one-action-per-turn",
+		"combat-04-dodge-disadvantage", "combat-05-damage-and-persist",
+		"combat-06-end-of-fight", "memory-01-damage-on-player-turn",
+		"rolls-02-enemy-attack-notation", "rolls-03-damage-attack-combat":
+		return true
+	}
+	return category == "combat" && caseName != "combat-01-initiative-all-participants"
+}
+
+// combatCurrent — чей ход в фикстуре. rolls-02 проверяет атаку врага, и
+// вход прямо говорит «начинается его ход»; если в снимке ход Дэна, модель
+// справедливо откладывает атаку гоблина. Остальным кейсам нужен ход игрока.
+func combatCurrent(caseName string) int {
+	if caseName == "rolls-02-enemy-attack-notation" {
+		return 2 // гоблин-1
+	}
+	return 0
 }
 
 // seedCombatTranscript пишет в день 1 начало боя так, как его записал бы
@@ -492,11 +520,11 @@ func seedCombatTranscript(st *store.Store, campaignSlug string) error {
 // снова ранили») идут на ходу обычного игрока внутри боя, и combat damage
 // должен найти настоящий снимок, а не отвечать «бой не начат». Блок памяти
 // бой не показывает, поэтому на сцены вне боя это не влияет.
-func seedCombat(st *store.Store, campaignSlug string) error {
+func seedCombat(st *store.Store, campaignSlug string, current int) error {
 	hp, maxHP := 12, 12
 	goblinHP, goblinAC := 7, 13
 	combat := engine.CombatOrder{
-		Started: true, Round: 1, Current: 0,
+		Started: true, Round: 1, Current: current,
 		Order: []engine.CombatantEntry{
 			{ID: "dan", Name: "Дэн", Side: engine.SideParty, Bonus: 2, Roll: 15, Total: 17, HP: &hp, MaxHP: &maxHP},
 			{ID: "lisa", Name: "Лиса", Side: engine.SideParty, Bonus: 2, Roll: 13, Total: 15, HP: &hp, MaxHP: &maxHP},

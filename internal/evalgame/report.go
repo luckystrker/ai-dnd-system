@@ -25,11 +25,14 @@ type PostconditionResult struct {
 
 // RepeatReport — один прогон кейса.
 type RepeatReport struct {
-	Variant        string                `json:"variant,omitempty"`
-	Passed         bool                  `json:"passed"`
-	Output         string                `json:"output,omitempty"`
-	Err            string                `json:"err,omitempty"`
-	Scores         []eval.Score          `json:"scores"`
+	Variant string       `json:"variant,omitempty"`
+	Passed  bool         `json:"passed"`
+	Output  string       `json:"output,omitempty"`
+	Err     string       `json:"err,omitempty"`
+	Scores  []eval.Score `json:"scores"`
+	// ToolCalls — трасса тулов без событий: по ней видно, что модель звала и
+	// что тул ответил, когда скорер упал.
+	ToolCalls      []eval.ToolCall       `json:"tool_calls,omitempty"`
 	Postconditions []PostconditionResult `json:"postconditions,omitempty"`
 	DurationMS     int64                 `json:"duration_ms"`
 	Tokens         int64                 `json:"tokens"`

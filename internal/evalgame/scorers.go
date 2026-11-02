@@ -454,7 +454,7 @@ func (s QuotesRoll) Score(_ context.Context, t *eval.Trace) (eval.Score, error) 
 		}
 		checked++
 		if expects := rollAnchors(call.Name, call.Result); len(expects) > 0 {
-			callMissing, callWrong := checkAnchors(t.FinalResponse, expects)
+			callMissing, callWrong := checkAnchors(answerWithoutMarkdown(t.FinalResponse), expects)
 			for _, value := range callMissing {
 				missing = append(missing, call.Name+": "+value)
 			}
@@ -466,7 +466,7 @@ func (s QuotesRoll) Score(_ context.Context, t *eval.Trace) (eval.Score, error) 
 		// Для тулов без якорей (инициатива) достаточно, чтобы суммы
 		// участников были произнесены.
 		for _, number := range rollNumbers(call.Name, call.Result) {
-			if !mentionsNumber(t.FinalResponse, number) {
+			if !mentionsNumber(answerWithoutMarkdown(t.FinalResponse), number) {
 				missing = append(missing, fmt.Sprintf("%s: %s", call.Name, number))
 			}
 		}
@@ -519,7 +519,7 @@ var (
 	reAnswerEquation  = regexp.MustCompile(`=\s*(\d+)`)
 	reAnswerBonus     = regexp.MustCompile(`(?i)бонус[а-яё]*\s*(\d+)`)
 	reAnswerVsDC      = regexp.MustCompile(`(\d+)\s+против\s+(?:dc|кд)`)
-	reAnswerDC        = regexp.MustCompile(`(?i)(?:dc|кд|сложност[а-яё]*)\s*[=:]?\s*(\d+)`)
+	reAnswerDC        = regexp.MustCompile(`(?i)(?:dc|кд|сл|сложност[а-яё]*)\s*[=:]?\s*(\d+)`)
 	reAnswerRolled    = regexp.MustCompile(`(?i)(?:итог[а-яё]*|всего|сумма|total|выпало)\D{0,15}(\d+)`)
 )
 
@@ -636,6 +636,13 @@ func rollNumbers(tool, result string) []string {
 		}
 	}
 	return dedupe(out)
+}
+
+// answerWithoutMarkdown убирает markdown-выделение из чисел: живая модель
+// пишет «d20 = **20**», и без нормализации число не находится, хотя оно
+// процитировано (ложный провал quotes_roll).
+func answerWithoutMarkdown(answer string) string {
+	return strings.NewReplacer("*", "", "`", "").Replace(answer)
 }
 
 func mentionsNumber(answer, number string) bool {
