@@ -62,6 +62,7 @@ func run(ctx context.Context, args []string) error {
 	calibrate := fs.Bool("judge-calibration", true, "калибровать судью на вручную написанных ответах")
 	calibrationPath := fs.String("calibration", "eval/judge/calibration.jsonl", "фикстуры калибровки судьи")
 	checkOnly := fs.Bool("check-only", false, "только загрузить и проверить набор, без модели")
+	fromReport := fs.String("from", "", "оценить готовый JSON-отчёт (гейт/регрессии) без прогона")
 	telegramCalibration := fs.Bool("telegram", false, "только офлайн-калибровка гейта и склейки Telegram")
 	timeout := fs.Duration("timeout", evalrun.DefaultTurnTimeout, "дедлайн одного хода")
 	if err := fs.Parse(args); err != nil {
@@ -70,6 +71,21 @@ func run(ctx context.Context, args []string) error {
 
 	if *telegramCalibration {
 		fmt.Fprint(os.Stdout, telegramcal.Run(telegramcal.Scenarios(), telegramcal.DefaultConfig()).Summary())
+		return nil
+	}
+	if *fromReport != "" {
+		report, err := evalgame.LoadReport(*fromReport)
+		if err != nil {
+			return err
+		}
+		printReport(report, 0)
+		failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText)
+		if err != nil {
+			return err
+		}
+		if failed {
+			return fmt.Errorf("отчёт не прошёл гейт")
+		}
 		return nil
 	}
 
@@ -150,7 +166,6 @@ func run(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "\nотчёт: %s\n", *out)
 
-	failed := false
 	if *calibrate && judgeClient != nil {
 		items, err := evalgame.LoadCalibration(*calibrationPath)
 		if err != nil {
@@ -161,14 +176,26 @@ func run(ctx context.Context, args []string) error {
 		})
 		printCalibration(calibration)
 		if !calibration.Passed {
-			failed = true
-			fmt.Fprintln(os.Stderr, "калибровка судьи не прошла: good должен проходить, bad — проваливаться")
+			return fmt.Errorf("калибровка судьи не прошла: good должен проходить, bad — проваливаться")
 		}
 	}
-	if *baseline != "" {
-		previous, err := evalgame.LoadReport(*baseline)
+	failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText)
+	if err != nil {
+		return err
+	}
+	if failed {
+		return fmt.Errorf("прогон не прошёл гейт")
+	}
+	return nil
+}
+
+// applyGates проверяет регрессии относительно baseline и абсолютный гейт.
+func applyGates(report *evalgame.Report, baseline string, gate bool, minPass float64, categoryText, requiredText string) (bool, error) {
+	failed := false
+	if baseline != "" {
+		previous, err := evalgame.LoadReport(baseline)
 		if err != nil {
-			return err
+			return false, err
 		}
 		violations := evalgame.RegressionViolations(report.RunResult(), previous.RunResult())
 		if len(violations) > 0 {
@@ -178,20 +205,20 @@ func run(ctx context.Context, args []string) error {
 				fmt.Fprintln(os.Stderr, "  ✗", item)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "\nрегрессий относительно %s нет\n", *baseline)
+			fmt.Fprintf(os.Stderr, "\nрегрессий относительно %s нет\n", baseline)
 		}
 	}
-	if *gate {
+	if gate {
 		thresholds := evalgame.ProposedGate()
-		thresholds.MinPassRate = *minPass
-		parsed, err := evalgame.ParseCategoryThresholds(*categoryText)
+		thresholds.MinPassRate = minPass
+		parsed, err := evalgame.ParseCategoryThresholds(categoryText)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if len(parsed) > 0 {
 			thresholds.Categories = parsed
 		}
-		if trimmed := strings.TrimSpace(*requiredText); trimmed != "" {
+		if trimmed := strings.TrimSpace(requiredText); trimmed != "" {
 			thresholds.Required = nil
 			for _, name := range strings.Split(trimmed, ",") {
 				if item := strings.TrimSpace(name); item != "" {
@@ -210,10 +237,7 @@ func run(ctx context.Context, args []string) error {
 			fmt.Fprintln(os.Stderr, "\nгейт пройден")
 		}
 	}
-	if failed {
-		return fmt.Errorf("прогон не прошёл гейт")
-	}
-	return nil
+	return failed, nil
 }
 
 // printCalibration печатает таблицу калибровки судьи.
