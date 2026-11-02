@@ -182,8 +182,9 @@ func (c *Channel) route(updateID int64, update *Update) error {
 
 	// Автоприсоединение — код без LLM и до гейта: строка промпта «anyone who
 	// writes into the bound chat/topic joins automatically» должна быть правдой.
-	// /join регистрирует сам handleJoin, чтобы ответить «присоединился», а не
-	// «уже участвуешь».
+	// /join и /kick обрабатываются своими хендлерами и не должны сначала
+	// регистрировать отправителя: иначе посторонний /kick занял бы слот партии
+	// до отказа, а /join ответил бы «уже участвуешь» вместо «присоединился».
 	command := ""
 	if message.IsCommand(c.botUsername) {
 		switch message.CommandName() {
@@ -193,7 +194,7 @@ func (c *Channel) route(updateID int64, update *Update) error {
 			command = "kick"
 		}
 	}
-	if command != "join" {
+	if command == "" {
 		c.autoJoin(message)
 	}
 

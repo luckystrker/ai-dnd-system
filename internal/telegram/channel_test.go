@@ -539,6 +539,59 @@ func TestChannelKickByReply(t *testing.T) {
 	}
 }
 
+// Посторонний /kick не должен занимать слот партии: autoJoin для команд не
+// выполняется, участник не добавляется.
+func TestChannelKickStrangerDoesNotJoin(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 200, "/kick @u200"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "только DM") {
+		t.Fatalf("ответ постороннему на /kick = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range updated.Members {
+		if member.UserID == "200" {
+			t.Fatalf("посторонний занял слот партии: %+v", updated.Members)
+		}
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("/kick постороннего разбудил LLM: %d вызовов", calls)
+	}
+}
+
+// /join без привязанной кампании отвечает новым текстом отказа.
+func TestChannelJoinWithoutCampaignRefused(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 200, "/join"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "нет активной кампании") {
+		t.Fatalf("ответ на /join без кампании = %q", sent[0].text)
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("/join разбудил LLM: %d вызовов", calls)
+	}
+}
+
 // /kick @username ищет цель без учёта регистра.
 func TestChannelKickByUsername(t *testing.T) {
 	t.Parallel()
