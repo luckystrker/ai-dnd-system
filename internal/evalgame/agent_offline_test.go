@@ -133,4 +133,38 @@ func TestEvalThroughRealDMAgent(t *testing.T) {
 		cr := runCase(t, suite, "neutrality-02-no-praise-for-choice", d.Agent())
 		requireScore(t, cr, "answer_omits", true)
 	})
+
+	// Запись боевого состояния на ходу обычного игрока: оба тула отработали
+	// без отказа доступа.
+	t.Run("запись памяти на ходу игрока", func(t *testing.T) {
+		t.Parallel()
+		d := dmEvalAgent(t, []tools.Tool{
+			cannedTool(t, "combat", "Дэн: урон 4 HP → 6/10. Следующий ход: Лиса (lisa)."),
+			cannedTool(t, "update_character", "Дэн сохранён: HP 6/10."),
+		},
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{
+				{ID: "c1", Name: "combat", Arguments: `{"action":"damage","target":"Дэн","amount":4}`},
+				{ID: "c2", Name: "update_character", Arguments: `{"character":"Дэн","hp":6}`},
+			}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Кинжал рассекает плечо: минус 4 хита. Следующая — Лиса."}},
+		)
+		cr := runCase(t, suite, "memory-01-damage-on-player-turn", d.Agent())
+		requireScore(t, cr, "tools_called", true)
+		requireScore(t, cr, "tool_args", true)
+		requireScore(t, cr, "tool_ok", true)
+	})
+
+	// Закрытие дня: DM зовёт advance_day, очередь (в этом тесте — без
+	// летописца) не мешает ответу.
+	t.Run("закрытие дня через advance_day", func(t *testing.T) {
+		t.Parallel()
+		d := dmEvalAgent(t, []tools.Tool{cannedTool(t, "advance_day", "День 3 закрыт, начался день 4.")},
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "advance_day", Arguments: `{"note":"ночёвка в трактире"}`,
+			}}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Утро. День 4 начинается в трактире."}},
+		)
+		cr := runCase(t, suite, "day-01-overnight-rest", d.Agent())
+		requireScore(t, cr, "tools_called", true)
+	})
 }
