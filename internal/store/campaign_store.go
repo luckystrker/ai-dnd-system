@@ -296,6 +296,41 @@ func (s *Store) AddMember(campaignID, inviterUserID string, member NewMemberInpu
 	return s.mustGetCampaign(campaign.ID)
 }
 
+// KickMember удаляет игрока из кампании по команде dm (/kick). Роль dm
+// удалить нельзя; персонаж, транскрипт и остальная история остаются в БД.
+// Если удалённый снова напишет в чат, AutoRegister вступит заново.
+func (s *Store) KickMember(campaignID, actorUserID, targetUserID string) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	campaign, err := s.mustGetCampaign(campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireRole(campaign, actorUserID, RoleDM); err != nil {
+		return nil, err
+	}
+	var target *CampaignMember
+	for index := range campaign.Members {
+		if campaign.Members[index].UserID == targetUserID {
+			target = &campaign.Members[index]
+			break
+		}
+	}
+	if target == nil {
+		return nil, storeError("Игрок не найден в кампании.", ErrNotFound)
+	}
+	if target.Role == RoleDM {
+		return nil, storeError("DM нельзя кикнуть из кампании.", ErrAccessDenied)
+	}
+	if _, err := s.db.Exec(
+		"DELETE FROM campaign_members WHERE campaign_id = ? AND user_id = ?",
+		campaign.ID, target.UserID,
+	); err != nil {
+		return nil, fmt.Errorf("store: удаление участника: %w", err)
+	}
+	return s.mustGetCampaign(campaign.ID)
+}
+
 // AutoRegister идемпотентно вступает в кампанию как player (/join);
 // при полной партии новый участник молча пропускается.
 func (s *Store) AutoRegister(campaignID string, user NewMemberInput) (*Campaign, error) {

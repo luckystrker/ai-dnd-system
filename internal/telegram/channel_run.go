@@ -184,8 +184,16 @@ func (c *Channel) route(updateID int64, update *Update) error {
 	// writes into the bound chat/topic joins automatically» должна быть правдой.
 	// /join регистрирует сам handleJoin, чтобы ответить «присоединился», а не
 	// «уже участвуешь».
-	isJoin := message.IsCommand(c.botUsername) && message.CommandName() == "join"
-	if !isJoin {
+	command := ""
+	if message.IsCommand(c.botUsername) {
+		switch message.CommandName() {
+		case "join":
+			command = "join"
+		case "kick":
+			command = "kick"
+		}
+	}
+	if command != "join" {
 		c.autoJoin(message)
 	}
 
@@ -200,8 +208,12 @@ func (c *Channel) route(updateID int64, update *Update) error {
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
 
-	if isJoin {
+	switch command {
+	case "join":
 		c.handleJoin(message)
+		return c.store.MarkTelegramUpdateProcessed(updateID)
+	case "kick":
+		c.handleKick(message)
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
 
@@ -221,13 +233,13 @@ func (c *Channel) handleJoin(message *Message) {
 		return
 	}
 	identity := IdentityFromMessage(message)
-	campaign, err := c.store.FindByBoundChat(identity.ChatID, TopicOf(message), true)
+	campaign, err := c.store.FindByBoundChat(identity.ChatID, TopicOf(message), false)
 	if err != nil {
 		c.log.Error("telegram: /join lookup failed", "chat", identity.ChatID, "error", err)
 		return
 	}
 	if campaign == nil {
-		c.postText(message, "В этом чате нет кампании, к которой можно присоединиться.")
+		c.postText(message, "В этом чате нет активной кампании, к которой можно присоединиться.")
 		return
 	}
 	before := false
@@ -268,6 +280,110 @@ func (c *Channel) handleJoin(message *Message) {
 	default:
 		c.postText(message, fmt.Sprintf("Партия кампании «%s» заполнена (максимум %d игроков).", campaign.Title, store.MaxParty))
 	}
+}
+
+// handleKick — /kick без LLM: dm освобождает место в партии. Цель задаётся
+// реплаем на сообщение игрока или аргументом @username. Персонаж и история
+// удалённого остаются в БД; повторное сообщение в чат вступит заново через
+// автоприсоединение.
+func (c *Channel) handleKick(message *Message) {
+	identity := IdentityFromMessage(message)
+	campaign, err := c.store.FindByBoundChat(identity.ChatID, TopicOf(message), false)
+	if err != nil {
+		c.log.Error("telegram: /kick lookup failed", "chat", identity.ChatID, "error", err)
+		return
+	}
+	if campaign == nil {
+		c.postText(message, "В этом чате нет активной кампании.")
+		return
+	}
+	actor := campaignMember(campaign, identity.UserID)
+	if actor == nil || actor.Role != store.RoleDM {
+		c.postText(message, "Кикать игроков может только DM кампании.")
+		return
+	}
+	target, label := kickTarget(campaign, message)
+	switch {
+	case label == "":
+		c.postText(message, "Укажи игрока реплаем на его сообщение или @username: /kick @username.")
+		return
+	case target == nil:
+		c.postText(message, fmt.Sprintf("Игрок %s не найден в кампании.", label))
+		return
+	case target.Role == store.RoleDM:
+		c.postText(message, "DM нельзя кикнуть из кампании.")
+		return
+	}
+	if _, err := c.store.KickMember(campaign.ID, identity.UserID, target.UserID); err != nil {
+		c.log.Error("telegram: /kick failed", "campaign", campaign.ID, "target", target.UserID, "error", err)
+		c.postText(message, "Не получилось кикнуть игрока. Попробуй ещё раз.")
+		return
+	}
+	c.postText(message, fmt.Sprintf("Игрок %s удалён из кампании. Персонаж и история сохранены.", memberLabel(target, target.UserID)))
+}
+
+// kickTarget достаёт цель кика: реплай приоритетнее аргумента @username.
+// label пустой — цель не указана; target nil при непустом label — не найден.
+func kickTarget(campaign *store.Campaign, message *Message) (*store.CampaignMember, string) {
+	if reply := message.ReplyToMessage; reply != nil && reply.From != nil && !reply.From.IsBot {
+		userID := strconv.FormatInt(reply.From.ID, 10)
+		label := userID
+		if reply.From.Username != "" {
+			label = "@" + reply.From.Username
+		} else if name := reply.From.DisplayName(); name != "" {
+			label = name
+		}
+		return campaignMember(campaign, userID), label
+	}
+	username := usernameArgument(commandArgs(message))
+	if username == "" {
+		return nil, ""
+	}
+	label := "@" + username
+	for index := range campaign.Members {
+		member := &campaign.Members[index]
+		if member.Username != nil && strings.EqualFold(*member.Username, username) {
+			return member, label
+		}
+	}
+	return nil, label
+}
+
+func campaignMember(campaign *store.Campaign, userID string) *store.CampaignMember {
+	for index := range campaign.Members {
+		if campaign.Members[index].UserID == userID {
+			return &campaign.Members[index]
+		}
+	}
+	return nil
+}
+
+func memberLabel(member *store.CampaignMember, fallback string) string {
+	if member.Username != nil && *member.Username != "" {
+		return "@" + *member.Username
+	}
+	if member.Name != nil && *member.Name != "" {
+		return *member.Name
+	}
+	return fallback
+}
+
+// commandArgs — текст после первого токена команды (/kick @ivan → "@ivan").
+func commandArgs(message *Message) string {
+	text := strings.TrimSpace(message.TextContent())
+	if index := strings.IndexAny(text, " \t\n"); index >= 0 {
+		return strings.TrimSpace(text[index:])
+	}
+	return ""
+}
+
+// usernameArgument — первый аргумент вида @username.
+func usernameArgument(args string) string {
+	fields := strings.Fields(args)
+	if len(fields) == 0 || len(fields[0]) < 2 || fields[0][0] != '@' {
+		return ""
+	}
+	return strings.TrimPrefix(fields[0], "@")
 }
 
 // autoJoin регистрирует пишущего как игрока кампании, привязанной к чату или

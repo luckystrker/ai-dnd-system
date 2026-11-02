@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/luckystrker/ago/stream"
 	agotest "github.com/luckystrker/ago/testing"
 	agotools "github.com/luckystrker/ago/tools"
+	_ "modernc.org/sqlite"
 
 	"github.com/luckystriker/ai-dnd-system/internal/dm"
 	"github.com/luckystriker/ai-dnd-system/internal/store"
@@ -161,13 +163,18 @@ func waitSent(t *testing.T, api *fakeAPI, count int) []sentMessage {
 
 func testCampaign(t *testing.T, st *store.Store, chatID string) *store.Campaign {
 	t.Helper()
+	return testCampaignOwnedBy(t, st, chatID, "dm-1")
+}
+
+func testCampaignOwnedBy(t *testing.T, st *store.Store, chatID, ownerID string) *store.Campaign {
+	t.Helper()
 	campaign, err := st.CreateCampaign(store.NewCampaignInput{
 		Title: "Три ворона", Length: store.LengthShort, Setting: "север", Theme: "выживание",
-	}, store.NewOwnerInput{UserID: "dm-1", Username: strPtr("dm")})
+	}, store.NewOwnerInput{UserID: ownerID, Username: strPtr("dm")})
 	if err != nil {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
-	if _, err := st.BindAndActivate(campaign.ID, "dm-1", store.BoundChat{ChatID: chatID}); err != nil {
+	if _, err := st.BindAndActivate(campaign.ID, ownerID, store.BoundChat{ChatID: chatID}); err != nil {
 		t.Fatalf("BindAndActivate: %v", err)
 	}
 	return campaign
@@ -175,12 +182,19 @@ func testCampaign(t *testing.T, st *store.Store, chatID string) *store.Campaign 
 
 func testStorePath(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "campaigns.db"))
+	st, _ := testStoreFile(t)
+	return st
+}
+
+func testStoreFile(t *testing.T) (*store.Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "campaigns.db")
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return st
+	return st, path
 }
 
 // modelFactory собирает DM на скриптованной модели и заданных ExtraTools.
@@ -452,6 +466,249 @@ func TestChannelJoinFullParty(t *testing.T) {
 	sent := waitSent(t, api, 1)
 	if !strings.Contains(sent[0].text, "заполнена") {
 		t.Fatalf("ответ = %q", sent[0].text)
+	}
+}
+
+// /kick: dm удаляет игрока реплаем, персонаж и история остаются.
+func TestChannelKickByReply(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	if _, err := st.AutoRegister(campaign.ID, store.NewMemberInput{
+		UserID: "200", Name: strPtr("Иван"), Username: strPtr("ivan"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sheet, err := st.SaveCharacter(campaign.ID, "200", store.NewCharacterInput{
+		Name: "Иван", CharacterClass: "воин", Race: "человек",
+		HP: intPtr(12), MaxHP: intPtr(12),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendTranscriptEntry(campaign.Slug, 1, store.TranscriptEntry{
+		Kind: "dm", Text: "история до кика",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	kick := groupMessage(-100, 1, "/kick")
+	kick.ReplyToMessage = groupMessage(-100, 200, "я тут")
+	if err := channel.ingest(rawUpdate(t, 1, kick)); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "удалён") {
+		t.Fatalf("ответ на /kick = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range updated.Members {
+		if member.UserID == "200" {
+			t.Fatalf("игрок не удалён: %+v", updated.Members)
+		}
+	}
+	sheets, err := st.ListCharacters(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, existing := range sheets {
+		if existing.ID == sheet.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("персонаж удалён вместе с участником")
+	}
+	day, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil || day == nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if !strings.Contains(strings.Join(day.Entries, "\n"), "история до кика") {
+		t.Fatalf("история удалена вместе с участником: %v", day.Entries)
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("/kick разбудил LLM: %d вызовов", calls)
+	}
+}
+
+// /kick @username ищет цель без учёта регистра.
+func TestChannelKickByUsername(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	if _, err := st.AutoRegister(campaign.ID, store.NewMemberInput{
+		UserID: "200", Username: strPtr("ivan"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api := newFakeBotAPI()
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 1, "/kick @Ivan"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "удалён") {
+		t.Fatalf("ответ на /kick = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range updated.Members {
+		if member.UserID == "200" {
+			t.Fatalf("игрок не удалён: %+v", updated.Members)
+		}
+	}
+}
+
+// Не-dm не может кикать игроков.
+func TestChannelKickRefusedForNonDM(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	for _, user := range []store.NewMemberInput{
+		{UserID: "200", Username: strPtr("u200")},
+		{UserID: "300", Username: strPtr("u300")},
+	} {
+		if _, err := st.AutoRegister(campaign.ID, user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := newFakeBotAPI()
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 200, "/kick @u300"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "только DM") {
+		t.Fatalf("ответ не-dm = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, member := range updated.Members {
+		if member.UserID == "300" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("не-dm всё равно кикнул игрока: %+v", updated.Members)
+	}
+}
+
+// DM кикнуть нельзя, в том числе себя.
+func TestChannelKickDMRefused(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	api := newFakeBotAPI()
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+
+	kick := groupMessage(-100, 1, "/kick")
+	kick.ReplyToMessage = groupMessage(-100, 1, "мой ход")
+	if err := channel.ingest(rawUpdate(t, 1, kick)); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "DM нельзя") {
+		t.Fatalf("ответ на кик dm = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, member := range updated.Members {
+		if member.UserID == "1" && member.Role == store.RoleDM {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dm удалён из кампании: %+v", updated.Members)
+	}
+}
+
+// Кик несуществующего игрока не меняет состав и отвечает отказом.
+func TestChannelKickUnknownPlayer(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	api := newFakeBotAPI()
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 1, "/kick @ghost"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "не найден") {
+		t.Fatalf("ответ на кик неизвестного = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Members) != 1 {
+		t.Fatalf("состав изменился: %+v", updated.Members)
+	}
+}
+
+// /join в завершённой кампании отказывает, даже если привязка к чату осталась.
+func TestChannelJoinFinishedCampaignRefused(t *testing.T) {
+	t.Parallel()
+
+	st, path := testStoreFile(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	setCampaignStatus(t, path, campaign.ID, "finished")
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 200, "/join"))); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "нет активной кампании") {
+		t.Fatalf("ответ /join в finished = %q", sent[0].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range updated.Members {
+		if member.UserID == "200" {
+			t.Fatalf("игрок добавлен в завершённую кампанию: %+v", updated.Members)
+		}
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("/join разбудил LLM: %d вызовов", calls)
+	}
+}
+
+func setCampaignStatus(t *testing.T, path, campaignID, status string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE campaigns SET status = ? WHERE id = ?`, status, campaignID); err != nil {
+		t.Fatalf("update status: %v", err)
 	}
 }
 

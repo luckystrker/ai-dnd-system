@@ -194,6 +194,11 @@ These rules apply equally to solo mode and to group/campaign play.
   (`invite_member`). Anyone who writes into the bound chat/topic joins the
   campaign automatically as a player while the party has room (maximum 6), so
   use `/invite` only to add someone before their first message.
+- **/kick** - the campaign DM removes a player from the party: reply to that
+  player's message or write `/kick @username`. The command is handled by code
+  without an LLM turn; the character sheet and campaign history stay in the
+  database. A removed player who writes into the chat again rejoins
+  automatically while the party has room.
 - In a chat with an active campaign, the injected campaign-memory block already
   restores the campaign and the party into context. Call `get_game_context`
   only when the block is missing (for example right after a restart) or when
