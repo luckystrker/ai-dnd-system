@@ -211,3 +211,53 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	}
 	return false, rows.Err()
 }
+
+func TestKeyEventBackfillHandlesExistingHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collision.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("legacy schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO campaigns (id, slug, title, status, owner_user_id, length, setting, theme, description, created_at)
+         VALUES ('c1', 'old-campaign', 'Старая кампания', 'active', 'u-dm', 'medium', 's', 't', '', '2026-01-01T00:00:00.000Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	clean := "Старое событие."
+	hash := "evt:" + contentEventID("c1", 1, clean, false)
+	// Строка новой версии уже имеет вычисленный хеш; рядом лежит NULL-строка
+	// с тем же содержимым — бэкфилл обязан удалить её, а не упасть на UNIQUE.
+	if _, err := db.Exec(
+		`INSERT INTO key_events (campaign_id, day, line, permanent, event_id) VALUES ('c1', 1, ?, 0, ?)`,
+		"- **День 1**: "+clean, hash,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO key_events (campaign_id, day, line, permanent, event_id) VALUES ('c1', 1, ?, 0, NULL)`,
+		"- **День 1**: "+clean,
+	); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open не должен падать на коллизии бэкфилла: %v", err)
+	}
+	defer store.Close()
+	var rows, nulls int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM key_events").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM key_events WHERE event_id IS NULL").Scan(&nulls); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || nulls != 0 {
+		t.Fatalf("rows=%d nulls=%d, want 1/0", rows, nulls)
+	}
+}

@@ -24,6 +24,8 @@ const threadColumns = `id, campaign_id, text, kind, status, linked_quest_id, day
 
 // CreateCampaign создаёт кампанию: владелец становится dm.
 func (s *Store) CreateCampaign(input NewCampaignInput, owner NewOwnerInput) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	slug, err := s.uniqueCampaignSlug(Slugify(input.Title))
 	if err != nil {
 		return nil, err
@@ -147,6 +149,8 @@ func (s *Store) FindByBoundChat(chatID string, messageThreadID *int, anyStatus b
 
 // BindAndActivate запускает кампанию и привязывает её к чату.
 func (s *Store) BindAndActivate(campaignID, actorUserID string, chat BoundChat) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -181,6 +185,8 @@ func (s *Store) BindAndActivate(campaignID, actorUserID string, chat BoundChat) 
 
 // AdvanceDay увеличивает игровой день и начинает его утром.
 func (s *Store) AdvanceDay(campaignID, actorUserID string) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -202,6 +208,8 @@ func (s *Store) AdvanceDay(campaignID, actorUserID string) (*Campaign, error) {
 
 // SetEnvironment обновляет игровое время/окружение.
 func (s *Store) SetEnvironment(campaignID string, patch EnvironmentPatch) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -231,6 +239,8 @@ func (s *Store) SetEnvironment(campaignID string, patch EnvironmentPatch) (*Camp
 
 // AddMember добавляет участника (только dm; роль dm — только владелец).
 func (s *Store) AddMember(campaignID, inviterUserID string, member NewMemberInput) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -261,6 +271,8 @@ func (s *Store) AddMember(campaignID, inviterUserID string, member NewMemberInpu
 // AutoRegister идемпотентно вступает в кампанию как player (/join);
 // при полной партии новый участник молча пропускается.
 func (s *Store) AutoRegister(campaignID string, user NewMemberInput) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -289,6 +301,8 @@ func (s *Store) AutoRegister(campaignID string, user NewMemberInput) (*Campaign,
 
 // SaveCharacter создаёт лист персонажа.
 func (s *Store) SaveCharacter(campaignID, actorUserID string, input NewCharacterInput) (*CharacterSheet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -368,6 +382,8 @@ func (s *Store) SaveCharacter(campaignID, actorUserID string, input NewCharacter
 
 // UpdateCharacter обновляет динамическое состояние листа.
 func (s *Store) UpdateCharacter(campaignIDOrSlug, nameOrSlug string, patch CharacterStatePatch) (*CharacterSheet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -439,6 +455,8 @@ func (s *Store) UpdateCharacter(campaignIDOrSlug, nameOrSlug string, patch Chara
 
 // GrantCharacter аддитивно выдаёт предметы/способности/золото/XP.
 func (s *Store) GrantCharacter(campaignIDOrSlug, nameOrSlug string, patch CharacterGrantPatch) (*CharacterSheet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -495,6 +513,8 @@ func (s *Store) GrantCharacter(campaignIDOrSlug, nameOrSlug string, patch Charac
 
 // FinishCampaign завершает кампанию и освобождает чат.
 func (s *Store) FinishCampaign(campaignID, actorUserID string) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignID)
 	if err != nil {
 		return nil, err
@@ -516,6 +536,8 @@ func (s *Store) FinishCampaign(campaignID, actorUserID string) (*Campaign, error
 
 // CreateQuest создаёт квест.
 func (s *Store) CreateQuest(campaignIDOrSlug string, input NewQuestInput) (*Quest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -563,6 +585,8 @@ func (s *Store) CreateQuest(campaignIDOrSlug string, input NewQuestInput) (*Ques
 
 // UpdateQuest обновляет квест (completed — только через CompleteQuest).
 func (s *Store) UpdateQuest(campaignIDOrSlug, questIDOrSlug string, patch QuestPatch) (*Quest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -657,6 +681,8 @@ func (s *Store) ListQuests(campaignID string) ([]Quest, error) {
 
 // AppendThread добавляет открытую нить.
 func (s *Store) AppendThread(campaignIDOrSlug string, input NewThreadInput) (*OpenThread, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -672,7 +698,7 @@ func (s *Store) AppendThread(campaignIDOrSlug string, input NewThreadInput) (*Op
 	thread := &OpenThread{
 		ID:            newUUID(),
 		CampaignID:    campaign.ID,
-		Text:          strings.TrimSpace(input.Text),
+		Text:          jsTrim(input.Text),
 		Kind:          kind,
 		Status:        "open",
 		LinkedQuestID: input.LinkedQuestID,
@@ -693,6 +719,8 @@ func (s *Store) AppendThread(campaignIDOrSlug string, input NewThreadInput) (*Op
 
 // ResolveThread закрывает нить по id или фрагменту текста.
 func (s *Store) ResolveThread(campaignIDOrSlug, threadIDOrText string, day *int) (*OpenThread, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -1419,7 +1447,7 @@ func parseRewardPlan(value sql.NullString) *QuestRewardPlan {
 			}
 		}
 	}
-	if note, ok := parsed["note"].(string); ok && strings.TrimSpace(note) != "" {
+	if note, ok := parsed["note"].(string); ok && jsTrim(note) != "" {
 		plan.Note = &note
 	}
 	if plan.XP == nil && plan.Gold == nil && len(plan.Items) == 0 && plan.Note == nil {

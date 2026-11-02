@@ -49,7 +49,7 @@ func QueryTerms(query string) []string {
 
 // Normalize — нижний регистр и единые пробелы.
 func Normalize(text string) string {
-	return strings.TrimSpace(whitespaceRuns.ReplaceAllString(strings.ToLower(text), " "))
+	return jsTrim(whitespaceRuns.ReplaceAllString(strings.ToLower(text), " "))
 }
 
 // SnippetAround строит сниппет вокруг первого совпадения любого терма.
@@ -126,28 +126,59 @@ END`,
 
 // ensureFTSIndex создаёт FTS5-индекс и доиндексирует строки, добавленные с
 // прошлого поиска. false — FTS недоступен, все источники идут JS-сканом.
+//
+// Всё под ftsMu: в TS функция была синхронной, в Go два поиска иначе читают
+// один last_source_id и вставляют одни и те же строки. Catch-up идёт
+// транзакцией, чанками, с очисткой хвоста индекса (страховка от второго
+// процесса/TS, который мог успеть дописать).
 func (s *Store) ensureFTSIndex() bool {
-	for _, statement := range ftsSchema {
-		if _, err := s.db.Exec(statement); err != nil {
-			s.ftsEnabled = false
-			return false
+	s.ftsMu.Lock()
+	defer s.ftsMu.Unlock()
+	if !s.ftsReady {
+		for _, statement := range ftsSchema {
+			if _, err := s.db.Exec(statement); err != nil {
+				return false
+			}
 		}
+		s.ftsReady = true
 	}
-	s.ftsEnabled = true
 	for _, source := range memorySources {
 		if !source.FTS {
 			continue
 		}
-		var last int
-		err := s.db.QueryRow("SELECT last_source_id FROM fts_meta WHERE source = ?", source.Table).Scan(&last)
-		if err != nil && err != sql.ErrNoRows {
-			continue
+		// Ошибку источника глотаем, как TS: остальные источники и JS-скан
+		// продолжают работать. Следующий поиск повторит catch-up.
+		_ = s.catchUpFTS(source)
+	}
+	return true
+}
+
+const ftsChunk = 5000
+
+// catchUpFTS индексирует строки источника после fts_meta.last_source_id.
+// Чтение last и батча — в той же транзакции, что вставка: иначе между ними
+// вклинивается второй поиск и строки дублируются навсегда.
+func (s *Store) catchUpFTS(source memorySource) error {
+	for {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
 		}
-		rows, err := s.db.Query(
-			fmt.Sprintf("SELECT id, campaign_id, day, line FROM %s WHERE id > ? ORDER BY id", source.Table), last,
+		var last int
+		err = tx.QueryRow("SELECT last_source_id FROM fts_meta WHERE source = ?", source.Table).Scan(&last)
+		if err == sql.ErrNoRows {
+			last = 0
+		} else if err != nil {
+			tx.Rollback()
+			return err
+		}
+		rows, err := tx.Query(
+			fmt.Sprintf("SELECT id, campaign_id, day, line FROM %s WHERE id > ? ORDER BY id LIMIT ?", source.Table),
+			last, ftsChunk,
 		)
 		if err != nil {
-			continue
+			tx.Rollback()
+			return err
 		}
 		type ftsRow struct {
 			id         int
@@ -159,18 +190,29 @@ func (s *Store) ensureFTSIndex() bool {
 		for rows.Next() {
 			var item ftsRow
 			if err := rows.Scan(&item.id, &item.campaignID, &item.day, &item.line); err != nil {
-				batch = nil
-				break
+				rows.Close()
+				tx.Rollback()
+				return err
 			}
 			batch = append(batch, item)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			tx.Rollback()
+			return err
+		}
 		rows.Close()
 		if len(batch) == 0 {
-			continue
+			tx.Rollback()
+			return nil
 		}
-		tx, err := s.db.Begin()
-		if err != nil {
-			continue
+		// Хвост мог дописать второй процесс до того, как мы взяли last:
+		// удаляем его и вставляем заново из источника.
+		if _, err := tx.Exec(
+			"DELETE FROM fts_journal WHERE source = ? AND source_rowid > ?", source.Table, last,
+		); err != nil {
+			tx.Rollback()
+			return err
 		}
 		for _, item := range batch {
 			if _, err := tx.Exec(
@@ -178,12 +220,8 @@ func (s *Store) ensureFTSIndex() bool {
 				source.Table, item.id, item.campaignID, item.day, item.line,
 			); err != nil {
 				tx.Rollback()
-				tx = nil
-				break
+				return err
 			}
-		}
-		if tx == nil {
-			continue
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO fts_meta(source, last_source_id) VALUES (?, ?)
@@ -191,13 +229,15 @@ func (s *Store) ensureFTSIndex() bool {
 			source.Table, batch[len(batch)-1].id,
 		); err != nil {
 			tx.Rollback()
-			continue
+			return err
 		}
 		if err := tx.Commit(); err != nil {
-			continue
+			return err
+		}
+		if len(batch) < ftsChunk {
+			return nil
 		}
 	}
-	return true
 }
 
 // memorySource — описание источника памяти (SQL + форматирование хита).
@@ -333,11 +373,11 @@ func (s *Store) SearchCampaignMemory(slug, query string, options SearchOptions) 
 	if err != nil || !ok {
 		return nil, err
 	}
-	s.ensureFTSIndex()
+	ftsEnabled := s.ensureFTSIndex()
 
 	var hits []MemoryHit
 	for _, source := range memorySources {
-		found, searchErr := s.searchSource(campaignID, source, terms, context, perSource)
+		found, searchErr := s.searchSource(campaignID, source, terms, context, perSource, ftsEnabled)
 		if searchErr != nil {
 			// Таблицы-источника могло не быть — пропускаем, остальные ищут.
 			continue
@@ -355,7 +395,7 @@ func (s *Store) SearchCampaignMemory(slug, query string, options SearchOptions) 
 		if dayA != dayB {
 			return dayB < dayA
 		}
-		return hits[a].Source < hits[b].Source
+		return compareSources(hits[a].Source, hits[b].Source) < 0
 	})
 	if len(hits) > limit {
 		hits = hits[:limit]
@@ -363,8 +403,8 @@ func (s *Store) SearchCampaignMemory(slug, query string, options SearchOptions) 
 	return hits, nil
 }
 
-func (s *Store) searchSource(campaignID string, source memorySource, terms []string, context, perSource int) ([]MemoryHit, error) {
-	if source.FTS && s.ftsEnabled {
+func (s *Store) searchSource(campaignID string, source memorySource, terms []string, context, perSource int, ftsEnabled bool) ([]MemoryHit, error) {
+	if source.FTS && ftsEnabled {
 		hits, err := s.searchSourceFTS(campaignID, source, terms, context, perSource)
 		if err == nil && len(hits) > 0 {
 			return hits, nil
@@ -438,6 +478,18 @@ func (s *Store) searchSourceFTS(campaignID string, source memorySource, terms []
 	return hits, rows.Err()
 }
 
+// compareSources — регистронезависимое сравнение меток источников (в TS
+// localeCompare, первичный уровень игнорирует регистр). Метки вида
+// «NPC Борис» и «NPC аня» должны идти как в ICU, а не по байтам.
+func compareSources(a, b string) int {
+	foldedA := strings.ReplaceAll(strings.ToLower(a), "ё", "е")
+	foldedB := strings.ReplaceAll(strings.ToLower(b), "ё", "е")
+	if foldedA != foldedB {
+		return strings.Compare(foldedA, foldedB)
+	}
+	return strings.Compare(a, b)
+}
+
 func matchesAllTerms(text string, terms []string) bool {
 	lower := Normalize(text)
 	for _, term := range terms {
@@ -451,7 +503,7 @@ func matchesAllTerms(text string, terms []string) bool {
 func joinFields(fields []string) string {
 	cleaned := make([]string, 0, len(fields))
 	for _, field := range fields {
-		value := strings.TrimSpace(whitespaceRuns.ReplaceAllString(field, " "))
+		value := jsTrim(whitespaceRuns.ReplaceAllString(field, " "))
 		if value != "" {
 			cleaned = append(cleaned, value)
 		}

@@ -57,7 +57,7 @@ func (s *Store) campaignIDOf(campaignSlug string) (string, bool, error) {
 }
 
 // EnsureDay создаёт метаданные дня, если их ещё нет.
-func (s *Store) EnsureDay(campaignSlug string, day int, note, date *string) error {
+func (s *Store) ensureDay(campaignSlug string, day int, note, date *string) error {
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
@@ -75,6 +75,13 @@ func (s *Store) EnsureDay(campaignSlug string, day int, note, date *string) erro
 		id, day, dayDate, dayNote,
 	)
 	return err
+}
+
+// EnsureDay создаёт метаданные дня, если их ещё нет.
+func (s *Store) EnsureDay(campaignSlug string, day int, note, date *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensureDay(campaignSlug, day, note, date)
 }
 
 // ListDays — номера сохранённых дней по возрастанию.
@@ -102,14 +109,16 @@ func (s *Store) ListDays(campaignSlug string) ([]int, error) {
 // AppendTranscriptEntry добавляет строку в транскрипт дня (append-only,
 // дедуп по eventId через UNIQUE(campaign_id, event_id)).
 func (s *Store) AppendTranscriptEntry(campaignSlug string, day int, entry TranscriptEntry) error {
-	if err := s.EnsureDay(campaignSlug, day, nil, nil); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureDay(campaignSlug, day, nil, nil); err != nil {
 		return err
 	}
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
 	}
-	text := strings.TrimSpace(collapseNewlines(entry.Text))
+	text := jsTrim(collapseNewlines(entry.Text))
 	if text == "" {
 		return nil
 	}
@@ -206,7 +215,9 @@ func (s *Store) ReadDayTail(campaignSlug string, day, maxLines int) (*DayRecord,
 
 // SetDaySummary записывает саммари дня.
 func (s *Store) SetDaySummary(campaignSlug string, day int, summary string) error {
-	if err := s.EnsureDay(campaignSlug, day, nil, nil); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureDay(campaignSlug, day, nil, nil); err != nil {
 		return err
 	}
 	id, ok, err := s.campaignIDOf(campaignSlug)
@@ -215,14 +226,16 @@ func (s *Store) SetDaySummary(campaignSlug string, day int, summary string) erro
 	}
 	_, err = s.db.Exec(
 		"UPDATE campaign_days SET summary = ? WHERE campaign_id = ? AND day = ?",
-		strings.TrimSpace(summary), id, day,
+		jsTrim(summary), id, day,
 	)
 	return err
 }
 
 // SetDayHeadline пишет короткую (≤140) шапку дня.
 func (s *Store) SetDayHeadline(campaignSlug string, day int, headline string) error {
-	if err := s.EnsureDay(campaignSlug, day, nil, nil); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureDay(campaignSlug, day, nil, nil); err != nil {
 		return err
 	}
 	id, ok, err := s.campaignIDOf(campaignSlug)
@@ -231,7 +244,7 @@ func (s *Store) SetDayHeadline(campaignSlug string, day int, headline string) er
 	}
 	_, err = s.db.Exec(
 		"UPDATE campaign_days SET headline = ? WHERE campaign_id = ? AND day = ?",
-		truncateRunes(strings.TrimSpace(headline), 140), id, day,
+		truncateRunes(jsTrim(headline), 140), id, day,
 	)
 	return err
 }
@@ -264,6 +277,8 @@ func (s *Store) ListDayHeadlines(campaignSlug string) ([]DayHeadline, error) {
 
 // UpsertCampaignSummaryDay обновляет/добавляет секцию дня накопительного саммари.
 func (s *Store) UpsertCampaignSummaryDay(campaignSlug string, day int, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
@@ -271,7 +286,7 @@ func (s *Store) UpsertCampaignSummaryDay(campaignSlug string, day int, text stri
 	_, err = s.db.Exec(
 		`INSERT INTO campaign_summary (campaign_id, day, text) VALUES (?, ?, ?)
          ON CONFLICT(campaign_id, day) DO UPDATE SET text = excluded.text`,
-		id, day, strings.TrimSpace(text),
+		id, day, jsTrim(text),
 	)
 	return err
 }
@@ -304,7 +319,7 @@ func (s *Store) ReadCampaignSummary(campaignSlug string) (string, error) {
 	if len(parts) == 0 {
 		return "", nil
 	}
-	return strings.TrimSpace(strings.Join(parts, "\n\n")), nil
+	return jsTrim(strings.Join(parts, "\n\n")), nil
 }
 
 // contentEventID — детерминированный id по содержимому (sha256, 40 hex).
@@ -320,11 +335,13 @@ func contentEventID(campaignID string, day int, clean string, permanent bool) st
 // AppendKeyEvent добавляет ключевое событие. permanent помечает [важно].
 // Без явного eventID дедуп идёт по контентному хешу в колонке event_id.
 func (s *Store) AppendKeyEvent(campaignSlug string, day int, text string, eventID *string, permanent bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
 	}
-	clean := strings.TrimSpace(collapseNewlines(text))
+	clean := jsTrim(collapseNewlines(text))
 	if clean == "" {
 		return nil
 	}
@@ -398,7 +415,7 @@ func (s *Store) ReadKeyEvents(campaignSlug string) (string, error) {
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+	return jsTrim(strings.Join(lines, "\n")), nil
 }
 
 // BuildDayDigest — детерминированный дайджест из записей транскрипта дня.
@@ -418,7 +435,7 @@ func BuildDayDigest(entries []string, maxSentences int) string {
 	for _, line := range tail {
 		text := clockPrefix.ReplaceAllString(line, "")
 		text = eventMarkerSuffix.ReplaceAllString(text, "")
-		text = strings.TrimSpace(text)
+		text = jsTrim(text)
 		if text != "" {
 			cleaned = append(cleaned, text)
 		}
@@ -431,11 +448,13 @@ func BuildDayDigest(entries []string, maxSentences int) string {
 
 // AppendLedgerRow добавляет запись журнала экономики (дедуп по eventId).
 func (s *Store) AppendLedgerRow(campaignSlug string, row LedgerRow, eventID *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
 	}
-	item := strings.TrimSpace(collapseNewlines(row.ItemOrGold))
+	item := jsTrim(collapseNewlines(row.ItemOrGold))
 	if item == "" {
 		return nil
 	}
@@ -448,8 +467,8 @@ func (s *Store) AppendLedgerRow(campaignSlug string, row LedgerRow, eventID *str
 		by = fmt.Sprintf(" (%s)", *row.By)
 	}
 	note := ""
-	if row.Note != nil && strings.TrimSpace(*row.Note) != "" {
-		note = " — " + strings.TrimSpace(collapseNewlines(*row.Note))
+	if row.Note != nil && jsTrim(*row.Note) != "" {
+		note = " — " + jsTrim(collapseNewlines(*row.Note))
 	}
 	line := fmt.Sprintf("- [День %d] %s: %s%s%s", row.Day, verb, item, by, note)
 	var marker any
@@ -470,7 +489,7 @@ func (s *Store) ReadLedgerRaw(campaignSlug string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+	return jsTrim(strings.Join(lines, "\n")), nil
 }
 
 // ReadLedger читает журнал с фильтром по дню/типу; maxLines <= 0 — все.

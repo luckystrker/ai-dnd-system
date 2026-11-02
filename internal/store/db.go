@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite" // чистый Go-драйвер SQLite (FTS5 включён)
 )
@@ -206,9 +207,15 @@ var schema = []string{
 // Store — соединение с базой кампаний и все операции памяти.
 type Store struct {
 	db *sql.DB
-	// ftsEnabled — доступен ли FTS5; выставляется EnsureFTSIndex при поиске
-	// (как в TS: при ошибке DDL все источники идут через JS-скан).
-	ftsEnabled bool
+	// mu сериализует операции «прочитал → решил → записал»: в TS они были
+	// атомарны из-за синхронности, в Go между операторами вклиниваются
+	// горутины (обработчики чатов, субагент, тулы).
+	mu sync.Mutex
+	// ftsMu защищает ensureFTSIndex, ftsReady и запись индекса: catch-up
+	// читает last и вставляет строки транзакцией, иначе параллельные поиски
+	// дублируют fts_journal.
+	ftsMu    sync.Mutex
+	ftsReady bool
 }
 
 // Open открывает базу кампаний: WAL, foreign_keys=ON, DDL и миграции старых
@@ -219,7 +226,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("store: создать каталог базы: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsnFor(path))
 	if err != nil {
 		return nil, fmt.Errorf("store: открыть %s: %w", path, err)
 	}
@@ -234,16 +241,22 @@ func Open(path string) (*Store, error) {
 	return store, nil
 }
 
-func (s *Store) initialize() error {
-	for _, pragma := range []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000",
-	} {
-		if _, err := s.db.Exec(pragma); err != nil {
-			return fmt.Errorf("store: %s: %w", pragma, err)
-		}
+// dsnFor собирает DSN так, чтобы pragma применялись к КАЖДОМУ новому
+// соединению пула (Exec на пуле действует только на одно соединение и теряется
+// при его пересоздании). busy_timeout идёт до journal_mode: переключение WAL
+// при открытом втором процессе иначе сразу вернёт BUSY.
+func dsnFor(path string) string {
+	params := "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	if path == ":memory:" {
+		return "file::memory:?" + params
 	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	return "file:" + path + "?" + params
+}
+
+func (s *Store) initialize() error {
 	for _, statement := range schema {
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("store: схема: %w", err)
@@ -292,8 +305,8 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("store: миграция characters: %w", err)
 	}
 	if !characters {
-		if _, err := s.db.Exec("ALTER TABLE characters ADD COLUMN abilities TEXT"); err != nil {
-			return fmt.Errorf("store: ALTER characters.abilities: %w", err)
+		if err := s.addColumn("characters", "abilities"); err != nil {
+			return err
 		}
 	}
 
@@ -305,9 +318,21 @@ func (s *Store) migrate() error {
 		if exists {
 			continue
 		}
-		if _, err := s.db.Exec("ALTER TABLE campaigns ADD COLUMN " + column + " TEXT"); err != nil {
-			return fmt.Errorf("store: ALTER campaigns.%s: %w", column, err)
+		if err := s.addColumn("campaigns", column); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// addColumn добавляет колонку; гонку с параллельным стартом (TS или второй
+// процесс Go) считает успехом — колонка уже появилась.
+func (s *Store) addColumn(table, column string) error {
+	if _, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " TEXT"); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return nil
+		}
+		return fmt.Errorf("store: ALTER %s.%s: %w", table, column, err)
 	}
 	return nil
 }
@@ -377,7 +402,24 @@ func (s *Store) repairKeyEventDedup() error {
 		}
 	}
 	for _, item := range updates {
-		if _, err := tx.Exec("UPDATE key_events SET event_id = ? WHERE id = ?", item.key, item.id); err != nil {
+		// Хеш мог уже принадлежать строке, добавленной новой версией бота:
+		// бэкфилл такого NULL-дубля должен удалить старую строку, а не упасть
+		// на UNIQUE(campaign_id, event_id) и заблокировать старт.
+		var existing int
+		err := tx.QueryRow(
+			"SELECT 1 FROM key_events WHERE event_id = ? AND id != ? LIMIT 1",
+			item.key, item.id,
+		).Scan(&existing)
+		switch {
+		case err == nil:
+			if _, err := tx.Exec("DELETE FROM key_events WHERE id = ?", item.id); err != nil {
+				return err
+			}
+		case err == sql.ErrNoRows:
+			if _, err := tx.Exec("UPDATE key_events SET event_id = ? WHERE id = ?", item.key, item.id); err != nil {
+				return err
+			}
+		default:
 			return err
 		}
 	}
@@ -392,7 +434,7 @@ var (
 )
 
 func cleanKeyEventLine(line string) string {
-	return strings.TrimSpace(collapseNewlines(keyEventPrefix.ReplaceAllString(line, "")))
+	return jsTrim(collapseNewlines(keyEventPrefix.ReplaceAllString(line, "")))
 }
 
 // repairNpcDoubleDayMarkers чинит старые строки памяти NPC с двойным маркером
@@ -459,9 +501,18 @@ func collapseDoubleDayMarkers(memory string) string {
 	return strings.Join(lines, "\n")
 }
 
-// collapseNewlines повторяет text.replace(/\s*\n\s*/g, " ").
+// jsSpaces — набор, который JS String.prototype.trim обрезает (включая
+// NBSP и BOM); strings.TrimSpace BOM не трогает.
+const jsSpaces = " \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+func jsTrim(text string) string { return strings.Trim(text, jsSpaces) }
+
+var newlineCollapse = regexp.MustCompile(`[\s\p{Z}\x{FEFF}]*\n[\s\p{Z}\x{FEFF}]*`)
+
+// collapseNewlines повторяет text.replace(/\s*\n\s*/g, " ") с Unicode-
+// пробелами, как в JS (NBSP, U+2028/2029, BOM).
 func collapseNewlines(text string) string {
-	return regexp.MustCompile(`\s*\n\s*`).ReplaceAllString(text, " ")
+	return newlineCollapse.ReplaceAllString(text, " ")
 }
 
 func marshalJSON(value any) string {

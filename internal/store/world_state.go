@@ -8,15 +8,17 @@ import (
 
 // UpsertWorldChange идемпотентно пишет факт в категорию (по категории+тексту).
 func (s *Store) UpsertWorldChange(campaignSlug string, change WorldChange) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
 	}
-	category := strings.TrimSpace(change.Category)
+	category := jsTrim(change.Category)
 	if category == "" {
 		category = "Изменения"
 	}
-	text := strings.TrimSpace(collapseNewlines(change.Text))
+	text := jsTrim(collapseNewlines(change.Text))
 	if text == "" {
 		return nil
 	}

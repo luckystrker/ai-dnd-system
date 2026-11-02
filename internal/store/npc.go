@@ -13,6 +13,8 @@ const npcColumns = `id, campaign_id, slug, name, role, status, location, relatio
 
 // UpsertNpc создаёт или обновляет NPC (поиск по имени без учёта регистра).
 func (s *Store) UpsertNpc(campaignIDOrSlug string, input NpcUpsertInput) (*NpcWithMemory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -63,7 +65,7 @@ func (s *Store) UpsertNpc(campaignIDOrSlug string, input NpcUpsertInput) (*NpcWi
 	profile.UpdatedAt = ptr(now)
 
 	if input.MemoryAppend != nil {
-		appendText := strings.TrimSpace(*input.MemoryAppend)
+		appendText := jsTrim(*input.MemoryAppend)
 		if appendText != "" {
 			dayRun := inlineDayRun.FindString(appendText)
 			var inlineDay *int
@@ -74,7 +76,7 @@ func (s *Store) UpsertNpc(campaignIDOrSlug string, input NpcUpsertInput) (*NpcWi
 						inlineDay = &value
 					}
 				}
-				appendText = strings.TrimSpace(appendText[len(dayRun):])
+				appendText = jsTrim(appendText[len(dayRun):])
 			}
 			day := input.MemoryAppendDay
 			if day == nil {
@@ -168,7 +170,7 @@ func (s *Store) LastMemoryLine(campaignIDOrSlug, npcSlug string, maxChars int) (
 	}
 	var lines []string
 	for _, line := range strings.Split(memory, "\n") {
-		trimmed := strings.TrimSpace(line)
+		trimmed := jsTrim(line)
 		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
 			lines = append(lines, trimmed)
 		}

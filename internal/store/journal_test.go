@@ -341,3 +341,54 @@ func TestBuildDayDigest(t *testing.T) {
 		t.Fatalf("ограничение хвоста сломано")
 	}
 }
+
+func TestKeyEventUnicodeWhitespaceDedup(t *testing.T) {
+	store, slug := journalFixture(t)
+
+	// NBSP перед переводом строки в JS \s входит, значит после склейки текст
+	// совпадает с обычным пробелом и дедуп по контентному хешу срабатывает.
+	if err := store.AppendKeyEvent(slug, 1, "Артефакт\u00a0\nнайден", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendKeyEvent(slug, 1, "Артефакт найден", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	// BOM обрезается JS trim, значит это то же событие.
+	if err := store.AppendKeyEvent(slug, 2, "\ufeffКлинок", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendKeyEvent(slug, 2, "Клинок", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadKeyEvents(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(events, "Артефакт найден") != 1 {
+		t.Fatalf("NBSP-дедуп не сработал: %q", events)
+	}
+	if strings.Count(events, "Клинок") != 1 {
+		t.Fatalf("BOM-дедуп не сработал: %q", events)
+	}
+}
+
+func TestEmptyEventIDIsTreatedAsAbsent(t *testing.T) {
+	store, slug := journalFixture(t)
+
+	if err := store.AppendKeyEvent(slug, 1, "Первое событие", ptr(""), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendKeyEvent(slug, 1, "Второе событие", ptr(""), false); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadKeyEvents(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(events, "**День 1**") != 2 {
+		t.Fatalf("разные события с пустым eventId схлопнулись: %q", events)
+	}
+	if strings.Contains(events, "<!-- evt:") {
+		t.Fatalf("пустой eventId не должен давать маркер: %q", events)
+	}
+}

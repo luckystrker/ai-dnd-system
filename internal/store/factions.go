@@ -15,6 +15,8 @@ func ClampStanding(value int) int {
 
 // UpsertFaction создаёт или обновляет фракцию (поиск по имени без регистра).
 func (s *Store) UpsertFaction(campaignIDOrSlug string, input UpsertFactionInput) (*Faction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -56,6 +58,8 @@ func (s *Store) UpsertFaction(campaignIDOrSlug string, input UpsertFactionInput)
 
 // AdjustStanding меняет репутацию на delta с клампингом.
 func (s *Store) AdjustStanding(campaignIDOrSlug, nameOrSlug string, delta int) (*Faction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err

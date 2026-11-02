@@ -13,6 +13,8 @@ const locationColumns = `id, campaign_id, slug, name, description, connections,
 
 // UpsertLocation создаёт или обновляет локацию (поиск по имени без регистра).
 func (s *Store) UpsertLocation(campaignIDOrSlug string, input UpsertLocationInput) (*Location, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err
@@ -55,7 +57,7 @@ func (s *Store) UpsertLocation(campaignIDOrSlug string, input UpsertLocationInpu
 	}
 	if input.Current != nil {
 		if *input.Current {
-			if err := s.SetCurrent(campaign.ID, profile.Slug); err != nil {
+			if err := s.setCurrent(campaign.ID, profile.Slug); err != nil {
 				return nil, err
 			}
 			profile.Current = ptr(true)
@@ -70,7 +72,7 @@ func (s *Store) UpsertLocation(campaignIDOrSlug string, input UpsertLocationInpu
 }
 
 // SetCurrent делает локацию текущей, снимая флаг с остальных.
-func (s *Store) SetCurrent(campaignIDOrSlug, locationSlug string) error {
+func (s *Store) setCurrent(campaignIDOrSlug, locationSlug string) error {
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return err
@@ -92,8 +94,17 @@ func (s *Store) SetCurrent(campaignIDOrSlug, locationSlug string) error {
 	return err
 }
 
+// SetCurrent делает локацию текущей, снимая флаг с остальных.
+func (s *Store) SetCurrent(campaignIDOrSlug, locationSlug string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setCurrent(campaignIDOrSlug, locationSlug)
+}
+
 // MarkVisited отмечает день посещения без дубликатов (с сортировкой).
 func (s *Store) MarkVisited(campaignIDOrSlug, locationSlug string, day int) (*Location, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
 	if err != nil {
 		return nil, err

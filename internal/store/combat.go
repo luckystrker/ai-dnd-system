@@ -22,6 +22,8 @@ type CombatSnapshot struct {
 
 // SaveCombatState сохраняет снимок активного боя (перезапись строки кампании).
 func (s *Store) SaveCombatState(campaignSlug string, snapshot CombatSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
@@ -88,6 +90,8 @@ func (s *Store) LoadCombatState(campaignSlug string) (*CombatSnapshot, error) {
 
 // ClearCombatState удаляет снимок боя; идемпотентно.
 func (s *Store) ClearCombatState(campaignSlug string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id, ok, err := s.campaignIDOf(campaignSlug)
 	if err != nil || !ok {
 		return err
