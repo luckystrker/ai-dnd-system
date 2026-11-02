@@ -2,6 +2,7 @@ package evalgame
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/luckystrker/ago/agent"
@@ -282,6 +283,39 @@ func TestMechanicalScorersMemoryWrite(t *testing.T) {
 		requireScore(t, cr, "tool_args", true)
 		requireScore(t, cr, "tool_ok", false)
 	})
+}
+
+func TestMechanicalScorersToolErrorRetry(t *testing.T) {
+	t.Parallel()
+
+	suite := mustLoadSuite(t)
+	calls := 0
+	retry, err := tools.NewFunctionTool("skill_check", "test tool", func(args struct{}) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("unknown skill: Восприятие")
+		}
+		return skillCheckResult, nil
+	})
+	if err != nil {
+		t.Fatalf("skill_check: %v", err)
+	}
+	toolset := []tools.Tool{retry, cannedTool(t, "roll_dice", "Итого: 9")}
+
+	// checks-05 отложен до слайса 7 (fault-инжекция), но его механические
+	// скореры проверяются уже сейчас: ошибка → повтор → чистый результат.
+	cr := runMechanical(t, suite, "checks-05-tool-error-retry", toolset,
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID: "c1", Name: "skill_check", Arguments: `{"character_name":"Лиса","skill":"Восприятие","difficulty":12}`,
+		}}}},
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID: "c2", Name: "skill_check", Arguments: `{"character_name":"Лиса","skill":"Perception","difficulty":12}`,
+		}}}},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "Лиса напрягает слух: d20 14, итог 17 против DC 12 — успех."}},
+	)
+	requireScore(t, cr, "tools_called", true)
+	requireScore(t, cr, "tools_not_called", true)
+	requireScore(t, cr, "answer_omits", true)
 }
 
 func TestMechanicalScorersDayClose(t *testing.T) {

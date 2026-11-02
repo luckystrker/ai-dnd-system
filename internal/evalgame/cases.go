@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/luckystrker/ago/eval"
@@ -63,16 +65,32 @@ func (s Suite) Names() []string {
 	return names
 }
 
-// Active возвращает кейсы без skip_until: только они считаются в наборе.
-func (s Suite) Active() eval.Suite {
+// Active возвращает кейсы, доступные на старте набора (ActiveAt(0)).
+func (s Suite) Active() eval.Suite { return s.ActiveAt(0) }
+
+// ActiveAt возвращает кейсы, доступные на слайсе slice: кейс без skip_until
+// активен всегда, кейс со skip_until: slice-N — начиная со слайса N.
+func (s Suite) ActiveAt(slice int) eval.Suite {
 	active := make(eval.Suite, 0, len(s.Cases))
 	for _, c := range s.Cases {
-		if s.Meta[c.Name].SkipUntil != "" {
-			continue
+		if skip := s.Meta[c.Name].SkipUntil; skip != "" {
+			if s.sliceNumber(skip) > slice {
+				continue
+			}
 		}
 		active = append(active, c)
 	}
 	return active
+}
+
+// sliceNumber разбирает "slice-N" (формат проверен загрузчиком).
+func (s Suite) sliceNumber(skip string) int {
+	number := strings.TrimPrefix(skip, "slice-")
+	value, err := strconv.Atoi(number)
+	if err != nil {
+		return 1 << 30
+	}
+	return value
 }
 
 // Skipped возвращает имена отложенных кейсов.
@@ -208,6 +226,9 @@ func parseCase(path string, line int, text string, registry *eval.ScorerRegistry
 	if strings.TrimSpace(raw.Speaker) == "" {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q без speaker", where, raw.Name)
 	}
+	if !strings.Contains(raw.Input, raw.Speaker) {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q: speaker %q не встречается в input (вход должен быть в формате «Имя: …» или содержать автора склейки)", where, raw.Name, raw.Speaker)
+	}
 	if raw.Role != "player" && raw.Role != "dm" {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q: role должен быть player или dm, получено %q", where, raw.Name, raw.Role)
 	}
@@ -220,7 +241,7 @@ func parseCase(path string, line int, text string, registry *eval.ScorerRegistry
 	if err := validateFault(raw.Fault); err != nil {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q: %w", where, raw.Name, err)
 	}
-	if raw.SkipUntil != "" && !strings.HasPrefix(raw.SkipUntil, "slice-") {
+	if raw.SkipUntil != "" && !skipUntilPattern.MatchString(raw.SkipUntil) {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q: skip_until должен быть вида slice-N, получено %q", where, raw.Name, raw.SkipUntil)
 	}
 
@@ -248,6 +269,28 @@ func parseCase(path string, line int, text string, registry *eval.ScorerRegistry
 
 // PostconditionTypes — типы постусловных проверок, которые поймёт слайс 7.
 var PostconditionTypes = []string{"day_summary"}
+
+// skipUntilPattern — формат отложенного кейса: только slice-<число>.
+var skipUntilPattern = regexp.MustCompile(`^slice-[0-9]+$`)
+
+// knownTools — реальные имена тулов набора (TS-тулы + chronicler-субагент
+// eve), которыми можно подменить результат через fault.
+var knownTools = map[string]bool{
+	"adjust_standing": true, "advance_day": true, "advance_time": true,
+	"append_campaign_summary": true, "append_key_event": true, "append_thread": true,
+	"chronicler": true, "combat": true, "complete_quest": true, "create_quest": true,
+	"finish_campaign": true, "get_character": true, "get_game_context": true,
+	"get_npc": true, "grant_character": true, "illustrate_scene": true,
+	"initiative": true, "invite_member": true, "level_up": true,
+	"list_campaigns": true, "list_ledger": true, "list_locations": true,
+	"list_npcs": true, "list_open_threads": true, "list_quests": true,
+	"list_world_state": true, "move_party": true, "read_day": true,
+	"record_world_change": true, "resolve_thread": true, "roll_dice": true,
+	"save_campaign": true, "save_character": true, "search_memory": true,
+	"set_weather": true, "skill_check": true, "start_campaign": true,
+	"update_character": true, "update_day_summary": true, "update_quest": true,
+	"upsert_faction": true, "upsert_location": true, "upsert_npc": true,
+}
 
 func validatePostconditions(items []Postcondition) error {
 	for _, item := range items {
@@ -282,6 +325,9 @@ func validateFault(fault *Fault) error {
 	}
 	if strings.TrimSpace(fault.Tool) == "" {
 		return fmt.Errorf("fault: не задан tool")
+	}
+	if !knownTools[fault.Tool] {
+		return fmt.Errorf("fault: неизвестный тул %q (нет в наборе)", fault.Tool)
 	}
 	if fault.Call < 1 {
 		return fmt.Errorf("fault: call должен быть >= 1, получено %d", fault.Call)
