@@ -192,3 +192,78 @@ func TestLoadErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadTelegramDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{"LLM_API_KEY": "k"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Telegram.Token != "" {
+		t.Errorf("токен без env = %q", cfg.Telegram.Token)
+	}
+	if cfg.Telegram.CoalesceMS != config.DefaultTelegramCoalesceMS {
+		t.Errorf("CoalesceMS = %d", cfg.Telegram.CoalesceMS)
+	}
+	if cfg.Telegram.ChatPerMinute != config.DefaultTelegramChatPerMinute ||
+		cfg.Telegram.UserPerMinute != config.DefaultTelegramUserPerMinute {
+		t.Errorf("лимиты = %+v", cfg.Telegram)
+	}
+	if cfg.Telegram.MaxUpdateBytes != config.DefaultTelegramMaxUpdateBytes ||
+		cfg.Telegram.PollTimeoutSeconds != config.DefaultTelegramPollTimeoutSeconds ||
+		cfg.Telegram.MaxAttachmentBytes != config.DefaultTelegramMaxAttachmentBytes {
+		t.Errorf("сетевые лимиты = %+v", cfg.Telegram)
+	}
+}
+
+func TestLoadTelegramOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{
+		"LLM_API_KEY":                      "k",
+		"TELEGRAM_BOT_TOKEN":               "123:abc",
+		"TELEGRAM_BOT_USERNAME":            "@dnd_bot",
+		"TELEGRAM_API_BASE_URL":            "http://localhost:8081/",
+		"TELEGRAM_COALESCE_MS":             "4000",
+		"TELEGRAM_RATE_LIMIT_CHAT_PER_MIN": "30",
+		"TELEGRAM_RATE_LIMIT_USER_PER_MIN": "5",
+		"TELEGRAM_MAX_UPDATE_BYTES":        "2048",
+		"TELEGRAM_POLL_TIMEOUT_SECONDS":    "10",
+		"TELEGRAM_MAX_ATTACHMENT_BYTES":    "1048576",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tg := cfg.Telegram
+	if tg.Token != "123:abc" || tg.BotUsername != "dnd_bot" || tg.APIBaseURL != "http://localhost:8081" {
+		t.Errorf("telegram = %+v", tg)
+	}
+	if tg.CoalesceMS != 4000 || tg.ChatPerMinute != 30 || tg.UserPerMinute != 5 ||
+		tg.MaxUpdateBytes != 2048 || tg.PollTimeoutSeconds != 10 || tg.MaxAttachmentBytes != 1048576 {
+		t.Errorf("telegram = %+v", tg)
+	}
+}
+
+func TestLoadTelegramValidation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct{ name, key, value string }{
+		{"окно склейки", "TELEGRAM_COALESCE_MS", "60001"},
+		{"чат-лимит", "TELEGRAM_RATE_LIMIT_CHAT_PER_MIN", "0"},
+		{"юзер-лимит", "TELEGRAM_RATE_LIMIT_USER_PER_MIN", "много"},
+		{"размер апдейта", "TELEGRAM_MAX_UPDATE_BYTES", "10"},
+		{"poll timeout", "TELEGRAM_POLL_TIMEOUT_SECONDS", "301"},
+		{"вложение", "TELEGRAM_MAX_ATTACHMENT_BYTES", "1"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := config.Load(envMap(map[string]string{"LLM_API_KEY": "k", tc.key: tc.value}))
+			if err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("ошибка = %v", err)
+			}
+		})
+	}
+}

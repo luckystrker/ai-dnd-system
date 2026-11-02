@@ -78,7 +78,7 @@ func TestQueueSerializesOneChat(t *testing.T) {
 
 	rec := newRecorder()
 	rec.setBlock(nil)
-	queue, err := NewQueue(QueueConfig{Window: 10 * time.Millisecond, Handler: rec.handle})
+	queue, err := NewQueue(QueueConfig{Window: 100 * time.Millisecond, Handler: rec.handle})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -58,6 +58,16 @@ type Config struct {
 	Model   agoconfig.ModelConfig
 	Store   *store.Store
 	Session *tools.Session
+	// SessionFunc задаёт сессию на каждый ход: в Telegram один DM-агент
+	// обслуживает чат, а говорящий (и кампания) меняются от сообщения к
+	// сообщению. nil — используется Session.
+	SessionFunc func() *tools.Session
+	// Stream — durable-поток истории чата (SQLite-хранилище в бою). nil —
+	// in-memory поток, история живёт только в процессе.
+	Stream stream.Stream
+	// OnToolActivity вызывается в начале хода и перед каждым вызовом тула:
+	// канал показывает по нему «печатает…». nil — без индикатора.
+	OnToolActivity func()
 	// ToolDeps разделяется с летописцем (Random, Dice, CombatLocks).
 	ToolDeps tools.Deps
 	// DayCloser — очередь закрытия дня. nil — advance_day только сдвигает день.
@@ -79,13 +89,13 @@ type Config struct {
 
 // DM — собранный агент одного чата: свой stream, свой token monitor.
 type DM struct {
-	agent   *agent.Agent
-	monitor *observers.TokenMonitor
-	timeout time.Duration
-	log     *slog.Logger
-	cleanup func()
-	session *tools.Session
-	stream  stream.Stream
+	agent     *agent.Agent
+	monitor   *observers.TokenMonitor
+	timeout   time.Duration
+	log       *slog.Logger
+	cleanup   func()
+	sessionFn func() *tools.Session
+	stream    stream.Stream
 }
 
 // New собирает DM-агента.
@@ -116,6 +126,13 @@ func New(cfg Config) (*DM, error) {
 	session := cfg.Session
 	if session == nil {
 		session = &tools.Session{}
+	}
+	sessionFn := cfg.SessionFunc
+	if sessionFn == nil {
+		sessionFn = func() *tools.Session { return session }
+	}
+	if current := sessionFn(); current != nil {
+		session = current
 	}
 
 	agentTools := make([]agotools.Tool, 0, 2+len(cfg.ExtraTools))
@@ -152,7 +169,10 @@ func New(cfg Config) (*DM, error) {
 		return nil, fmt.Errorf("dm: model client: %w", err)
 	}
 
-	conversation := stream.NewMemoryStream()
+	conversation := cfg.Stream
+	if conversation == nil {
+		conversation = stream.NewMemoryStream()
+	}
 	cx := agocontext.New(conversation)
 	monitor := observers.NewTokenMonitor(budget)
 	if err := monitor.Register(cx); err != nil {
@@ -170,6 +190,11 @@ func New(cfg Config) (*DM, error) {
 		agent.WithDependencies(map[string]any{sessionDepKey: session}),
 		agent.WithStreamBase(conversation),
 		agent.WithMiddleware(
+			// Сессия (говорящий/кампания) обновляется в начале каждого хода:
+			// один DM обслуживает весь чат, а автор сообщения меняется.
+			func() middleware.Middleware { return sessionMiddleware{sessionFn: sessionFn} },
+			// Индикатор «печатает…» на старте хода и перед вызовами тулов.
+			func() middleware.Middleware { return activityMiddleware{fn: cfg.OnToolActivity} },
 			// Бюджет токенов — на ход: сбрасываем счётчик до первого вызова
 			// модели этого хода.
 			func() middleware.Middleware { return budgetReset{monitor: monitor} },
@@ -187,7 +212,7 @@ func New(cfg Config) (*DM, error) {
 	a := agent.New("dm", instructions, agentOpts...)
 	return &DM{
 		agent: a, monitor: monitor, timeout: timeout, log: logger, cleanup: cleanup,
-		session: session, stream: conversation,
+		sessionFn: sessionFn, stream: conversation,
 	}, nil
 }
 
@@ -259,10 +284,20 @@ func (d *DM) Monitor() *observers.TokenMonitor { return d.monitor }
 // ошибка модели) превращаются в нейтральный ответ игрокам; диагностика
 // уходит в лог, результаты тулов и записи в БД остаются как есть.
 func (d *DM) Ask(ctx context.Context, text string) (string, error) {
+	return d.AskInputs(ctx, events.TextInput{Content: text})
+}
+
+// AskInputs выполняет ход с произвольными частями ввода: текст сообщения и
+// вложения (BinaryInput) после getFile.
+func (d *DM) AskInputs(ctx context.Context, parts ...events.Input) (string, error) {
 	started := time.Now()
 	runCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	reply, err := d.agent.Ask(runCtx, text)
+	msgs := make([]agent.Sendable, len(parts))
+	for index, part := range parts {
+		msgs[index] = part
+	}
+	reply, err := d.agent.Ask(runCtx, msgs...)
 	if err != nil {
 		switch {
 		case errors.Is(err, agent.ErrMaxToolRounds):
@@ -290,8 +325,10 @@ func (d *DM) Ask(ctx context.Context, text string) (string, error) {
 // число событий хода и последние вызванные тулы. Игрокам это не показывается.
 func (d *DM) failureFields(err error, started time.Time) []any {
 	fields := []any{"error", err, "duration", time.Since(started)}
-	if d.session != nil && d.session.ChatID != "" {
-		fields = append(fields, "chat", d.session.ChatID)
+	if d.sessionFn != nil {
+		if session := d.sessionFn(); session != nil && session.ChatID != "" {
+			fields = append(fields, "chat", session.ChatID)
+		}
 	}
 	if d.stream == nil {
 		return fields

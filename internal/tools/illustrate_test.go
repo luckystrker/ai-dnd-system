@@ -118,7 +118,7 @@ func TestIllustrateScene(t *testing.T) {
 	env.deps.Images = generator
 	env.deps.Poster = poster
 
-	result, err := env.deps.illustrateScene(env.player, illustrateArgs{
+	result, err := env.deps.illustrateScene(context.Background(), env.player, illustrateArgs{
 		SceneDescription: "A dark tavern", Characters: []string{"Ария"},
 	})
 	if err != nil {
@@ -141,11 +141,11 @@ func TestIllustrateScene(t *testing.T) {
 func TestIllustrateSceneUnavailable(t *testing.T) {
 	env := newTestEnv(t)
 
-	_, err := env.deps.illustrateScene(env.player, illustrateArgs{SceneDescription: "x"})
+	_, err := env.deps.illustrateScene(context.Background(), env.player, illustrateArgs{SceneDescription: "x"})
 	wantToolCode(t, err, CodeUnavailable)
 
 	env.deps.Images = &fakeGenerator{url: "x"}
-	_, err = env.deps.illustrateScene(env.player, illustrateArgs{SceneDescription: "x"})
+	_, err = env.deps.illustrateScene(context.Background(), env.player, illustrateArgs{SceneDescription: "x"})
 	wantToolCode(t, err, CodeUnavailable) // нет poster
 
 	other, err := env.store.CreateCampaign(store.NewCampaignInput{
@@ -155,6 +155,6 @@ func TestIllustrateSceneUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := &Session{CampaignID: other.ID, CampaignSlug: other.Slug, UserID: "u-dm"}
-	_, err = env.deps.illustrateScene(session, illustrateArgs{SceneDescription: "x"})
+	_, err = env.deps.illustrateScene(context.Background(), session, illustrateArgs{SceneDescription: "x"})
 	wantToolCode(t, err, CodeUnavailable)
 }

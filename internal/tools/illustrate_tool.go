@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	agocontext "github.com/luckystrker/ago/context"
 	agotools "github.com/luckystrker/ago/tools"
 )
 
@@ -12,7 +13,16 @@ const telegramCaptionMaxLength = 1024
 func illustrateTool(d Deps) (*agotools.FunctionTool, error) {
 	return tool("illustrate_scene",
 		"Generate an illustration of the current scene and post it to the campaign chat. Works only inside a chat with an active campaign. Call it when a significant new scene begins. Describe the scene in English. If it fails, just continue narrating in text and do not mention the failure.",
-		func(args illustrateArgs) (any, error) { return d.illustrateScene(args.Session, args) })
+		func(args illustrateArgs, cx *agocontext.Context) (any, error) {
+			// Контекст хода, а не Background: дедлайн/отмена хода должны
+			// доходить до Runware и отправки в чат, иначе тул доставит
+			// картинку после нейтрального ответа игрокам.
+			ctx := context.Background()
+			if cx != nil {
+				ctx = cx.TurnContext()
+			}
+			return d.illustrateScene(ctx, args.Session, args)
+		})
 }
 
 type illustrateArgs struct {
@@ -21,7 +31,7 @@ type illustrateArgs struct {
 	Session          *Session `json:"-" aginject:"ttrpg.session"`
 }
 
-func (d Deps) illustrateScene(sess *Session, args illustrateArgs) (any, error) {
+func (d Deps) illustrateScene(ctx context.Context, sess *Session, args illustrateArgs) (any, error) {
 	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
@@ -44,7 +54,7 @@ func (d Deps) illustrateScene(sess *Session, args illustrateArgs) (any, error) {
 		Setting:          campaign.Setting,
 		Theme:            campaign.Theme,
 	})
-	imageURL, err := d.Images.Generate(context.Background(), prompt)
+	imageURL, err := d.Images.Generate(ctx, prompt)
 	if err != nil {
 		log.Printf("tools: illustrate_scene: generation failed for campaign %s: %v", campaign.ID, err)
 		return nil, errUnavailable("Не получилось сгенерировать картинку. Продолжи сцену текстом.",
@@ -55,7 +65,7 @@ func (d Deps) illustrateScene(sess *Session, args illustrateArgs) (any, error) {
 			"The Telegram image poster is not wired yet; continue in text.")
 	}
 	caption := truncateRunes(args.SceneDescription, telegramCaptionMaxLength)
-	if err := d.Poster.PostImage(context.Background(), campaign.BoundChat.ChatID, campaign.BoundChat.MessageThreadID, imageURL, caption); err != nil {
+	if err := d.Poster.PostImage(ctx, campaign.BoundChat.ChatID, campaign.BoundChat.MessageThreadID, imageURL, caption); err != nil {
 		log.Printf("tools: illustrate_scene: post failed for campaign %s: %v", campaign.ID, err)
 		return nil, errUnavailable("Картинка сгенерирована но отправить её в чат не вышло. Продолжи текстом.",
 			"Continue the scene in text; the image URL is available in the result.")

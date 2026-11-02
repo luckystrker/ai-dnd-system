@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1047,5 +1048,180 @@ func TestSafeCompactionKeepsTurnResult(t *testing.T) {
 	}
 	if resp == nil || resp.Content() != "готовый ответ" {
 		t.Fatalf("ответ потерян: %+v", resp)
+	}
+}
+
+// Сессия обновляется в начале каждого хода: один DM обслуживает чат, а
+// говорящий меняется. Транскрипт должен записать обоих авторов.
+func TestSessionFuncSwitchesSpeakerPerTurn(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	var current = playerSession(campaign)
+	cfg := agotest.NewTestConfig(plain("Первый"), plain("Второй"))
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign),
+		SessionFunc: func() *ttrpg.Session { return current },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "ход Дэна"); err != nil {
+		t.Fatalf("Ask 1: %v", err)
+	}
+	current = &ttrpg.Session{
+		CampaignID: campaign.ID, CampaignSlug: campaign.Slug,
+		UserID: "dm-1", Username: "dm", ChatID: "-100", ChatType: "supergroup",
+	}
+	if _, err := d.Ask(context.Background(), "ход ведущего"); err != nil {
+		t.Fatalf("Ask 2: %v", err)
+	}
+	day, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	joined := strings.Join(day.Entries, "\n")
+	if !strings.Contains(joined, "Игрок @den") || !strings.Contains(joined, "Игрок @dm") {
+		t.Fatalf("смена говорящего не попала в транскрипт:\n%s", joined)
+	}
+}
+
+// История ходов на stream.Storage переживает пересборку агента: новый DM на
+// том же потоке видит предыдущий разговор.
+func TestDurableStreamKeepsHistoryAcrossRebuild(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	storage := store.NewEventStreamStorage(st)
+	cfg := agotest.NewTestConfig(plain("Первый ответ"), plain("Второй ответ"))
+
+	open := func() *DM {
+		t.Helper()
+		conversation := stream.NewMemoryStream(
+			stream.WithStreamID("tg:-100:"), stream.WithStorage(storage),
+		)
+		d, err := New(Config{
+			Model: cfg, Store: st, Session: playerSession(campaign), Stream: conversation,
+			SkipToolkit: true,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return d
+	}
+	first := open()
+	if _, err := first.Ask(context.Background(), "Иду к двери"); err != nil {
+		t.Fatalf("Ask 1: %v", err)
+	}
+	_ = first.Close()
+
+	second := open()
+	defer func() { _ = second.Close() }()
+	history, err := second.stream.History().GetEvents()
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("durable-история не загрузилась в новый агент")
+	}
+	if _, err := second.Ask(context.Background(), "Открываю дверь"); err != nil {
+		t.Fatalf("Ask 2: %v", err)
+	}
+	calls := cfg.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("вызовов модели = %d", len(calls))
+	}
+	rendered := ""
+	for _, snapshot := range calls[1] {
+		rendered += events.RenderForPrompt(snapshot) + "\n"
+	}
+	if !strings.Contains(rendered, "Иду к двери") || !strings.Contains(rendered, "Первый ответ") {
+		t.Fatalf("второй ход не видит предыдущий разговор:\n%s", rendered)
+	}
+}
+
+// Индикатор набора вызывается на старте хода и перед вызовом тула.
+func TestActivityCallbackOnTurnAndTool(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	tick, err := tools.NewFunctionTool("tick", "Ticks", func(args struct{}) (string, error) {
+		return "tock", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := agotest.NewTestConfig(toolCall("c1", "tick", `{}`), plain("Готово"))
+	var count int32
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign),
+		SkipToolkit: true, ExtraTools: []tools.Tool{tick},
+		OnToolActivity: func() { atomic.AddInt32(&count, 1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "играем"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if got := atomic.LoadInt32(&count); got < 2 {
+		t.Fatalf("индикатор вызван %d раз, want ≥2", got)
+	}
+}
+
+type turnCtxKey struct{}
+
+type turnCtxGenerator struct {
+	seen context.Context
+	url  string
+}
+
+func (g *turnCtxGenerator) Generate(ctx context.Context, _ string) (string, error) {
+	g.seen = ctx
+	return g.url, nil
+}
+
+type turnCtxPoster struct{ seen context.Context }
+
+func (p *turnCtxPoster) PostImage(ctx context.Context, _ string, _ *int, _, _ string) error {
+	p.seen = ctx
+	return nil
+}
+
+// illustrate_scene получает контекст хода (дедлайн/отмену), а не
+// context.Background(): иначе картинка может уйти после нейтрального ответа.
+func TestIllustrateSceneGetsTurnContext(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	generator := &turnCtxGenerator{url: "https://img.example/x.png"}
+	poster := &turnCtxPoster{}
+	cfg := agotest.NewTestConfig(
+		toolCall("i1", "illustrate_scene", `{"sceneDescription":"A dark tavern"}`),
+		plain("Готово"),
+	)
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign),
+		ToolDeps: ttrpg.Deps{Images: generator, Poster: poster},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	ctx := context.WithValue(context.Background(), turnCtxKey{}, "token")
+	if _, err := d.Ask(ctx, "рисуй"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if generator.seen == nil || generator.seen.Value(turnCtxKey{}) != "token" {
+		t.Fatalf("генератор не получил контекст хода: %v", generator.seen)
+	}
+	if poster.seen == nil || poster.seen.Value(turnCtxKey{}) != "token" {
+		t.Fatalf("постер не получил контекст хода: %v", poster.seen)
 	}
 }

@@ -40,7 +40,39 @@ const (
 	// DefaultDayCloseBackfillDays — окно последних закрытых дней, которые
 	// закрывает летописец; более старые дни — только fallback-дайджест.
 	DefaultDayCloseBackfillDays = 2
+
+	// DefaultTelegramCoalesceMS — окно склейки сообщений чата. 2.5 с:
+	// типичный интервал между двумя репликами одного игрока — 1–3 с,
+	// задержка ответа остаётся в пределах восприятия.
+	DefaultTelegramCoalesceMS = 2500
+
+	// DefaultTelegramChatPerMinute / DefaultTelegramUserPerMinute — те же
+	// лимиты, что TELEGRAM_RATE_LIMITS в TS.
+	DefaultTelegramChatPerMinute = 20
+	DefaultTelegramUserPerMinute = 10
+
+	// DefaultTelegramMaxUpdateBytes — защита от аномальных payload.
+	DefaultTelegramMaxUpdateBytes = 1024 * 1024
+
+	// DefaultTelegramPollTimeoutSeconds — long-poll getUpdates.
+	DefaultTelegramPollTimeoutSeconds = 50
+
+	// DefaultTelegramMaxAttachmentBytes — политика вложений TS: 25 МБ.
+	DefaultTelegramMaxAttachmentBytes int64 = 25 * 1024 * 1024
 )
+
+// Telegram — настройки канала (слайс 6). Пустой Token — режим repl.
+type Telegram struct {
+	Token              string
+	BotUsername        string
+	APIBaseURL         string
+	CoalesceMS         int
+	ChatPerMinute      int
+	UserPerMinute      int
+	MaxUpdateBytes     int
+	PollTimeoutSeconds int
+	MaxAttachmentBytes int64
+}
 
 // Config — вся конфигурация процесса бота.
 type Config struct {
@@ -52,6 +84,7 @@ type Config struct {
 	TokenBudget          int64
 	DayCloseBackfillMax  int
 	DayCloseBackfillDays int
+	Telegram             Telegram
 }
 
 // Load читает переменные окружения через getenv (подменяется в тестах).
@@ -73,6 +106,15 @@ type Config struct {
 //	DAYCLOSE_BACKFILL_DAYS окно последних закрытых дней для летописца
 //	                     (1..30, по умолчанию 2); старше — только дайджест
 //	CAMPAIGN_DB_PATH     путь к SQLite-базе кампаний (по умолчанию data/campaigns.db)
+//	TELEGRAM_BOT_TOKEN   токен бота; без него запускается локальный repl
+//	TELEGRAM_BOT_USERNAME username бота без @ (для @упоминаний и команд)
+//	TELEGRAM_API_BASE_URL корень Bot API (по умолчанию https://api.telegram.org)
+//	TELEGRAM_COALESCE_MS окно склейки сообщений чата, 1..60000 (по умолчанию 2500)
+//	TELEGRAM_RATE_LIMIT_CHAT_PER_MIN сообщений чата в минуту (по умолчанию 20)
+//	TELEGRAM_RATE_LIMIT_USER_PER_MIN сообщений игрока в минуту (по умолчанию 10)
+//	TELEGRAM_MAX_UPDATE_BYTES предел размера апдейта (по умолчанию 1 МБ)
+//	TELEGRAM_POLL_TIMEOUT_SECONDS long-poll getUpdates, 1..300 (по умолчанию 50)
+//	TELEGRAM_MAX_ATTACHMENT_BYTES предел скачиваемого вложения (25 МБ)
 func Load(getenv func(string) string) (Config, error) {
 	spec, err := llm.Lookup(getenv("LLM_PROVIDER"))
 	if err != nil {
@@ -144,6 +186,11 @@ func Load(getenv func(string) string) (Config, error) {
 		backfillDays = parsed
 	}
 
+	telegram, err := loadTelegram(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		LLM: llm.Settings{
 			Provider: spec.Provider,
@@ -158,5 +205,56 @@ func Load(getenv func(string) string) (Config, error) {
 		TokenBudget:          tokenBudget,
 		DayCloseBackfillMax:  backfillMax,
 		DayCloseBackfillDays: backfillDays,
+		Telegram:             telegram,
 	}, nil
+}
+
+// loadTelegram читает настройки канала; отсутствие токена — не ошибка
+// (локальный repl без сети).
+func loadTelegram(getenv func(string) string) (Telegram, error) {
+	settings := Telegram{
+		Token:              strings.TrimSpace(getenv("TELEGRAM_BOT_TOKEN")),
+		BotUsername:        strings.TrimLeft(strings.TrimSpace(getenv("TELEGRAM_BOT_USERNAME")), "@"),
+		APIBaseURL:         strings.TrimRight(strings.TrimSpace(getenv("TELEGRAM_API_BASE_URL")), "/"),
+		CoalesceMS:         DefaultTelegramCoalesceMS,
+		ChatPerMinute:      DefaultTelegramChatPerMinute,
+		UserPerMinute:      DefaultTelegramUserPerMinute,
+		MaxUpdateBytes:     DefaultTelegramMaxUpdateBytes,
+		PollTimeoutSeconds: DefaultTelegramPollTimeoutSeconds,
+		MaxAttachmentBytes: DefaultTelegramMaxAttachmentBytes,
+	}
+	readInt := func(name string, fallback, min, max int) (int, error) {
+		raw := strings.TrimSpace(getenv(name))
+		if raw == "" {
+			return fallback, nil
+		}
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < min || parsed > max {
+			return 0, fmt.Errorf("%s: ожидается целое %d..%d, получено %q", name, min, max, raw)
+		}
+		return parsed, nil
+	}
+	var err error
+	if settings.CoalesceMS, err = readInt("TELEGRAM_COALESCE_MS", settings.CoalesceMS, 1, 60000); err != nil {
+		return Telegram{}, err
+	}
+	if settings.ChatPerMinute, err = readInt("TELEGRAM_RATE_LIMIT_CHAT_PER_MIN", settings.ChatPerMinute, 1, 100000); err != nil {
+		return Telegram{}, err
+	}
+	if settings.UserPerMinute, err = readInt("TELEGRAM_RATE_LIMIT_USER_PER_MIN", settings.UserPerMinute, 1, 100000); err != nil {
+		return Telegram{}, err
+	}
+	if settings.MaxUpdateBytes, err = readInt("TELEGRAM_MAX_UPDATE_BYTES", settings.MaxUpdateBytes, 1024, 64*1024*1024); err != nil {
+		return Telegram{}, err
+	}
+	if settings.PollTimeoutSeconds, err = readInt("TELEGRAM_POLL_TIMEOUT_SECONDS", settings.PollTimeoutSeconds, 1, 300); err != nil {
+		return Telegram{}, err
+	}
+	attachmentDefault := int(DefaultTelegramMaxAttachmentBytes)
+	attachmentBytes, err := readInt("TELEGRAM_MAX_ATTACHMENT_BYTES", attachmentDefault, 1024, 2*1024*1024*1024)
+	if err != nil {
+		return Telegram{}, err
+	}
+	settings.MaxAttachmentBytes = int64(attachmentBytes)
+	return settings, nil
 }

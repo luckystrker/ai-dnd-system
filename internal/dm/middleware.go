@@ -20,6 +20,45 @@ import (
 
 const sessionDepKey = "ttrpg.session"
 
+// sessionMiddleware обновляет сессию в DI в начале каждого хода: один
+// DM-агент обслуживает весь чат, а говорящий меняется от сообщения к
+// сообщению. Самая внешняя middleware — транскрипт и память должны видеть
+// уже актуальную сессию.
+type sessionMiddleware struct {
+	middleware.Base
+	sessionFn func() *tools.Session
+}
+
+func (s sessionMiddleware) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
+	if cx != nil && s.sessionFn != nil {
+		if session := s.sessionFn(); session != nil {
+			cx.SetDependency(sessionDepKey, session)
+		}
+	}
+	return next(ev, cx)
+}
+
+// activityMiddleware показывает «печатает…» на старте хода и перед каждым
+// вызовом тула: ход с несколькими раундами может идти минутами.
+type activityMiddleware struct {
+	middleware.Base
+	fn func()
+}
+
+func (a activityMiddleware) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
+	if a.fn != nil {
+		a.fn()
+	}
+	return next(ev, cx)
+}
+
+func (a activityMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
+	if a.fn != nil {
+		a.fn()
+	}
+	return next(ev, cx)
+}
+
 // memoryPolicy собирает блок памяти кампании и вставляет его в хвост
 // контекста — прямо перед последним сообщением пользователя. Системный
 // префикс (PromptLines) при этом не меняется, поэтому кэш промпта между
