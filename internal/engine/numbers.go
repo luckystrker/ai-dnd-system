@@ -10,6 +10,7 @@ import (
 // integerValue — строгое число для десериализации снимка: как
 // `typeof v === "number"` в TS. Строки, bool и null не принимаются
 // (в отличие от numericValue, который приводит значения листа).
+// Дробные значения усекаются — движок сам пишет только целые.
 func integerValue(value any) (int, bool) {
 	switch v := value.(type) {
 	case float64:
@@ -36,13 +37,15 @@ func integerValue(value any) (int, bool) {
 
 // numericValue приводит значение из JSON/листа к числу так же, как
 // `typeof v === "number" ? v : Number(v)` в TS: строки парсятся, пустая
-// строка/null дают 0, нечисловая строка — отказ.
+// строка/null дают 0, нечисловая строка — отказ. Как Number.isFinite в TS,
+// ±Inf и NaN отклоняются. Отличие: шестнадцатеричные строки вроде "0x10"
+// TS понимает (16), Go ParseFloat — нет; листы кампаний их не содержат.
 func numericValue(value any) (float64, bool) {
 	switch v := value.(type) {
 	case float64:
-		return v, !math.IsNaN(v)
+		return finite(v)
 	case float32:
-		return float64(v), !math.IsNaN(float64(v))
+		return finite(float64(v))
 	case int:
 		return float64(v), true
 	case int8:
@@ -68,7 +71,7 @@ func numericValue(value any) (float64, bool) {
 		if err != nil {
 			return 0, false
 		}
-		return parsed, true
+		return finite(parsed)
 	case string:
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -78,7 +81,7 @@ func numericValue(value any) (float64, bool) {
 		if err != nil {
 			return 0, false
 		}
-		return parsed, true
+		return finite(parsed)
 	case bool:
 		if v {
 			return 1, true
@@ -89,4 +92,12 @@ func numericValue(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// finite отбрасывает ±Inf и NaN — как Number.isFinite в TS.
+func finite(value float64) (float64, bool) {
+	if math.IsInf(value, 0) || math.IsNaN(value) {
+		return 0, false
+	}
+	return value, true
 }

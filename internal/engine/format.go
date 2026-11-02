@@ -70,7 +70,8 @@ var abilityLabels = map[string]string{
 
 // FormatSkillCheck — ответ skill_check (execute из TS): полная расшифровка
 // броска, тег преимущества, нат 20/1, примечания об отсутствии характеристик
-// и окружении.
+// и окружении. advantage — ЭФФЕКТИВНОЕ значение после CombineAdvantage
+// (TS формирует тег именно из него).
 func FormatSkillCheck(character, skill string, result CheckResult, advantage *bool, statsFound bool, envReasons []string) string {
 	abilityLabel, ok := abilityLabels[result.Ability]
 	if !ok {
@@ -143,4 +144,27 @@ func joinInts(values []int) string {
 		parts = append(parts, fmt.Sprintf("%d", value))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// FormatRollError — ответ roll_dice при ошибке парсинга (catch из TS).
+func FormatRollError(notation string, err error) string {
+	return fmt.Sprintf("Не удалось разобрать бросок «%s»: %v", notation, err)
+}
+
+// FormatInitiative — полный ответ initiative-тула: заголовок, строки
+// участников и хвост с первым ходом (без участников — короткий хвост).
+//
+// Строки атаки combat-тула («d20 = N + бонус против КД X») появятся в
+// слайсе 4 вместе с самим тулом; их контракт закрепит format-тест тула.
+func FormatInitiative(entries []CombatantEntry) string {
+	lines := make([]string, 0, len(entries))
+	for index, entry := range entries {
+		lines = append(lines, FormatInitiativeLine(index, entry))
+	}
+	started := "Бой начат, раунд 1."
+	if len(entries) > 0 {
+		first := entries[0]
+		started = fmt.Sprintf("Бой начат, раунд 1. Первый ход: %s (%s). Используй id в combat.", first.Name, first.ID)
+	}
+	return "Инициатива:\n" + strings.Join(lines, "\n") + "\n" + started
 }

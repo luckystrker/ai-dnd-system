@@ -52,6 +52,27 @@ func TestRollInitiative(t *testing.T) {
 		}
 	})
 
+	t.Run("ничьи как localeCompare: регистр, ё и латиница", func(t *testing.T) {
+		cases := []struct {
+			names []string
+			want  []string
+		}{
+			{[]string{"Гном", "волк"}, []string{"волк", "Гном"}},
+			{[]string{"яма", "ёж"}, []string{"ёж", "яма"}},
+			{[]string{"Orc", "goblin"}, []string{"goblin", "Orc"}},
+			{[]string{"Волк", "волк"}, []string{"волк", "Волк"}},
+		}
+		for _, tc := range cases {
+			order := RollInitiative([]CombatantInput{
+				{Name: tc.names[0], Side: SideParty},
+				{Name: tc.names[1], Side: SideParty},
+			}, initiativeSequence(10, 10))
+			if order[0].Name != tc.want[0] || order[1].Name != tc.want[1] {
+				t.Errorf("имена %v: порядок %v, want %v", tc.names, []string{order[0].Name, order[1].Name}, tc.want)
+			}
+		}
+	})
+
 	t.Run("генерирует slug-id из имени", func(t *testing.T) {
 		order := RollInitiative([]CombatantInput{
 			{Name: "Гоблин Воин", Side: SideEnemy, HP: ptr(10), AC: ptr(12)},
@@ -62,15 +83,28 @@ func TestRollInitiative(t *testing.T) {
 	})
 
 	t.Run("дедуплицирует одинаковые slug-id суффиксами", func(t *testing.T) {
+		// Разные броски дают однозначный порядок: 15, 10, 5 — id должны
+		// достаться участникам в порядке ввода (гоблин, -2, -3).
 		order := RollInitiative([]CombatantInput{
 			{Name: "Гоблин", Side: SideEnemy, HP: ptr(7), AC: ptr(12)},
 			{Name: "гоблин", Side: SideEnemy, HP: ptr(7), AC: ptr(12)},
 			{Name: "ГОБЛИН", Side: SideEnemy, HP: ptr(7), AC: ptr(12)},
-		}, initiativeSequence(5, 5, 5))
-		ids := []string{order[0].ID, order[1].ID, order[2].ID}
-		sortStrings(ids)
-		if !reflect.DeepEqual(ids, []string{"гоблин", "гоблин-2", "гоблин-3"}) {
-			t.Fatalf("ids = %v", ids)
+		}, initiativeSequence(5, 15, 10))
+		if order[0].ID != "гоблин-2" || order[1].ID != "гоблин-3" || order[2].ID != "гоблин" {
+			t.Fatalf("ids по порядку ходов = %q, %q, %q", order[0].ID, order[1].ID, order[2].ID)
+		}
+	})
+
+	t.Run("slugify: NBSP и Unicode-цифры", func(t *testing.T) {
+		order := RollInitiative([]CombatantInput{
+			{Name: "Гоблин\u00a0Воин", Side: SideEnemy, HP: ptr(7), AC: ptr(12)},
+			{Name: "Гоблин ²", Side: SideEnemy, HP: ptr(7), AC: ptr(12)},
+		}, initiativeSequence(10, 5))
+		if order[0].ID != "гоблин-воин" {
+			t.Errorf("NBSP: id = %q", order[0].ID)
+		}
+		if order[1].ID != "гоблин-²" {
+			t.Errorf("²: id = %q", order[1].ID)
 		}
 	})
 
@@ -82,14 +116,6 @@ func TestRollInitiative(t *testing.T) {
 			t.Fatalf("id = %q", order[0].ID)
 		}
 	})
-}
-
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
 }
 
 func sampleOrder() CombatOrder {
@@ -165,6 +191,15 @@ func TestNextCombatant(t *testing.T) {
 		next := NextCombatant(EmptyCombatOrder(), func(CombatantEntry) bool { return true })
 		if next.Current != -1 || next.Started {
 			t.Fatalf("получено %+v", next)
+		}
+	})
+
+	t.Run("испорченный current не паникует", func(t *testing.T) {
+		broken := order
+		broken.Current = -5
+		next := NextCombatant(broken, func(CombatantEntry) bool { return true })
+		if next.Current < 0 || next.Current >= len(next.Order) {
+			t.Fatalf("current = %d", next.Current)
 		}
 	})
 
@@ -296,5 +331,21 @@ func TestDeserializeCombatRejectsGarbage(t *testing.T) {
 		"order": []any{map[string]any{"id": ""}},
 	}); ok {
 		t.Error("битый участник должен отклонять весь порядок")
+	}
+
+	validEntry := map[string]any{"id": "dan", "name": "Дэн", "side": "party", "bonus": 0.0, "roll": 10.0, "total": 10.0}
+	for _, current := range []float64{-5, -2, 1, 99} {
+		if _, ok := DeserializeCombatOrder(map[string]any{
+			"started": true, "round": 1.0, "current": current, "acted": false,
+			"order": []any{validEntry},
+		}); ok {
+			t.Errorf("current=%v должен отклоняться", current)
+		}
+	}
+	// Пустой порядок допускает только current=-1.
+	if _, ok := DeserializeCombatOrder(map[string]any{
+		"started": false, "round": 1.0, "current": -1.0, "acted": false, "order": []any{},
+	}); !ok {
+		t.Error("пустой порядок с current=-1 должен приниматься")
 	}
 }

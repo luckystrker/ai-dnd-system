@@ -220,15 +220,15 @@ var (
 func ParseDiceNotation(spec string) (ParsedNotation, error) {
 	normalized := strings.ToLower(strings.Join(strings.Fields(spec), ""))
 	if normalized == "" {
-		return ParsedNotation{}, fmt.Errorf("Пустая нотация броска «%s». Пример: «2d6+1d8+3»", spec)
+		return ParsedNotation{}, fmt.Errorf("Пустая нотация броска «%s». Пример: «2d6+1d8+3».", spec)
 	}
 	if !notationAllowed.MatchString(normalized) {
-		return ParsedNotation{}, fmt.Errorf("Недопустимые символы в нотации «%s». Допускаются цифры, d, +, -, kh/kl/dh/dl, !", spec)
+		return ParsedNotation{}, fmt.Errorf("Недопустимые символы в нотации «%s». Допускаются цифры, d, +, -, kh/kl/dh/dl, !.", spec)
 	}
 
 	terms := notationTerm.FindAllString(normalized, -1)
 	if len(terms) == 0 || strings.Join(terms, "") != normalized {
-		return ParsedNotation{}, fmt.Errorf("Неправильная нотация броска «%s». Пример: «2d6+1d8+3»", spec)
+		return ParsedNotation{}, fmt.Errorf("Неправильная нотация броска «%s». Пример: «2d6+1d8+3».", spec)
 	}
 
 	parsed := ParsedNotation{}

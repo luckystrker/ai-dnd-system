@@ -61,15 +61,13 @@ func EmptyCombatOrder() CombatOrder {
 	return CombatOrder{Started: false, Round: 1, Current: -1, Acted: false, Order: []CombatantEntry{}}
 }
 
-var whitespacePattern = regexp.MustCompile(`\s+`)
-
-// slugify превращает имя в id: нижний регистр, пробелы → дефисы, только
-// буквы/цифры/дефис.
+// slugify превращает имя в id: нижний регистр, пробелы (включая NBSP и
+// другие Unicode-пробелы) → дефисы, остаются буквы, цифры и дефис.
 func slugify(name string) string {
-	slug := whitespacePattern.ReplaceAllString(strings.ToLower(strings.TrimSpace(name)), "-")
+	slug := strings.Join(strings.Fields(strings.ToLower(name)), "-")
 	var builder strings.Builder
 	for _, r := range slug {
-		if r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if r == '-' || unicode.IsLetter(r) || unicode.IsNumber(r) {
 			builder.WriteRune(r)
 		}
 	}
@@ -79,8 +77,42 @@ func slugify(name string) string {
 	return builder.String()
 }
 
+// compareNames — приближение localeCompare без зависимости x/text: сравнение
+// регистронезависимое (ё приравнивается к е), при равенстве строчная буква
+// идёт раньше заглавной. Для реальных имён кампании совпадает с ICU
+// («волк» < «Гном», «ёж» < «яма», «goblin» < «Orc»).
+func compareNames(a, b string) int {
+	foldedA, foldedB := foldName(a), foldName(b)
+	if foldedA != foldedB {
+		return strings.Compare(foldedA, foldedB)
+	}
+	runesA, runesB := []rune(a), []rune(b)
+	for i := 0; i < len(runesA) && i < len(runesB); i++ {
+		if runesA[i] == runesB[i] {
+			continue
+		}
+		lowerA, lowerB := unicode.IsLower(runesA[i]), unicode.IsLower(runesB[i])
+		if lowerA != lowerB {
+			if lowerA {
+				return -1
+			}
+			return 1
+		}
+		if runesA[i] < runesB[i] {
+			return -1
+		}
+		return 1
+	}
+	return len(runesA) - len(runesB)
+}
+
+func foldName(value string) string {
+	return strings.ReplaceAll(strings.ToLower(value), "ё", "е")
+}
+
 // RollInitiative бросает инициативу каждому участнику и сортирует по убыванию
-// (ничьи — по имени). Одинаковые slug-id дедуплицируются суффиксами -2, -3, ...
+// (ничьи — по имени, приближение localeCompare: без учёта регистра и ё).
+// Одинаковые slug-id дедуплицируются суффиксами -2, -3, ...
 func RollInitiative(combatants []CombatantInput, random RandomSource) []CombatantEntry {
 	source := randomOr(random)
 	usedIDs := make(map[string]bool, len(combatants))
@@ -117,7 +149,7 @@ func RollInitiative(combatants []CombatantInput, random RandomSource) []Combatan
 		if entries[a].Total != entries[b].Total {
 			return entries[a].Total > entries[b].Total
 		}
-		return entries[a].Name < entries[b].Name
+		return compareNames(entries[a].Name, entries[b].Name) < 0
 	})
 	return entries
 }
@@ -131,7 +163,9 @@ func NextCombatant(order CombatOrder, alive func(CombatantEntry) bool) CombatOrd
 		return order
 	}
 	for step := 1; step <= count; step++ {
-		index := (order.Current + step) % count
+		// Нормализация защищает от испорченного снимка с current < -1:
+		// без неё отрицательный индекс паникует.
+		index := ((order.Current+step)%count + count) % count
 		if !alive(order.Order[index]) {
 			continue
 		}
@@ -260,6 +294,11 @@ func DeserializeCombatOrder(data any) (CombatOrder, bool) {
 	}
 	rawOrder, ok := object["order"].([]any)
 	if !ok {
+		return CombatOrder{}, false
+	}
+	// Валидация указателя хода: испорченный снимок не должен приводить к
+	// панике в NextCombatant (current=-5 давал order[-1]).
+	if current < -1 || (len(rawOrder) > 0 && current >= len(rawOrder)) {
 		return CombatOrder{}, false
 	}
 	order := make([]CombatantEntry, 0, len(rawOrder))

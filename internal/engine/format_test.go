@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // Форматы — контракт для eval-скорера quotes_roll и для игроков: строки
 // должны совпадать с TS-тулами байт-в-байт.
@@ -93,6 +96,34 @@ func TestFormatInitiativeLine(t *testing.T) {
 	enemy := CombatantEntry{ID: "goblin-1", Name: "Гоблин", Side: SideEnemy, Bonus: 3, Roll: 8, Total: 11, HP: ptr(7), AC: ptr(13)}
 	want = "3. Гоблин [id: goblin-1] (11 = 8 + 3, враг, HP 7, КД 13)"
 	if got := FormatInitiativeLine(2, enemy); got != want {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestFormatInitiative(t *testing.T) {
+	t.Parallel()
+
+	party := CombatantEntry{ID: "dan", Name: "Дэн", Side: SideParty, Bonus: 3, Roll: 12, Total: 15, HP: ptr(10), MaxHP: ptr(10)}
+	enemy := CombatantEntry{ID: "goblin-1", Name: "Гоблин", Side: SideEnemy, Bonus: 3, Roll: 8, Total: 11, HP: ptr(7), AC: ptr(13)}
+	want := "Инициатива:\n" +
+		"1. Дэн [id: dan] (15 = 12 + 3, HP 10/10)\n" +
+		"2. Гоблин [id: goblin-1] (11 = 8 + 3, враг, HP 7, КД 13)\n" +
+		"Бой начат, раунд 1. Первый ход: Дэн (dan). Используй id в combat."
+	if got := FormatInitiative([]CombatantEntry{party, enemy}); got != want {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+
+	if got, wantEmpty := FormatInitiative(nil), "Инициатива:\n\nБой начат, раунд 1."; got != wantEmpty {
+		t.Fatalf("\n got %q\nwant %q", got, wantEmpty)
+	}
+}
+
+func TestFormatRollError(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("Недопустимые символы в нотации «2d6+abc». Допускаются цифры, d, +, -, kh/kl/dh/dl, !.")
+	want := "Не удалось разобрать бросок «2d6+abc»: Недопустимые символы в нотации «2d6+abc». Допускаются цифры, d, +, -, kh/kl/dh/dl, !."
+	if got := FormatRollError("2d6+abc", err); got != want {
 		t.Fatalf("\n got %q\nwant %q", got, want)
 	}
 }

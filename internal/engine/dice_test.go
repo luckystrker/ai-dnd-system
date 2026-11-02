@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -264,6 +265,26 @@ func TestAbilityScore(t *testing.T) {
 	if got, _ := AbilityScore(map[string]any{"str": 15.7}, "str"); got != 15 {
 		t.Errorf("дробное значение = %d, want 15 (trunc)", got)
 	}
+
+	// ±Inf/NaN и переполнение отклоняются, как Number.isFinite в TS.
+	for _, value := range []any{"inf", "Infinity", "-Infinity", "nan", "1e400", math.Inf(1), math.Inf(-1), math.NaN()} {
+		if _, found := AbilityScore(map[string]any{"str": value}, "str"); found {
+			t.Errorf("значение %v должно игнорироваться", value)
+		}
+	}
+
+	// Несколько написаний одной характеристики: выбор детерминирован
+	// (первый по алфавиту ключ), а не зависит от обхода map.
+	stats = map[string]any{"strength": 14, "str": 12}
+	first, found := AbilityScore(stats, "str")
+	if !found || first != 12 {
+		t.Fatalf("AbilityScore = (%d, %v), want (12, true): ключ \"str\" идёт первым", first, found)
+	}
+	for i := 0; i < 50; i++ {
+		if got, _ := AbilityScore(stats, "str"); got != first {
+			t.Fatalf("недетерминированный выбор: %d != %d", got, first)
+		}
+	}
 }
 
 func TestAbilityModifier(t *testing.T) {
@@ -355,6 +376,22 @@ func TestParseDiceNotation(t *testing.T) {
 		// TS-сообщения начинаются с заглавной; в Go — со строчной.
 		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
 			t.Errorf("ParseDiceNotation(%q): ошибка %q не содержит %q", tc.spec, err, tc.want)
+		}
+	}
+
+	// Три сообщения, которые roll_dice показывает LLM, — байт-в-байт как TS.
+	exact := []struct {
+		spec string
+		want string
+	}{
+		{"", "Пустая нотация броска «». Пример: «2d6+1d8+3»."},
+		{"2d6+abc", "Недопустимые символы в нотации «2d6+abc». Допускаются цифры, d, +, -, kh/kl/dh/dl, !."},
+		{"1d6+", "Неправильная нотация броска «1d6+». Пример: «2d6+1d8+3»."},
+	}
+	for _, tc := range exact {
+		_, err := ParseDiceNotation(tc.spec)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("ParseDiceNotation(%q) = %v, want %q", tc.spec, err, tc.want)
 		}
 	}
 }
@@ -486,6 +523,34 @@ func TestMakeLuckyRandom(t *testing.T) {
 		face := int(lucky()*20) + 1
 		if face < 2 {
 			t.Fatalf("face %d ниже обычного низкого броска", face)
+		}
+	})
+
+	t.Run("точные значения при детерминированном источнике", func(t *testing.T) {
+		if got := MakeLuckyRandom(seq(0.1, 0, 0.9), false)(); got != 0.9 {
+			t.Errorf("низкий бросок с перебросом = %v, want 0.9", got)
+		}
+		// Серия: minUnit=0.5, r=0 → 0.5 + 0.5*base(); base()=0.5 → 0.75.
+		if got := MakeLuckyRandom(seq(0, 0.5), true)(); got != 0.75 {
+			t.Errorf("серия = %v, want 0.75", got)
+		}
+		if got := MakeLuckyRandom(seq(0.1, 0.9), false)(); got != 0.1 {
+			t.Errorf("низкий бросок без переброса = %v, want 0.1", got)
+		}
+	})
+
+	t.Run("не низкий бросок не потребляет второй вызов", func(t *testing.T) {
+		calls := 0
+		source := func() float64 {
+			calls++
+			return 0.7
+		}
+		lucky := MakeLuckyRandom(source, false)
+		if got := lucky(); got != 0.7 {
+			t.Fatalf("lucky() = %v", got)
+		}
+		if calls != 1 {
+			t.Fatalf("источник вызван %d раз, want 1", calls)
 		}
 	})
 }

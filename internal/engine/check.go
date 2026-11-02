@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -54,7 +55,7 @@ var skillRuAliases = map[string]string{
 
 var (
 	parenPattern     = regexp.MustCompile(`\(([^)]+)\)`)
-	spaceDashPattern = regexp.MustCompile(`[\s-]+`)
+	spaceDashPattern = regexp.MustCompile(`[\s\p{Z}-]+`)
 )
 
 // ResolveSkillAbility разрешает название навыка в аббревиатуру характеристики.
@@ -100,17 +101,27 @@ var AbilityAliases = map[string]string{
 }
 
 // AbilityScore достаёт числовое значение характеристики по любому написанию.
-// Строковые значения приводятся к числу; нечисловые игнорируются.
+// Строковые значения приводятся к числу; нечисловые игнорируются. Если в
+// листе есть несколько написаний одной характеристики, выбирается первое по
+// алфавиту ключей — порядок вставки map в Go не сохраняется, поэтому нужен
+// стабильный детерминированный выбор (в TS побеждал порядок вставки).
 func AbilityScore(stats map[string]any, ability string) (int, bool) {
 	key := abilityAliasesOf(ability)
-	for rawKey, rawValue := range stats {
+	keys := make([]string, 0, len(stats))
+	for rawKey := range stats {
+		keys = append(keys, rawKey)
+	}
+	sort.Strings(keys)
+	for _, rawKey := range keys {
 		if abilityAliasesOf(rawKey) != key {
 			continue
 		}
-		parsed, ok := numericValue(rawValue)
+		parsed, ok := numericValue(stats[rawKey])
 		if !ok {
 			continue
 		}
+		// Зажимаем в диапазон int32: конечные 1e300 иначе переполняют int.
+		parsed = math.Max(-math.MaxInt32, math.Min(float64(math.MaxInt32), parsed))
 		return int(parsed), true // Math.trunc
 	}
 	return 0, false
