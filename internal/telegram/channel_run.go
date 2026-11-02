@@ -180,6 +180,15 @@ func (c *Channel) route(updateID int64, update *Update) error {
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
 
+	// Автоприсоединение — код без LLM и до гейта: строка промпта «anyone who
+	// writes into the bound chat/topic joins automatically» должна быть правдой.
+	// /join регистрирует сам handleJoin, чтобы ответить «присоединился», а не
+	// «уже участвуешь».
+	isJoin := message.IsCommand(c.botUsername) && message.CommandName() == "join"
+	if !isJoin {
+		c.autoJoin(message)
+	}
+
 	now := c.clock()
 	chatKey := ChatKey(message)
 	userID := strconv.FormatInt(message.From.ID, 10)
@@ -191,7 +200,7 @@ func (c *Channel) route(updateID int64, update *Update) error {
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
 
-	if message.IsCommand(c.botUsername) && message.CommandName() == "join" {
+	if isJoin {
 		c.handleJoin(message)
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
@@ -258,6 +267,43 @@ func (c *Channel) handleJoin(message *Message) {
 		c.postText(message, fmt.Sprintf("Ты присоединился к кампании «%s»! Теперь можно создать персонажа.", campaign.Title))
 	default:
 		c.postText(message, fmt.Sprintf("Партия кампании «%s» заполнена (максимум %d игроков).", campaign.Title, store.MaxParty))
+	}
+}
+
+// autoJoin регистрирует пишущего как игрока кампании, привязанной к чату или
+// топику, пока в партии есть место. Ошибки не ломают ход: сообщение всё равно
+// уйдёт в транскрипт и, если гейт пропустит, в LLM. При полной партии
+// AutoRegister возвращает кампанию без изменений.
+func (c *Channel) autoJoin(message *Message) {
+	if c.store == nil || message == nil || message.From == nil || message.From.IsBot {
+		return
+	}
+	identity := IdentityFromMessage(message)
+	if identity.UserID == "" {
+		return
+	}
+	campaign, err := FindCampaignForIdentity(c.store, identity)
+	if err != nil {
+		c.log.Warn("telegram: auto-join lookup failed", "chat", identity.ChatID, "error", err)
+		return
+	}
+	if campaign == nil {
+		return
+	}
+	for _, member := range campaign.Members {
+		if member.UserID == identity.UserID {
+			return
+		}
+	}
+	input := store.NewMemberInput{UserID: identity.UserID}
+	if identity.Name != "" {
+		input.Name = &identity.Name
+	}
+	if identity.Username != "" {
+		input.Username = &identity.Username
+	}
+	if _, err := c.store.AutoRegister(campaign.ID, input); err != nil {
+		c.log.Warn("telegram: auto-join failed", "campaign", campaign.ID, "user", identity.UserID, "error", err)
 	}
 }
 

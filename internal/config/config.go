@@ -59,6 +59,11 @@ const (
 
 	// DefaultTelegramMaxAttachmentBytes — политика вложений TS: 25 МБ.
 	DefaultTelegramMaxAttachmentBytes int64 = 25 * 1024 * 1024
+
+	// DefaultTelegramFollowUpMinutes — сколько после ответа DM сообщение
+	// игрока считается ответом на реплику DM (гейт follow-up). Калибровка —
+	// слайс 7; значение вынесено в env, чтобы менять без пересборки.
+	DefaultTelegramFollowUpMinutes = 10
 )
 
 // Telegram — настройки канала (слайс 6). Пустой Token — режим repl.
@@ -72,6 +77,7 @@ type Telegram struct {
 	MaxUpdateBytes     int
 	PollTimeoutSeconds int
 	MaxAttachmentBytes int64
+	FollowUpMinutes    int
 }
 
 // Config — вся конфигурация процесса бота.
@@ -115,6 +121,7 @@ type Config struct {
 //	TELEGRAM_MAX_UPDATE_BYTES предел размера апдейта (по умолчанию 1 МБ)
 //	TELEGRAM_POLL_TIMEOUT_SECONDS long-poll getUpdates, 1..300 (по умолчанию 50)
 //	TELEGRAM_MAX_ATTACHMENT_BYTES предел скачиваемого вложения (25 МБ)
+//	TELEGRAM_FOLLOW_UP_MINUTES окно follow-up гейта, 1..1440 (по умолчанию 10)
 func Load(getenv func(string) string) (Config, error) {
 	spec, err := llm.Lookup(getenv("LLM_PROVIDER"))
 	if err != nil {
@@ -222,6 +229,7 @@ func loadTelegram(getenv func(string) string) (Telegram, error) {
 		MaxUpdateBytes:     DefaultTelegramMaxUpdateBytes,
 		PollTimeoutSeconds: DefaultTelegramPollTimeoutSeconds,
 		MaxAttachmentBytes: DefaultTelegramMaxAttachmentBytes,
+		FollowUpMinutes:    DefaultTelegramFollowUpMinutes,
 	}
 	readInt := func(name string, fallback, min, max int) (int, error) {
 		raw := strings.TrimSpace(getenv(name))
@@ -248,6 +256,9 @@ func loadTelegram(getenv func(string) string) (Telegram, error) {
 		return Telegram{}, err
 	}
 	if settings.PollTimeoutSeconds, err = readInt("TELEGRAM_POLL_TIMEOUT_SECONDS", settings.PollTimeoutSeconds, 1, 300); err != nil {
+		return Telegram{}, err
+	}
+	if settings.FollowUpMinutes, err = readInt("TELEGRAM_FOLLOW_UP_MINUTES", settings.FollowUpMinutes, 1, 1440); err != nil {
 		return Telegram{}, err
 	}
 	attachmentDefault := int(DefaultTelegramMaxAttachmentBytes)

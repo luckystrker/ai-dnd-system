@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -888,4 +889,138 @@ func (a *contextCapturingAPI) AnswerCallbackQuery(ctx context.Context, _, _ stri
 func (a *contextCapturingAPI) SendRichText(ctx context.Context, _ string, _ *int, _ string) error {
 	a.texts <- ctx
 	return nil
+}
+
+// Кампания, привязанная к форум-топику, тоже автоприсоединяет пишущих в нём.
+func TestChannelAutoJoinsWriterInTopic(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign, err := st.CreateCampaign(store.NewCampaignInput{
+		Title: "Три ворона", Length: store.LengthShort, Setting: "север", Theme: "выживание",
+	}, store.NewOwnerInput{UserID: "dm-1", Username: strPtr("dm")})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	thread := 7
+	if _, err := st.BindAndActivate(campaign.ID, "dm-1", store.BoundChat{
+		ChatID: "-100", MessageThreadID: &thread,
+	}); err != nil {
+		t.Fatalf("BindAndActivate: %v", err)
+	}
+	api := newFakeBotAPI()
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+	message := groupMessage(-100, 300, "я в топике")
+	message.MessageThreadID = &thread
+	message.IsTopicMessage = true
+	if err := channel.ingest(rawUpdate(t, 1, message)); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, member := range updated.Members {
+		if member.UserID == "300" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("пишущий в топике не зарегистрирован: %+v", updated.Members)
+	}
+}
+
+// Любой не-бот, пишущий в привязанном чате, автоматически становится игроком
+// без LLM — как обещает строка промпта про /invite.
+func TestChannelAutoJoinsWriter(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaign(t, st, "-100")
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 200, "привет, я новый игрок"))); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, member := range updated.Members {
+		if member.UserID == "200" && member.Role == store.RolePlayer {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("пишущий не зарегистрирован: %+v", updated.Members)
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("автоприсоединение разбудило LLM: %d вызовов", calls)
+	}
+	if sent := api.sentMessages(); len(sent) != 0 {
+		t.Fatalf("автоприсоединение ответило в чат: %+v", sent)
+	}
+}
+
+// Окно follow-up гейта приходит из конфига канала (env), а не хардкодится.
+func TestChannelFollowUpWindowFromConfig(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	channel := newTestChannel(t, newFakeBotAPI(), st, modelFactory(st, agotest.NewTestConfig()), func(cfg *Config) {
+		cfg.FollowUpWindow = 3 * time.Minute
+	})
+	channel.gate.mu.Lock()
+	window := channel.gate.followUp
+	channel.gate.mu.Unlock()
+	if window != 3*time.Minute {
+		t.Fatalf("follow-up = %s, want 3m", window)
+	}
+}
+
+// При полной партии новый пишущий не регистрируется, но сообщение
+// обрабатывается обычным путём (уходит в транскрипт).
+func TestChannelAutoJoinStopsAtPartyLimit(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaign(t, st, "-100")
+	for index := 1; index <= store.MaxParty; index++ {
+		if _, err := st.AutoRegister(campaign.ID, store.NewMemberInput{
+			UserID: "player-" + strconv.Itoa(index),
+		}); err != nil {
+			t.Fatalf("AutoRegister: %v", err)
+		}
+	}
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 700, "возьмите меня в игру"))); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	players := 0
+	for _, member := range updated.Members {
+		if member.Role == store.RolePlayer {
+			players++
+		}
+		if member.UserID == "700" {
+			t.Fatalf("сверх лимита зарегистрирован 700: %+v", updated.Members)
+		}
+	}
+	if players != store.MaxParty {
+		t.Fatalf("игроков = %d, want %d", players, store.MaxParty)
+	}
+	waitFor(t, func() bool {
+		day, err := st.ReadDay(campaign.Slug, 1)
+		return err == nil && day != nil && strings.Contains(strings.Join(day.Entries, "\n"), "возьмите меня")
+	})
 }

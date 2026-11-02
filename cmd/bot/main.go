@@ -220,6 +220,7 @@ func runTelegram(
 		MaxUpdateBytes:     cfg.Telegram.MaxUpdateBytes,
 		MaxAttachmentBytes: cfg.Telegram.MaxAttachmentBytes,
 		PollTimeout:        time.Duration(cfg.Telegram.PollTimeoutSeconds) * time.Second,
+		FollowUpWindow:     time.Duration(cfg.Telegram.FollowUpMinutes) * time.Minute,
 		NewDM:              factory,
 	})
 	if err != nil {

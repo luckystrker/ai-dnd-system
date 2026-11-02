@@ -215,6 +215,9 @@ func TestLoadTelegramDefaults(t *testing.T) {
 		cfg.Telegram.MaxAttachmentBytes != config.DefaultTelegramMaxAttachmentBytes {
 		t.Errorf("сетевые лимиты = %+v", cfg.Telegram)
 	}
+	if cfg.Telegram.FollowUpMinutes != config.DefaultTelegramFollowUpMinutes {
+		t.Errorf("FollowUpMinutes = %d", cfg.Telegram.FollowUpMinutes)
+	}
 }
 
 func TestLoadTelegramOverrides(t *testing.T) {
@@ -231,6 +234,7 @@ func TestLoadTelegramOverrides(t *testing.T) {
 		"TELEGRAM_MAX_UPDATE_BYTES":        "2048",
 		"TELEGRAM_POLL_TIMEOUT_SECONDS":    "10",
 		"TELEGRAM_MAX_ATTACHMENT_BYTES":    "1048576",
+		"TELEGRAM_FOLLOW_UP_MINUTES":       "3",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -240,7 +244,8 @@ func TestLoadTelegramOverrides(t *testing.T) {
 		t.Errorf("telegram = %+v", tg)
 	}
 	if tg.CoalesceMS != 4000 || tg.ChatPerMinute != 30 || tg.UserPerMinute != 5 ||
-		tg.MaxUpdateBytes != 2048 || tg.PollTimeoutSeconds != 10 || tg.MaxAttachmentBytes != 1048576 {
+		tg.MaxUpdateBytes != 2048 || tg.PollTimeoutSeconds != 10 || tg.MaxAttachmentBytes != 1048576 ||
+		tg.FollowUpMinutes != 3 {
 		t.Errorf("telegram = %+v", tg)
 	}
 }
@@ -255,6 +260,7 @@ func TestLoadTelegramValidation(t *testing.T) {
 		{"размер апдейта", "TELEGRAM_MAX_UPDATE_BYTES", "10"},
 		{"poll timeout", "TELEGRAM_POLL_TIMEOUT_SECONDS", "301"},
 		{"вложение", "TELEGRAM_MAX_ATTACHMENT_BYTES", "1"},
+		{"окно follow-up", "TELEGRAM_FOLLOW_UP_MINUTES", "0"},
 	}
 	for _, tc := range cases {
 		tc := tc

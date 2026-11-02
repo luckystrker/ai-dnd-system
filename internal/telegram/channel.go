@@ -45,6 +45,8 @@ type Config struct {
 	MaxAttachmentBytes int64
 	// PollTimeout — long-poll getUpdates (по умолчанию 50 с).
 	PollTimeout time.Duration
+	// FollowUpWindow — окно «бот ждёт ответа» в гейте; 0 — дефолт 10 минут.
+	FollowUpWindow time.Duration
 	// ErrorBackoff — пауза после ошибки long-poll (по умолчанию 5 с).
 	ErrorBackoff time.Duration
 	NewDM        DMFactory
@@ -168,10 +170,14 @@ func NewChannel(cfg Config) (*Channel, error) {
 	if clock == nil {
 		clock = time.Now
 	}
+	gate := NewGate(cfg.Store, cfg.BotUsername, clock)
+	if cfg.FollowUpWindow > 0 {
+		gate.SetFollowUpWindow(cfg.FollowUpWindow)
+	}
 	channel := &Channel{
 		api:                cfg.API,
 		store:              cfg.Store,
-		gate:               NewGate(cfg.Store, cfg.BotUsername, clock),
+		gate:               gate,
 		limiter:            NewSlidingWindowLimiter(),
 		log:                logger,
 		botUsername:        cfg.BotUsername,

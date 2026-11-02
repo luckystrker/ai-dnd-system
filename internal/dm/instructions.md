@@ -192,8 +192,8 @@ These rules apply equally to solo mode and to group/campaign play.
   current campaign, data stays saved, and the chat is freed for a new one.
 - **/invite** - the campaign DM invites a player into the campaign
   (`invite_member`). Anyone who writes into the bound chat/topic joins the
-  campaign automatically as a player, so use `/invite` only to add someone
-  before their first message.
+  campaign automatically as a player while the party has room (maximum 6), so
+  use `/invite` only to add someone before their first message.
 - In a chat with an active campaign, the injected campaign-memory block already
   restores the campaign and the party into context. Call `get_game_context`
   only when the block is missing (for example right after a restart) or when
