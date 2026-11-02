@@ -181,9 +181,9 @@ go run ./cmd/eval -baseline eval-results/baseline.json -gate
 - калибрует судью на 4 хороших и 4 плохих ответах (`eval/judge/calibration.jsonl`):
   good должен пройти, bad — провалиться.
 
-Абсолютный гейт (`-gate`) — флаг, а не дефолт: пороги по категориям и
-обязательные кейсы задаются `-min-pass`, `-category`, `-required`. Предложенные
-значения — в `evalgame.ProposedGate()`; они ждут решения владельца.
+Абсолютный гейт (`-gate`) — флаг, а не дефолт прогона: пороги по категориям и
+обязательные кейсы лежат в `evalgame.DefaultGate()` (утверждены владельцем,
+PLAN 30) и переопределяются `-min-pass`, `-category`, `-required`.
 
 ## Деплой на VPS
 

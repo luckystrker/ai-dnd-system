@@ -9,6 +9,33 @@ import (
 	"github.com/luckystrker/ago/eval"
 )
 
+// Пороги утверждены владельцем (PLAN, решение 30). Тест фиксирует решение,
+// чтобы утверждённые числа нельзя было тихо поменять.
+func TestDefaultGateApprovedThresholds(t *testing.T) {
+	t.Parallel()
+
+	gate := DefaultGate()
+	if gate.MinPassRate != 0.75 {
+		t.Fatalf("общий порог %.2f, want 0.75", gate.MinPassRate)
+	}
+	want := map[string]float64{
+		"agency": 0.70, "rolls": 0.80, "checks": 0.60, "combat": 0.60,
+		"memory": 0.80, "day": 0.80, "neutrality": 0.60, "group": 0.60,
+	}
+	for name, value := range want {
+		if gate.Categories[name] != value {
+			t.Errorf("порог %q = %.2f, want %.2f", name, gate.Categories[name], value)
+		}
+	}
+	wantRequired := []string{
+		"agency-03-group-help-wait", "memory-01-damage-on-player-turn",
+		"day-01-overnight-rest", "rolls-01-skill-check-public",
+	}
+	if strings.Join(gate.Required, ",") != strings.Join(wantRequired, ",") {
+		t.Fatalf("обязательные кейсы %v, want %v", gate.Required, wantRequired)
+	}
+}
+
 func TestParseCategoryThresholds(t *testing.T) {
 	t.Parallel()
 

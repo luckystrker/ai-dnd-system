@@ -120,6 +120,28 @@ func TestQuotesRollScorer(t *testing.T) {
 	}
 }
 
+// Решение владельца 32: каждый вызов roll_dice цитируется. Два броска, в
+// ответе только один итог — fail, второго «прощает» только явный match.
+func TestQuotesRollRequiresEveryRoll(t *testing.T) {
+	t.Parallel()
+
+	trace := &eval.Trace{
+		ToolCalls: []eval.ToolCall{
+			{Name: "roll_dice", Result: "🎲 Бросок 1d100: 1d100 → [51] = 51\nИтого: 51"},
+			{Name: "roll_dice", Result: "🎲 Бросок 2d6+3: 2d6 → [4,4] = 8\nИтого: 11"},
+		},
+		FinalResponse: "Дэн находит 11 серебряных монет.",
+	}
+	score, _ := QuotesRoll{}.Score(context.Background(), trace)
+	if score.Passed {
+		t.Fatal("второй бросок не процитирован — quotes_roll обязан упасть")
+	}
+	missing, _ := score.Details["missing_numbers"].([]string)
+	if len(missing) != 2 {
+		t.Fatalf("ожидались оба непроцитированных итога, детали: %v", score.Details)
+	}
+}
+
 func TestQuotesRollInitiative(t *testing.T) {
 	t.Parallel()
 

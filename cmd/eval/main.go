@@ -55,9 +55,9 @@ func run(ctx context.Context, args []string) error {
 	out := fs.String("out", "eval-results/last.json", "куда писать JSON-отчёт")
 	baseline := fs.String("baseline", "", "прошлый отчёт для регрессионного гейта")
 	gate := fs.Bool("gate", false, "включить абсолютный гейт и упасть на нарушениях")
-	minPass := fs.Float64("min-pass", evalgame.ProposedGate().MinPassRate, "порог общего pass rate (для -gate)")
+	minPass := fs.Float64("min-pass", evalgame.DefaultGate().MinPassRate, "порог общего pass rate (для -gate)")
 	categoryText := fs.String("category", "", "пороги категорий, например agency=0.7,memory=0.8")
-	requiredText := fs.String("required", "", "обязательные кейсы через запятую (пусто — предложенный список)")
+	requiredText := fs.String("required", "", "обязательные кейсы через запятую (пусто — утверждённый список)")
 	noJudge := fs.Bool("no-judge", false, "не подключать LLM-судью (только механические скореры)")
 	calibrate := fs.Bool("judge-calibration", true, "калибровать судью на вручную написанных ответах")
 	calibrationPath := fs.String("calibration", "eval/judge/calibration.jsonl", "фикстуры калибровки судьи")
@@ -209,7 +209,7 @@ func applyGates(report *evalgame.Report, baseline string, gate bool, minPass flo
 		}
 	}
 	if gate {
-		thresholds := evalgame.ProposedGate()
+		thresholds := evalgame.DefaultGate()
 		thresholds.MinPassRate = minPass
 		parsed, err := evalgame.ParseCategoryThresholds(categoryText)
 		if err != nil {
