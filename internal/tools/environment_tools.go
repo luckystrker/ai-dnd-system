@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	agocontext "github.com/luckystrker/ago/context"
 	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystriker/ai-dnd-system/internal/store"
@@ -16,7 +17,15 @@ func environmentTools(d Deps) ([]namedTool, error) {
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("advance_day",
 			"Advance the in-game day of the active campaign. Use when a new day begins in the story (overnight rest, travel, big time skip).",
-			func(args advanceDayArgs) (any, error) { return d.advanceDay(args.Session, args) })
+			func(args advanceDayArgs, cx *agocontext.Context) (any, error) {
+				// Контекст хода доходит до DayCloser: при остановке процесса
+				// постановка закрытия дня не переживает отмену.
+				ctx := context.Background()
+				if cx != nil {
+					ctx = cx.TurnContext()
+				}
+				return d.advanceDay(ctx, args.Session, args)
+			})
 	})
 	builders = append(builders, func() (*agotools.FunctionTool, error) {
 		return tool("advance_time",
@@ -45,7 +54,7 @@ type advanceDayArgs struct {
 	Session *Session `json:"-" aginject:"ttrpg.session"`
 }
 
-func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
+func (d Deps) advanceDay(ctx context.Context, sess *Session, args advanceDayArgs) (any, error) {
 	campaign, err := d.campaign(sess)
 	if err != nil {
 		return nil, err
@@ -70,7 +79,7 @@ func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
 	queued := false
 	closeFailed := false
 	if d.DayCloser != nil {
-		if err := d.DayCloser.CloseDay(context.Background(), updated, previous); err != nil {
+		if err := d.DayCloser.CloseDay(ctx, updated, previous); err != nil {
 			// День уже сдвинут: не просим модель повторить advance_day (это
 			// сдвинуло бы день ещё раз). Закрытие повторит код/очередь.
 			log.Printf("tools: advance_day: DayCloser failed for campaign %s day %d: %v", updated.ID, previous, err)

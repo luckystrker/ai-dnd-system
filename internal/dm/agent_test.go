@@ -442,6 +442,35 @@ func TestTranscriptRecordsPlayerDMAndRolls(t *testing.T) {
 	}
 }
 
+func TestTranscriptFallsBackToNameWhenUsernameMissing(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	session := playerSession(campaign)
+	session.Username = ""
+	session.Name = "Ден"
+	cx := agocontext.NewWithDeps(stream.NewMemoryStream(), map[string]any{sessionDepKey: session}, nil)
+	mw := &transcriptMW{store: st}
+	request := &events.ModelRequest{
+		Base:  events.Base{CreatedAt: time.Unix(1_700_000_000, 0)},
+		Parts: []events.Input{events.TextInput{Content: "Открываю дверь"}},
+	}
+	next := func(*events.ModelRequest, *agocontext.Context) (*events.ModelResponse, error) {
+		return plain("Дверь со скрипом открывается."), nil
+	}
+	if _, err := mw.OnTurn(next, request, cx); err != nil {
+		t.Fatalf("OnTurn: %v", err)
+	}
+	day, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if joined := strings.Join(day.Entries, "\n"); !strings.Contains(joined, "Игрок @Ден") {
+		t.Fatalf("в транскрипте нет автора из имени: %v", day.Entries)
+	}
+}
+
 // Повторная обработка того же хода не дублирует строки транскрипта.
 func TestTranscriptDeduplicatesRepeatedTurn(t *testing.T) {
 	t.Parallel()

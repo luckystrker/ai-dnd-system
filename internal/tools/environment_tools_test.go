@@ -12,26 +12,34 @@ type fakeDayCloser struct {
 	called     bool
 	campaignID string
 	closedDay  int
+	ctx        context.Context
 }
 
-func (f *fakeDayCloser) CloseDay(_ context.Context, campaign *store.Campaign, closedDay int) error {
+func (f *fakeDayCloser) CloseDay(ctx context.Context, campaign *store.Campaign, closedDay int) error {
 	f.called = true
 	f.campaignID = campaign.ID
 	f.closedDay = closedDay
+	f.ctx = ctx
 	return nil
 }
+
+type dayCtxKey struct{}
 
 func TestAdvanceDayAndDayCloser(t *testing.T) {
 	env := newTestEnv(t)
 	closer := &fakeDayCloser{}
 	env.deps.DayCloser = closer
 
-	result, err := env.deps.advanceDay(env.player, advanceDayArgs{Note: ptr("ночёвка")})
+	turnCtx := context.WithValue(context.Background(), dayCtxKey{}, "turn-token")
+	result, err := env.deps.advanceDay(turnCtx, env.player, advanceDayArgs{Note: ptr("ночёвка")})
 	if err != nil {
 		t.Fatalf("advanceDay: %v", err)
 	}
 	if !closer.called || closer.closedDay != 1 || closer.campaignID != env.campaign.ID {
 		t.Fatalf("closer = %+v", closer)
+	}
+	if closer.ctx == nil || closer.ctx.Value(dayCtxKey{}) != "turn-token" {
+		t.Fatalf("DayCloser не получил контекст хода: %v", closer.ctx)
 	}
 	payload := result.(map[string]any)
 	if payload["previousDay"] != 1 || payload["day"] != 2 {
@@ -56,7 +64,7 @@ func TestAdvanceDayAndDayCloser(t *testing.T) {
 // Без closer тул не просит модель вызывать летописца вручную.
 func TestAdvanceDayWithoutCloserDoesNotMentionChronicler(t *testing.T) {
 	env := newTestEnv(t)
-	result, err := env.deps.advanceDay(env.player, advanceDayArgs{})
+	result, err := env.deps.advanceDay(context.Background(), env.player, advanceDayArgs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +88,7 @@ func TestAdvanceDayCloserFailureDoesNotAskRetry(t *testing.T) {
 	env := newTestEnv(t)
 	closer := &failingDayCloser{}
 	env.deps.DayCloser = closer
-	result, err := env.deps.advanceDay(env.player, advanceDayArgs{})
+	result, err := env.deps.advanceDay(context.Background(), env.player, advanceDayArgs{})
 	if err != nil {
 		t.Fatalf("advanceDay не должен падать после сдвига дня: %v", err)
 	}
@@ -99,7 +107,7 @@ func TestAdvanceDayCloserFailureDoesNotAskRetry(t *testing.T) {
 
 func TestAdvanceDayForbiddenForOutsider(t *testing.T) {
 	env := newTestEnv(t)
-	_, err := env.deps.advanceDay(env.outsider, advanceDayArgs{})
+	_, err := env.deps.advanceDay(context.Background(), env.outsider, advanceDayArgs{})
 	wantToolCode(t, err, CodeAccessDenied)
 }
 

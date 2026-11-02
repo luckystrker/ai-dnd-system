@@ -240,6 +240,9 @@ func (m *transcriptMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest,
 		if session != nil {
 			author = session.Username
 			if author == "" {
+				author = session.Name
+			}
+			if author == "" {
 				author = session.UserID
 			}
 		}
