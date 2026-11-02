@@ -61,6 +61,18 @@ func TestGateViolations(t *testing.T) {
 	}
 }
 
+// Голый eval.RunResult (старый/чужой файл) не содержит категорий; гейт должен
+// явно сказать об этом, а не рапортовать «категория X: нет кейсов».
+func TestGateRejectsBareRunResult(t *testing.T) {
+	t.Parallel()
+
+	report := &Report{Run: &eval.RunResult{Cases: []eval.CaseResult{{Name: "rolls-01", Passed: true}}}}
+	violations := Gate{Categories: map[string]float64{"rolls": 0.5}}.Violations(report)
+	if len(violations) == 0 || !containsText(violations[0], "без категорий") {
+		t.Fatalf("ожидалось явное нарушение про отчёт без категорий, получено: %v", violations)
+	}
+}
+
 func TestRegressionViolations(t *testing.T) {
 	t.Parallel()
 

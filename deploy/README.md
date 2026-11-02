@@ -122,6 +122,8 @@ sudo systemctl enable --now ai-dnd-ts
   (база восстановится, но может потерять последний ход).
 - **Харденинг**: `ProtectSystem=strict` + `ReadWritePaths=data`. Если перенести
   базу из `data/`, добавьте её каталог в `ReadWritePaths`, иначе Get/Set
-  упадут с `read-only file system`.
+  упадут с `read-only file system`. `CAMPAIGN_DB_PATH` обязан указывать внутрь
+  `data/` (вместе с `.skills` и бэкапами): нестандартный абсолютный путь вне
+  `data/` без правки юнита не заработает.
 - **rate-limiter in-memory** — один процесс. Для нескольких инстансов нужен
   общий стор (Redis и т.п.), для одиночного бота неактуально.

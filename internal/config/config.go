@@ -97,7 +97,7 @@ type Config struct {
 //
 // Переменные:
 //
-//	LLM_PROVIDER     openrouter | opencode-go | deepseek (по умолчанию openrouter)
+//	LLM_PROVIDER     openrouter | opencode-go | deepseek (по умолчанию opencode-go)
 //	LLM_API_KEY      ключ провайдера; если пуст — берётся из OPENROUTER_API_KEY,
 //	                 OPENCODE_API_KEY или DEEPSEEK_API_KEY
 //	LLM_BASE_URL     переопределить корень эндпоинта провайдера

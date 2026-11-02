@@ -90,6 +90,12 @@ func (g Gate) Violations(report *Report) []string {
 		out = append(out, fmt.Sprintf("общий pass rate %.0f%% < %.0f%%",
 			report.PassRate*100, g.MinPassRate*100))
 	}
+	// Голый eval.RunResult (старый/чужой файл) не содержит категорий и
+	// pass rate по кейсам; без явной ошибки гейт рапортовал бы «нет кейсов»
+	// по каждой категории, что выглядит как провал набора, а не файла.
+	if len(g.Categories) > 0 && len(report.Categories) == 0 {
+		return []string{"гейт: отчёт без категорий (голый eval.RunResult) — нужен полный отчёт раннера"}
+	}
 	categories := make([]string, 0, len(g.Categories))
 	for category := range g.Categories {
 		categories = append(categories, category)

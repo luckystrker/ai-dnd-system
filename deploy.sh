@@ -97,19 +97,22 @@ note "systemctl restart $SERVICE_NAME..."
 sudo systemctl restart "${SERVICE_NAME}.service"
 
 deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+# Go-боту нужен короткий прогрев: сразу после restart юнит уже active, а
+# падение на инициализации видно через секунды. Дальше крутим цикл до deadline.
+if [[ $TS_MODE -eq 0 ]]; then
+  sleep 3
+fi
 healthy=0
 while [[ $(date +%s) -lt $deadline ]]; do
   if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
     if [[ $TS_MODE -eq 1 ]]; then
       if curl -sf --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then healthy=1; break; fi
     else
-      # У Go-бота нет HTTP-порта: процесс живёт дольше пары секунд и не
-      # упал сразу после рестарта — это и есть health-check.
-      sleep 3
-      if systemctl is-active --quiet "${SERVICE_NAME}.service"; then healthy=1; break; fi
+      healthy=1
+      break
     fi
   fi
-  sleep 1
+  sleep 2
 done
 
 if [[ $healthy -eq 1 ]]; then
