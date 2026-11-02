@@ -85,6 +85,33 @@ func TestResolveOverrides(t *testing.T) {
 	}
 }
 
+func TestResolveBaseURL(t *testing.T) {
+	t.Parallel()
+
+	spec, err := llm.Settings{Provider: llm.ProviderOpenRouter, BaseURL: "https://proxy.example/v1/"}.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if spec.BaseURL != "https://proxy.example/v1" {
+		t.Errorf("BaseURL = %q, want без хвостового слэша", spec.BaseURL)
+	}
+
+	// Полный путь из чужой документации: ago дописал бы /chat/completions ещё
+	// раз, поэтому ошибка должна быть явной и до первого запроса.
+	for _, base := range []string{
+		"https://openrouter.ai/api/v1/chat/completions",
+		"https://api.deepseek.com/chat/completions/",
+	} {
+		_, err := llm.Settings{Provider: llm.ProviderOpenRouter, BaseURL: base}.Resolve()
+		if err == nil {
+			t.Fatalf("BaseURL %q должен отклоняться", base)
+		}
+		if !strings.Contains(err.Error(), "/chat/completions") {
+			t.Fatalf("ошибка %q не объясняет про /chat/completions", err)
+		}
+	}
+}
+
 func TestModelConfig(t *testing.T) {
 	t.Parallel()
 

@@ -20,8 +20,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.LLM.Provider != llm.ProviderOpenRouter {
-		t.Errorf("провайдер = %q, want %q", cfg.LLM.Provider, llm.ProviderOpenRouter)
+	if cfg.LLM.Provider != llm.DefaultProvider {
+		t.Errorf("провайдер = %q, want %q", cfg.LLM.Provider, llm.DefaultProvider)
 	}
 	if cfg.LLM.APIKey != "sk-test" {
 		t.Errorf("ключ = %q", cfg.LLM.APIKey)
@@ -60,6 +60,21 @@ func TestLoadProviderKeyFallback(t *testing.T) {
 	}
 	if cfg.LLM.Model != "custom" || cfg.LLM.BaseURL != "https://proxy.example/v1" {
 		t.Errorf("переопределения не применились: %+v", cfg.LLM)
+	}
+}
+
+func TestLoadBaseURLValidation(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{
+		"LLM_API_KEY":  "k",
+		"LLM_BASE_URL": "https://openrouter.ai/api/v1/chat/completions",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, _, err := cfg.LLM.ModelConfig(); err == nil {
+		t.Fatal("полный путь /chat/completions должен отклоняться при сборке конфига")
 	}
 }
 

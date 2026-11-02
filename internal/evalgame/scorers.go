@@ -29,6 +29,7 @@ func NewRegistry(client agoconfig.LLMClient) *eval.ScorerRegistry {
 	r := eval.NewScorerRegistry()
 	mustRegister(r, "tools_not_called", buildToolsNotCalled)
 	mustRegister(r, "tool_args", buildToolArgs)
+	mustRegister(r, "tool_ok", buildToolOK)
 	mustRegister(r, "tool_sequence", buildToolSequence)
 	mustRegister(r, "no_tool_calls", buildNoToolCalls)
 	mustRegister(r, "quotes_roll", buildQuotesRoll)
@@ -100,6 +101,110 @@ func buildToolsNotCalled(params map[string]any, _ eval.CaseScope) (eval.Scorer, 
 		return nil, err
 	}
 	return ToolsNotCalled{Names: names}, nil
+}
+
+// ToolOK проверяет, что совпавший вызов тула реально отработал: без Err и
+// без маркеров отказа в результате. Закрывает баг групповой записи в память:
+// на ходу обычного игрока combat/update_character вызывается, но тул отвечает
+// «доступно только администратору», и запись не происходит — tools_called и
+// tool_args при этом проходят.
+//
+// Args (необязательно) сужает проверку до конкретного вызова, как в ToolArgs.
+type ToolOK struct {
+	Tool string
+	Args map[string]any
+}
+
+func (s ToolOK) Name() string { return "tool_ok" }
+
+// refusalMarkers — признаки отказа в результате тула. TS-тулы возвращают
+// ошибку строкой или объектом {ok:false}, а не через Err трассы.
+var refusalMarkers = []string{
+	"доступно только администратору",
+	"принадлежит другому игроку",
+	"не участник этой кампании",
+	"не удалось определить, кто вы",
+	"нет привязанной кампании",
+	"запрещено",
+	"access_denied",
+	"permission denied",
+	"not allowed",
+	"\"ok\":false",
+	"\"ok\": false",
+	"ошибка",
+	"error",
+}
+
+func (s ToolOK) Score(_ context.Context, t *eval.Trace) (eval.Score, error) {
+	details := map[string]any{"tool": s.Tool}
+	var refused []string
+	checked := 0
+	for _, call := range t.ToolCalls {
+		if call.Name != s.Tool {
+			continue
+		}
+		if len(s.Args) > 0 && !argumentsContain(call.Arguments, s.Args) {
+			continue
+		}
+		checked++
+		if call.Err != "" {
+			refused = append(refused, "Err: "+truncate(call.Err, 200))
+			continue
+		}
+		if marker := refusalMarker(call.Result); marker != "" {
+			refused = append(refused, fmt.Sprintf("отказ в результате (%q): %s", marker, truncate(call.Result, 200)))
+			continue
+		}
+		details["checked"] = checked
+		details["result"] = truncate(call.Result, 300)
+		return boolScore(s.Name(), true, details), nil
+	}
+	details["checked"] = checked
+	if len(refused) > 0 {
+		details["refused"] = refused
+	}
+	if checked == 0 {
+		details["reason"] = "подходящий вызов тула не найден"
+	}
+	return boolScore(s.Name(), false, details), nil
+}
+
+func refusalMarker(result string) string {
+	lower := strings.ToLower(result)
+	for _, marker := range refusalMarkers {
+		if strings.Contains(lower, marker) {
+			return marker
+		}
+	}
+	return ""
+}
+
+// argumentsContain разбирает аргументы вызова и проверяет подмножество.
+func argumentsContain(arguments string, expected map[string]any) bool {
+	var actual any
+	if strings.TrimSpace(arguments) == "" {
+		actual = map[string]any{}
+	} else if err := json.Unmarshal([]byte(arguments), &actual); err != nil {
+		return false
+	}
+	return jsonSubset(expected, actual)
+}
+
+func buildToolOK(params map[string]any, _ eval.CaseScope) (eval.Scorer, error) {
+	if err := checkKeys(params, "tool", "args"); err != nil {
+		return nil, err
+	}
+	tool, err := stringParam(params, "tool")
+	if err != nil {
+		return nil, err
+	}
+	var args map[string]any
+	if raw, ok := params["args"]; ok {
+		if args, ok = normalizeJSON(raw).(map[string]any); !ok {
+			return nil, fmt.Errorf("параметр \"args\" должен быть объектом")
+		}
+	}
+	return ToolOK{Tool: tool, Args: args}, nil
 }
 
 // ToolArgs проверяет аргументы вызова тула: ожидаемое значение должно быть
@@ -310,11 +415,24 @@ func (s QuotesRoll) Score(_ context.Context, t *eval.Trace) (eval.Score, error) 
 
 	checked := 0
 	var missing []string
+	var wrong []string
 	for _, call := range t.ToolCalls {
 		if !allowed[call.Name] || call.Err != "" {
 			continue
 		}
 		checked++
+		if expects := rollAnchors(call.Name, call.Result); len(expects) > 0 {
+			callMissing, callWrong := checkAnchors(t.FinalResponse, expects)
+			for _, value := range callMissing {
+				missing = append(missing, call.Name+": "+value)
+			}
+			for _, value := range callWrong {
+				wrong = append(wrong, call.Name+": "+value)
+			}
+			continue
+		}
+		// Для тулов без якорей (инициатива) достаточно, чтобы суммы
+		// участников были произнесены.
 		for _, number := range rollNumbers(call.Name, call.Result) {
 			if !mentionsNumber(t.FinalResponse, number) {
 				missing = append(missing, fmt.Sprintf("%s: %s", call.Name, number))
@@ -322,15 +440,18 @@ func (s QuotesRoll) Score(_ context.Context, t *eval.Trace) (eval.Score, error) 
 		}
 	}
 
-	details := map[string]any{"tools": s.Tools, "checked_calls": checked}
+	details := map[string]any{"tools": tools, "checked_calls": checked}
 	if len(missing) > 0 {
 		details["missing_numbers"] = missing
+	}
+	if len(wrong) > 0 {
+		details["wrong_numbers"] = wrong
 	}
 	if checked == 0 {
 		details["reason"] = "не было вызовов бросковых тулов"
 		return boolScore(s.Name(), false, details), nil
 	}
-	return boolScore(s.Name(), len(missing) == 0, details), nil
+	return boolScore(s.Name(), len(missing) == 0 && len(wrong) == 0, details), nil
 }
 
 func buildQuotesRoll(params map[string]any, _ eval.CaseScope) (eval.Scorer, error) {
@@ -352,10 +473,81 @@ var (
 	reSkillVs  = regexp.MustCompile(`=\s*(\d+)\s+vs\s+DC\s*(\d+)`)
 	reTotal    = regexp.MustCompile(`Итого:\s*(\d+)`)
 	reInitLine = regexp.MustCompile(`(\d+)\s*=\s*(\d+)\s*\+\s*(-?\d+)`)
+	reAC       = regexp.MustCompile(`(?i)(?:кд|ac)\s*(\d+)`)
 )
 
-// rollNumbers возвращает числа из результата тула, которые игрок должен
-// увидеть в ответе.
+// anchorExpect — число, которое в ответе должно стоять рядом со своим
+// маркером (d20, итог, DC/КД), а не где угодно в тексте.
+type anchorExpect struct {
+	Label   string
+	Anchors []string
+	Number  string
+}
+
+var (
+	anchorD20 = []string{"d20", "д20"}
+	anchorSum = []string{"итог", "итого", "всего", "сумма", "total"}
+	anchorDC  = []string{"dc", "кд", "сложност"}
+)
+
+// rollAnchors возвращает ожидаемые пары «якорь → число» из результата тула.
+func rollAnchors(tool, result string) []anchorExpect {
+	switch tool {
+	case "skill_check":
+		var out []anchorExpect
+		if match := reD20.FindStringSubmatch(result); match != nil {
+			out = append(out, anchorExpect{Label: "d20", Anchors: anchorD20, Number: match[1]})
+		}
+		if match := reSkillVs.FindStringSubmatch(result); match != nil {
+			out = append(out,
+				anchorExpect{Label: "итог", Anchors: anchorSum, Number: match[1]},
+				anchorExpect{Label: "DC", Anchors: anchorDC, Number: match[2]},
+			)
+		}
+		return out
+	case "roll_dice":
+		if match := reTotal.FindStringSubmatch(result); match != nil {
+			anchors := append([]string{"выпало"}, anchorSum...)
+			return []anchorExpect{{Label: "итог", Anchors: anchors, Number: match[1]}}
+		}
+	case "combat":
+		var out []anchorExpect
+		if match := reD20.FindStringSubmatch(result); match != nil {
+			out = append(out, anchorExpect{Label: "d20", Anchors: anchorD20, Number: match[1]})
+		}
+		if match := reAC.FindStringSubmatch(result); match != nil {
+			out = append(out, anchorExpect{Label: "КД", Anchors: []string{"кд", "ac"}, Number: match[1]})
+		}
+		return out
+	}
+	return nil
+}
+
+// checkAnchors ищет в ответе каждый якорь с ближайшим числом. Отсутствие
+// якоря — missing, другое число рядом с якорем — wrong (выдуманный бросок).
+func checkAnchors(answer string, expects []anchorExpect) (missing, wrong []string) {
+	for _, expect := range expects {
+		alternatives := make([]string, 0, len(expect.Anchors))
+		for _, anchor := range expect.Anchors {
+			alternatives = append(alternatives, regexp.QuoteMeta(anchor))
+		}
+		re := regexp.MustCompile(`(?i)(?:` + strings.Join(alternatives, "|") + `)\D{0,15}(\d+)`)
+		matches := re.FindAllStringSubmatch(answer, -1)
+		if len(matches) == 0 {
+			missing = append(missing, fmt.Sprintf("%s %s", expect.Label, expect.Number))
+			continue
+		}
+		for _, match := range matches {
+			if match[1] != expect.Number {
+				wrong = append(wrong, fmt.Sprintf("%s: ожидалось %s, в ответе %s", expect.Label, expect.Number, match[1]))
+			}
+		}
+	}
+	return missing, wrong
+}
+
+// rollNumbers возвращает числа из результата тула без якорей (инициатива):
+// правило требует назвать суммы участников.
 func rollNumbers(tool, result string) []string {
 	var out []string
 	switch tool {

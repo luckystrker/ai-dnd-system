@@ -12,11 +12,46 @@ import (
 	"github.com/luckystrker/ago/eval"
 )
 
-// Suite — загруженный набор: кейсы ago плюс метаданные для отчётов.
+// Suite — загруженный набор: кейсы ago плюс метаданные для фикстур и отчётов.
 type Suite struct {
-	Cases      eval.Suite
-	Categories map[string]string // имя кейса → категория
-	Files      []string
+	Cases eval.Suite
+	Meta  map[string]CaseMeta // имя кейса → метаданные
+	Files []string
+}
+
+// CaseMeta — то, что не влезает в eval.Case ago: кто пишет, какие права у
+// говорящего, что проверять в БД после хода и подмена результата тула.
+type CaseMeta struct {
+	Category string
+	// Speaker — автор сообщения, чей ход запускает кейс (Telegram-имя или
+	// имя персонажа из текста). В слайсе 7 по нему собирается фикстура auth.
+	Speaker string
+	// Role — права говорящего: player (обычный игрок) или dm.
+	Role string
+	// Postconditions — проверки состояния БД после хода; исполняются в
+	// слайсе 7, пока только схема и валидация.
+	Postconditions []Postcondition
+	// Fault — подмена результата тула ошибкой (для кейса ретрая).
+	Fault *Fault
+	// SkipUntil — слайс, до которого кейс не считается в наборе.
+	SkipUntil string
+}
+
+// Postcondition — декларативная проверка состояния БД после хода.
+//
+//	{"type":"day_summary","day":"closed","fields":["summary","headline"],"expect":"nonempty"}
+type Postcondition struct {
+	Type   string   `json:"type"`
+	Day    string   `json:"day,omitempty"`
+	Fields []string `json:"fields,omitempty"`
+	Expect string   `json:"expect,omitempty"`
+}
+
+// Fault — на N-й вызов тула вернуть ошибку вместо настоящего результата.
+type Fault struct {
+	Tool  string `json:"tool"`
+	Call  int    `json:"call"`
+	Error string `json:"error"`
 }
 
 // Names возвращает имена кейсов в порядке набора.
@@ -28,29 +63,64 @@ func (s Suite) Names() []string {
 	return names
 }
 
-// CountByCategory считает кейсы по категориям.
+// Active возвращает кейсы без skip_until: только они считаются в наборе.
+func (s Suite) Active() eval.Suite {
+	active := make(eval.Suite, 0, len(s.Cases))
+	for _, c := range s.Cases {
+		if s.Meta[c.Name].SkipUntil != "" {
+			continue
+		}
+		active = append(active, c)
+	}
+	return active
+}
+
+// Skipped возвращает имена отложенных кейсов.
+func (s Suite) Skipped() []string {
+	var skipped []string
+	for _, c := range s.Cases {
+		if s.Meta[c.Name].SkipUntil != "" {
+			skipped = append(skipped, c.Name)
+		}
+	}
+	return skipped
+}
+
+// MetaFor возвращает метаданные кейса (пустые, если имени нет).
+func (s Suite) MetaFor(name string) CaseMeta { return s.Meta[name] }
+
+// CountByCategory считает активные кейсы по категориям.
 func (s Suite) CountByCategory() map[string]int {
 	counts := map[string]int{}
-	for _, category := range s.Categories {
-		counts[category]++
+	for _, c := range s.Cases {
+		meta := s.Meta[c.Name]
+		if meta.SkipUntil != "" {
+			continue
+		}
+		counts[meta.Category]++
 	}
 	return counts
 }
 
 // rawCase — строка JSONL. Формат совместим с eval.SuiteFromJSONL ago
-// (name/input/expected/scorers) плюс обязательная для набора category.
+// (name/input/expected/scorers) плюс обязательные category/speaker/role.
 type rawCase struct {
-	Name     string            `json:"name"`
-	Input    string            `json:"input"`
-	Expected string            `json:"expected"`
-	Category string            `json:"category"`
-	Scorers  []eval.ScorerSpec `json:"scorers"`
+	Name           string            `json:"name"`
+	Input          string            `json:"input"`
+	Expected       string            `json:"expected"`
+	Category       string            `json:"category"`
+	Speaker        string            `json:"speaker"`
+	Role           string            `json:"role"`
+	Scorers        []eval.ScorerSpec `json:"scorers"`
+	Postconditions []Postcondition   `json:"postconditions,omitempty"`
+	Fault          *Fault            `json:"fault,omitempty"`
+	SkipUntil      string            `json:"skip_until,omitempty"`
 }
 
 // LoadSuite читает все *.jsonl из каталога в алфавитном порядке файлов и
-// строк. Требования набора: у кейса есть уникальное имя, непустой input,
-// категория и хотя бы один скорер; неизвестные поля — ошибка (опечатка в
-// датасете не должна молча проглатываться).
+// строк. Требования набора: уникальное имя, непустой input, категория,
+// говорящий и его роль, хотя бы один скорер; неизвестные поля — ошибка
+// (опечатка в датасете не должна молча проглатываться).
 func LoadSuite(dir string, registry *eval.ScorerRegistry) (Suite, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if err != nil {
@@ -61,7 +131,7 @@ func LoadSuite(dir string, registry *eval.ScorerRegistry) (Suite, error) {
 	}
 	sort.Strings(files)
 
-	suite := Suite{Categories: map[string]string{}, Files: files}
+	suite := Suite{Meta: map[string]CaseMeta{}, Files: files}
 	seen := map[string]string{} // имя кейса → файл
 	for _, path := range files {
 		cases, err := loadFile(path, registry)
@@ -74,7 +144,7 @@ func LoadSuite(dir string, registry *eval.ScorerRegistry) (Suite, error) {
 			}
 			seen[c.Name] = path
 			suite.Cases = append(suite.Cases, c.Case)
-			suite.Categories[c.Name] = c.category
+			suite.Meta[c.Name] = c.meta
 		}
 	}
 	return suite, nil
@@ -82,7 +152,7 @@ func LoadSuite(dir string, registry *eval.ScorerRegistry) (Suite, error) {
 
 type loadedCase struct {
 	eval.Case
-	category string
+	meta CaseMeta
 }
 
 func loadFile(path string, registry *eval.ScorerRegistry) ([]loadedCase, error) {
@@ -135,8 +205,23 @@ func parseCase(path string, line int, text string, registry *eval.ScorerRegistry
 	if strings.TrimSpace(raw.Category) == "" {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q без category", where, raw.Name)
 	}
+	if strings.TrimSpace(raw.Speaker) == "" {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q без speaker", where, raw.Name)
+	}
+	if raw.Role != "player" && raw.Role != "dm" {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q: role должен быть player или dm, получено %q", where, raw.Name, raw.Role)
+	}
 	if len(raw.Scorers) == 0 {
 		return loadedCase{}, fmt.Errorf("%s: кейс %q без скореров", where, raw.Name)
+	}
+	if err := validatePostconditions(raw.Postconditions); err != nil {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q: %w", where, raw.Name, err)
+	}
+	if err := validateFault(raw.Fault); err != nil {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q: %w", where, raw.Name, err)
+	}
+	if raw.SkipUntil != "" && !strings.HasPrefix(raw.SkipUntil, "slice-") {
+		return loadedCase{}, fmt.Errorf("%s: кейс %q: skip_until должен быть вида slice-N, получено %q", where, raw.Name, raw.SkipUntil)
 	}
 
 	scorers, err := registry.BuildScorers(raw.Scorers, eval.CaseScope{Expected: raw.Expected})
@@ -150,16 +235,79 @@ func parseCase(path string, line int, text string, registry *eval.ScorerRegistry
 			Expected: raw.Expected,
 			Scorers:  scorers,
 		},
-		category: raw.Category,
+		meta: CaseMeta{
+			Category:       raw.Category,
+			Speaker:        raw.Speaker,
+			Role:           raw.Role,
+			Postconditions: raw.Postconditions,
+			Fault:          raw.Fault,
+			SkipUntil:      raw.SkipUntil,
+		},
 	}, nil
 }
 
-// Validate проверяет состав набора: размер, уникальность имён, покрытие
-// категорий. Вынесено из LoadSuite, чтобы живой прогон мог отдельно решать,
-// какой набор считать достаточным.
+// PostconditionTypes — типы постусловных проверок, которые поймёт слайс 7.
+var PostconditionTypes = []string{"day_summary"}
+
+func validatePostconditions(items []Postcondition) error {
+	for _, item := range items {
+		if !contains(PostconditionTypes, item.Type) {
+			return fmt.Errorf("неизвестный тип postcondition %q (доступны: %s)",
+				item.Type, strings.Join(PostconditionTypes, ", "))
+		}
+		switch item.Type {
+		case "day_summary":
+			if item.Day != "closed" {
+				return fmt.Errorf("postcondition day_summary: day должен быть \"closed\", получено %q", item.Day)
+			}
+			if len(item.Fields) == 0 {
+				return fmt.Errorf("postcondition day_summary: не заданы fields")
+			}
+			for _, field := range item.Fields {
+				if field != "summary" && field != "headline" {
+					return fmt.Errorf("postcondition day_summary: неизвестное поле %q (доступны: summary, headline)", field)
+				}
+			}
+			if item.Expect != "nonempty" {
+				return fmt.Errorf("postcondition day_summary: expect должен быть \"nonempty\", получено %q", item.Expect)
+			}
+		}
+	}
+	return nil
+}
+
+func validateFault(fault *Fault) error {
+	if fault == nil {
+		return nil
+	}
+	if strings.TrimSpace(fault.Tool) == "" {
+		return fmt.Errorf("fault: не задан tool")
+	}
+	if fault.Call < 1 {
+		return fmt.Errorf("fault: call должен быть >= 1, получено %d", fault.Call)
+	}
+	if strings.TrimSpace(fault.Error) == "" {
+		return fmt.Errorf("fault: не задан error")
+	}
+	return nil
+}
+
+func contains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate проверяет состав набора: размер, покрытие категорий. Считаются
+// только активные кейсы (без skip_until). Вынесено из LoadSuite, чтобы живой
+// прогон мог отдельно решать, какой набор считать достаточным.
 func (s Suite) Validate(minCases, maxCases int, requiredCategories []string) error {
-	if len(s.Cases) < minCases || len(s.Cases) > maxCases {
-		return fmt.Errorf("evalgame: кейсов %d, ожидалось от %d до %d", len(s.Cases), minCases, maxCases)
+	active := s.Active()
+	if len(active) < minCases || len(active) > maxCases {
+		return fmt.Errorf("evalgame: активных кейсов %d, ожидалось от %d до %d", len(active), minCases, maxCases)
 	}
 	counts := s.CountByCategory()
 	for _, category := range requiredCategories {
@@ -167,7 +315,7 @@ func (s Suite) Validate(minCases, maxCases int, requiredCategories []string) err
 			return fmt.Errorf("evalgame: нет кейсов категории %q", category)
 		}
 	}
-	for _, c := range s.Cases {
+	for _, c := range active {
 		if c.Name == "" || c.Input == "" || len(c.Scorers) == 0 {
 			return fmt.Errorf("evalgame: некорректный кейс %+v", c)
 		}

@@ -18,9 +18,9 @@ const (
 	ProviderDeepSeek   = "deepseek"
 )
 
-// DefaultProvider используется, когда LLM_PROVIDER не задан: бот изначально
-// работал через OpenRouter, поведение сохраняем.
-const DefaultProvider = ProviderOpenRouter
+// DefaultProvider используется, когда LLM_PROVIDER не задан: решением
+// владельца бот по умолчанию работает через OpenCode Go.
+const DefaultProvider = ProviderOpenCodeGo
 
 // Spec — провайдер по умолчанию: корень эндпоинта, id модели и переменная
 // окружения с ключом. ago дописывает к BaseURL путь /chat/completions, поэтому
@@ -103,6 +103,14 @@ type Settings struct {
 	Model    string
 }
 
+// APIKeyFromEnv резолвит ключ: LLM_API_KEY, затем переменная провайдера.
+func APIKeyFromEnv(spec Spec, getenv func(string) string) string {
+	if key := strings.TrimSpace(getenv("LLM_API_KEY")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(getenv(spec.APIKeyEnv))
+}
+
 // Resolve дополняет настройки значениями провайдера по умолчанию.
 func (s Settings) Resolve() (Spec, error) {
 	spec, err := Lookup(s.Provider)
@@ -110,6 +118,13 @@ func (s Settings) Resolve() (Spec, error) {
 		return Spec{}, err
 	}
 	if base := strings.TrimSpace(s.BaseURL); base != "" {
+		base = strings.TrimRight(base, "/")
+		if strings.HasSuffix(strings.ToLower(base), "/chat/completions") {
+			return Spec{}, fmt.Errorf(
+				"LLM_BASE_URL указывает на полный путь /chat/completions (%q): ago дописывает его сам, укажите корень эндпоинта, например %q",
+				s.BaseURL, spec.BaseURL,
+			)
+		}
 		spec.BaseURL = base
 	}
 	if model := strings.TrimSpace(s.Model); model != "" {
@@ -128,6 +143,23 @@ func (s Settings) ModelConfig() (agoconfig.ModelConfig, Spec, error) {
 		return nil, Spec{}, fmt.Errorf("не задан ключ LLM: заполните LLM_API_KEY или %s", spec.APIKeyEnv)
 	}
 	cfg := openai.NewOpenAICompletions(spec.Model)
+	cfg.APIKey = s.APIKey
+	cfg.BaseURL = spec.BaseURL
+	return cfg, spec, nil
+}
+
+// ResponsesModelConfig собирает конфиг OpenAI Responses API для моделей,
+// которые провайдер отдаёт только через /responses (например, muse-spark-*
+// у OpenCode Go). BaseURL тот же корень: ago дописывает /responses.
+func (s Settings) ResponsesModelConfig() (agoconfig.ModelConfig, Spec, error) {
+	spec, err := s.Resolve()
+	if err != nil {
+		return nil, Spec{}, err
+	}
+	if strings.TrimSpace(s.APIKey) == "" {
+		return nil, Spec{}, fmt.Errorf("не задан ключ LLM: заполните LLM_API_KEY или %s", spec.APIKeyEnv)
+	}
+	cfg := openai.NewOpenAIResponses(spec.Model)
 	cfg.APIKey = s.APIKey
 	cfg.BaseURL = spec.BaseURL
 	return cfg, spec, nil

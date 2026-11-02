@@ -12,18 +12,28 @@
 `eval/cases/*.jsonl`, одна JSON-строка — один кейс:
 
 ```json
-{"name":"rolls-01-skill-check-public","category":"rolls","input":"Дэн: Я внимательно осматриваю комнату — ищу следы борьбы.","scorers":[{"name":"tools_called","params":{"names":["skill_check"]}}]}
+{"name":"memory-01-damage-on-player-turn","category":"memory","speaker":"Дэн","role":"player","input":"Дэн: Меня снова ранили — минус 4 хита. Иду дальше.","scorers":[{"name":"tools_called","params":{"names":["combat","update_character"]}},{"name":"tool_ok","params":{"tool":"combat","args":{"action":"damage"}}},{"name":"judge","params":{"rubric":"…"}}]}
 ```
 
 - `name` — уникальное имя кейса (префикс = категория);
-- `input` — сообщение(я) игроков, как их склеивает групповой чат;
 - `category` — `agency`, `rolls`, `checks`, `combat`, `memory`, `day`,
-  `neutrality`, `group`; обязательна, чтобы отчёт показывал покрытие;
-- `scorers` — список скореров: строка-имя или `{"name":…,"params":{…}}`.
-  Неизвестные поля и параметры — ошибка загрузки (опечатка не проглатывается).
+  `neutrality`, `group`;
+- `speaker` и `role` (`player` | `dm`) — кто пишет и с какими правами;
+  в слайсе 7 по ним собирается фикстура auth. Баг групповой записи
+  воспроизводится только на `role: "player"`, поэтому memory-кейсы явно
+  `player`;
+- `input` — сообщение(я) игроков, как их склеивает групповой чат;
+- `scorers` — список скореров: строка-имя или `{"name":…,"params":{…}}`;
+- `postconditions` — проверки состояния БД **после** хода (схема и
+  валидация уже есть, исполнение — слайс 7):
+  `{"type":"day_summary","day":"closed","fields":["summary","headline"],"expect":"nonempty"}`;
+- `fault` — подмена результата тула ошибкой на N-й вызов (для кейса ретрая):
+  `{"tool":"skill_check","call":1,"error":"unknown skill: Восприятие"}`;
+- `skip_until` — слайс, до которого кейс не считается в наборе
+  (`checks-05-tool-error-retry` ждёт fault-инжекцию в слайсе 7).
 
-Загрузчик — `internal/evalgame.LoadSuite` (формат совместим с
-`eval.SuiteFromJSONL` из ago: `name`/`input`/`expected`/`scorers`).
+Неизвестные поля и параметры — ошибка загрузки (опечатка не проглатывается).
+Загрузчик — `internal/evalgame.LoadSuite`.
 
 ## Скореры
 
@@ -34,10 +44,11 @@
 | `tools_called` | вызваны все перечисленные тулы (ago; `mode: "any"` — любой из) |
 | `tools_not_called` | ни один из запрещённых тулов не вызван |
 | `tool_args` | аргументы вызова — подмножество ожидаемого JSON (`"*"` — любой скаляр, `contains` — подстрока, `match: "all"` — каждый вызов) |
+| `tool_ok` | совпавший вызов реально отработал: без `Err` и без маркеров отказа в результате (закрывает баг записи в память на ходу игрока) |
 | `tool_sequence` | имена тулов встретились в указанном порядке |
 | `no_tool_calls` | в трассе нет ни одного вызова тула |
-| `quotes_roll` | числа из результата `skill_check`/`roll_dice`/`initiative`/`combat` произнесены в ответе |
-| `answer_omits` | в ответе нет запрещённых фраз (регистронезависимо) |
+| `quotes_roll` | числа из результата `skill_check`/`roll_dice`/`combat` стоят рядом со своими якорями (`d20`, `итог`, `DC`/`КД`); выдуманное число у якоря — fail |
+| `answer_omits` | в ответе нет запрещённых штампов (регистронезависимо) |
 
 Смысловые (нужен LLM-клиент, только живой прогон):
 
@@ -48,11 +59,16 @@
 Реестр собирает `evalgame.NewRegistry(client)`; `client == nil` — набор
 грузится, механические скореры работают, `judge` при прогоне честно падает.
 
+Модель судьи — `muse-spark-1.3-contributor` через OpenCode Go (Responses API,
+тот же ключ, что у бота); переопределяется `EVAL_JUDGE_MODEL` и
+`EVAL_JUDGE_PROVIDER`, клиент собирает `evalgame.NewJudgeClient(os.Getenv)`.
+Без ключа живой прогон падает сразу с понятной ошибкой.
+
 ## Прогон
 
 Офлайн (CI, без ключей): `go test ./internal/evalgame/` — загрузка набора,
-проверка состава и механические скореры на скриптованных траекториях
-(`agotest.NewTestConfig`).
+проверка состава, постусловий и fault-схемы, механические скореры на
+скриптованных траекториях (`agotest.NewTestConfig`).
 
 Живой прогон (нужен ключ LLM) появится в слайсе 7 вместе с гейтом
 «eval на Go ≥ baseline»; судья подключается через

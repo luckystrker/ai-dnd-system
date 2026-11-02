@@ -43,10 +43,7 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	apiKey := strings.TrimSpace(getenv("LLM_API_KEY"))
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(getenv(spec.APIKeyEnv))
-	}
+	apiKey := llm.APIKeyFromEnv(spec, getenv)
 	if apiKey == "" {
 		return Config{}, fmt.Errorf("не задан ключ LLM: заполните LLM_API_KEY или %s", spec.APIKeyEnv)
 	}

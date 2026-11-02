@@ -154,6 +154,18 @@ func TestMechanicalScorersSkillCheck(t *testing.T) {
 		)
 		requireScore(t, cr, "quotes_roll", false)
 	})
+
+	t.Run("выдуманные числа у якорей ловятся", func(t *testing.T) {
+		t.Parallel()
+		cr := runMechanical(t, suite, "rolls-01-skill-check-public", toolset,
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "skill_check",
+				Arguments: `{"character_name":"Дэн","skill":"Восприятие","difficulty":12}`,
+			}}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Бросок 12, итог 14 против 9 — провал."}},
+		)
+		requireScore(t, cr, "quotes_roll", false)
+	})
 }
 
 func TestMechanicalScorersEnemyAttackNotation(t *testing.T) {
@@ -242,6 +254,7 @@ func TestMechanicalScorersMemoryWrite(t *testing.T) {
 		)
 		requireScore(t, cr, "tools_called", true)
 		requireScore(t, cr, "tool_args", true)
+		requireScore(t, cr, "tool_ok", true)
 	})
 
 	t.Run("забытый update_character ловится", func(t *testing.T) {
@@ -251,6 +264,23 @@ func TestMechanicalScorersMemoryWrite(t *testing.T) {
 			&events.ModelResponse{Message: &events.ModelMessage{Content: "Кинжал рассекает плечо: минус 4 хита. Следующая — Лиса."}},
 		)
 		requireScore(t, cr, "tools_called", false)
+	})
+
+	// Главный негатив: тулы вызваны, но ответили отказом по авторизации —
+	// именно так баг групповой записи выглядел в TS-боте.
+	t.Run("отказ доступа в результате ловится", func(t *testing.T) {
+		t.Parallel()
+		deniedTools := []tools.Tool{
+			cannedTool(t, "combat", "Это действие доступно только администратору (dm) кампании."),
+			cannedTool(t, "update_character", "Это действие доступно только администратору (dm) кампании."),
+		}
+		cr := runMechanical(t, suite, "memory-01-damage-on-player-turn", deniedTools,
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{damageCall, persistCall}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Кинжал рассекает плечо: минус 4 хита. Следующая — Лиса."}},
+		)
+		requireScore(t, cr, "tools_called", true)
+		requireScore(t, cr, "tool_args", true)
+		requireScore(t, cr, "tool_ok", false)
 	})
 }
 

@@ -204,6 +204,91 @@ func TestJudgeToleratesFencedVerdict(t *testing.T) {
 	}
 }
 
+func TestToolOKScorer(t *testing.T) {
+	t.Parallel()
+
+	clean := &eval.Trace{ToolCalls: []eval.ToolCall{
+		{Name: "combat", Arguments: `{"action":"damage","target":"Дэн","amount":4}`, Result: "Дэн: урон 4 HP → 6/10."},
+	}}
+	score, err := ToolOK{Tool: "combat"}.Score(context.Background(), clean)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if !score.Passed {
+		t.Fatalf("tool_ok должен проходить на чистом результате, детали: %v", score.Details)
+	}
+
+	// Отказ по авторизации в тексте результата — ровно баг групповой записи.
+	denied := &eval.Trace{ToolCalls: []eval.ToolCall{{
+		Name:      "combat",
+		Arguments: `{"action":"damage","target":"Дэн","amount":4}`,
+		Result:    "Это действие доступно только администратору (dm) кампании.",
+	}}}
+	score, _ = (ToolOK{Tool: "combat"}).Score(context.Background(), denied)
+	if score.Passed {
+		t.Fatal("tool_ok не должен проходить на отказе в результате")
+	}
+	if refused, ok := score.Details["refused"].([]string); !ok || len(refused) == 0 {
+		t.Fatalf("ожидалась причина отказа, детали: %v", score.Details)
+	}
+
+	// Ошибка через Err трассы.
+	errored := &eval.Trace{ToolCalls: []eval.ToolCall{{Name: "combat", Err: "tool: boom"}}}
+	if score, _ = (ToolOK{Tool: "combat"}).Score(context.Background(), errored); score.Passed {
+		t.Fatal("tool_ok не должен проходить на Err")
+	}
+
+	// ok:false в JSON-результате.
+	jsonRefused := &eval.Trace{ToolCalls: []eval.ToolCall{{Name: "grant_character", Result: `{"ok":false,"error":"access_denied"}`}}}
+	if score, _ = (ToolOK{Tool: "grant_character"}).Score(context.Background(), jsonRefused); score.Passed {
+		t.Fatal("tool_ok не должен проходить на {ok:false}")
+	}
+
+	// Аргументы не совпали — вызов не считается.
+	if score, _ = (ToolOK{Tool: "combat", Args: map[string]any{"action": "attack"}}).Score(context.Background(), clean); score.Passed {
+		t.Fatal("tool_ok не должен проходить, когда подходящего по аргументам вызова нет")
+	}
+
+	// Второй вызов чистый — общий результат pass.
+	mixed := &eval.Trace{ToolCalls: []eval.ToolCall{
+		{Name: "combat", Result: "Сейчас ход Лисы — атаковать может только участник, чей ход наступил."},
+		{Name: "combat", Arguments: `{"action":"next"}`, Result: "Ход переходит дальше."},
+	}}
+	if score, _ = (ToolOK{Tool: "combat"}).Score(context.Background(), mixed); !score.Passed {
+		t.Fatalf("tool_ok должен проходить, если хотя бы один вызов чистый, детали: %v", score.Details)
+	}
+}
+
+func TestQuotesRollAnchors(t *testing.T) {
+	t.Parallel()
+
+	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 7 +3 = 10 vs DC 15 -> ПРОВАЛ"
+	trace := &eval.Trace{
+		ToolCalls:     []eval.ToolCall{{Name: "skill_check", Result: result}},
+		FinalResponse: "d20 7, итог 10 против DC 15 — провал.",
+	}
+	if score, _ := (QuotesRoll{}).Score(context.Background(), trace); !score.Passed {
+		t.Fatalf("корректный бросок должен проходить, детали: %v", score.Details)
+	}
+
+	// Числа в ответе есть, но рядом с якорями — выдуманные.
+	trace.FinalResponse = "Бросок 12, итог 14 против 9 — провал. В комнате 7 факелов, до рассвета 15 минут."
+	score, _ := (QuotesRoll{}).Score(context.Background(), trace)
+	if score.Passed {
+		t.Fatal("выдуманные числа у якорей должны валить quotes_roll")
+	}
+	wrong, ok := score.Details["wrong_numbers"].([]string)
+	if !ok || len(wrong) == 0 {
+		t.Fatalf("ожидался список неверных чисел, детали: %v", score.Details)
+	}
+
+	// Якорь отсутствует вовсе — тоже fail.
+	trace.FinalResponse = "Дэн ничего не понимает."
+	if score, _ = (QuotesRoll{}).Score(context.Background(), trace); score.Passed {
+		t.Fatal("quotes_roll должен падать без якорей")
+	}
+}
+
 func TestRegistryRejectsBadParams(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +299,8 @@ func TestRegistryRejectsBadParams(t *testing.T) {
 	}{
 		{"tool_args", map[string]any{"tool": "combat"}},
 		{"tool_args", map[string]any{"tool": "combat", "args": map[string]any{"a": 1}, "typo": true}},
+		{"tool_ok", map[string]any{"args": map[string]any{"a": 1}}},
+		{"tool_ok", map[string]any{"tool": "combat", "typo": true}},
 		{"tools_not_called", map[string]any{}},
 		{"tool_sequence", map[string]any{"names": []any{"initiative"}}},
 		{"quotes_roll", map[string]any{"tools": "skill_check"}},
