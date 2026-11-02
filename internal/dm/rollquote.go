@@ -12,23 +12,25 @@ import (
 )
 
 // rollQuoteMW гарантирует публичность бросков и боевых эффектов: если модель
-// вызвала skill_check или roll_dice, но не назвала в ответе d20/итог/DC, или
-// взяла Dodge и не объявила помеху, точный результат тула дописывается в
-// конец ответа. Промпт требует это делать, но на длинных ходах модель
-// пропускает; правило важнее стиля, а текст уже есть в результате тула.
+// вызвала skill_check или roll_dice, но не назвала d20/итог/DC, в конец
+// ответа дописываются только недостающие компоненты. Для Dodge дописывается
+// фиксированная фраза про помеху, без служебного хвоста про очередь ходов.
+// Промпт требует это делать, но на длинных ходах модель пропускает.
 //
-// Остальные результаты combat и initiative не трогаем: это многострочный
-// порядок ходов, и модель пересказывает его сама.
+// Результаты combat без броска (status/next/damage) и initiative не трогаем:
+// в них нет d20/КД, а порядок ходов модель пересказывает сама.
 type rollQuoteMW struct {
 	middleware.Base
 	mu      sync.Mutex
 	results []string
+	combats []string
 	dodges  []string
 }
 
 func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
 	m.mu.Lock()
 	m.results = nil
+	m.combats = nil
 	m.dodges = nil
 	m.mu.Unlock()
 
@@ -38,31 +40,35 @@ func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, 
 	}
 	m.mu.Lock()
 	results := append([]string(nil), m.results...)
+	combats := append([]string(nil), m.combats...)
 	dodges := append([]string(nil), m.dodges...)
 	m.mu.Unlock()
-	if (len(results) == 0 && len(dodges) == 0) || response.Message == nil || len(response.ToolCalls.Calls) > 0 {
+	if (len(results) == 0 && len(combats) == 0 && len(dodges) == 0) || response.Message == nil || len(response.ToolCalls.Calls) > 0 {
 		return response, nil
 	}
 
 	body := response.Message.Content
-	missing := make([]string, 0, len(results)+len(dodges))
+	suffixes := make([]string, 0, len(results)+1)
 	for _, result := range results {
-		if !rollResultQuoted(body, result) {
-			missing = append(missing, result)
+		if parts := missingRollParts(body, result); len(parts) > 0 {
+			suffixes = append(suffixes, "("+strings.Join(parts, ", ")+")")
 		}
 	}
-	for _, result := range dodges {
-		if !dodgeQuoted(body) {
-			missing = append(missing, result)
+	for _, result := range combats {
+		if parts := missingCombatParts(body, result); len(parts) > 0 {
+			suffixes = append(suffixes, "("+strings.Join(parts, ", ")+")")
 		}
 	}
-	if len(missing) == 0 {
+	if len(dodges) > 0 && !dodgeQuoted(body) {
+		suffixes = append(suffixes, dodgeSuffix)
+	}
+	if len(suffixes) == 0 {
 		return response, nil
 	}
 	if strings.TrimSpace(body) != "" {
-		body = strings.TrimRight(body, "\n") + "\n\n"
+		body = strings.TrimRight(body, "\n") + " "
 	}
-	response.Message.Content = body + strings.Join(missing, "\n")
+	response.Message.Content = body + strings.Join(suffixes, " ")
 	return response, nil
 }
 
@@ -86,6 +92,8 @@ func (m *rollQuoteMW) OnToolExecution(next middleware.ToolExecFunc, ev *events.T
 	if ev.Name == "combat" {
 		if isDodgeCall(ev.Arguments) {
 			m.dodges = append(m.dodges, text)
+		} else {
+			m.combats = append(m.combats, text)
 		}
 		return result, nil
 	}
@@ -103,6 +111,8 @@ func isDodgeCall(arguments string) bool {
 	return args.Action == "dodge"
 }
 
+const dodgeSuffix = "Атаки по этому персонажу до его следующего хода идут с помехой."
+
 // dodgeQuoted — ответ назвал помеху от Уклонения. Достаточно слова
 // «помеха»/«disadvantage»: цифр у Dodge нет.
 func dodgeQuoted(answer string) bool {
@@ -111,38 +121,85 @@ func dodgeQuoted(answer string) bool {
 }
 
 var (
-	reResultD20   = regexp.MustCompile(`d20\s*=\s*(\d+)`)
-	reResultVsDC  = regexp.MustCompile(`=\s*(\d+)\s+vs\s+DC\s*(\d+)`)
-	reResultTotal = regexp.MustCompile(`Итого:\s*(\d+)`)
+	reResultD20           = regexp.MustCompile(`d20\s*=\s*(\d+)`)
+	reResultVsDC          = regexp.MustCompile(`=\s*(\d+)\s+vs\s+DC\s*(\d+)`)
+	reResultTotal         = regexp.MustCompile(`Итого:\s*(\d+)`)
+	reResultSkill         = regexp.MustCompile(`проверка «([^»]+)»`)
+	reResultMod           = regexp.MustCompile(`d20\s*=\s*\d+\s*([+-]\d+)`)
+	reResultOutcome       = regexp.MustCompile(`->\s*([А-Яа-яA-Za-z]+)`)
+	reResultCombatAC      = regexp.MustCompile(`против КД\s*(\d+)`)
+	reResultCombatOutcome = regexp.MustCompile(`→\s*(попадание|промах)`)
 
 	reAnswerD20 = regexp.MustCompile(`(?i)(?:d20\s*[=:]?\s*(\d+)|выпало\s*(\d+)|(\d+)\s+на\s+d20)`)
 	reAnswerSum = regexp.MustCompile(`(?i)(?:итог[а-яё]*|всего|сумма|total|выпало)\D{0,15}(\d+)|=\s*(\d+)|бонус[а-яё]*\s*(\d+)|(\d+)\s+против\s+(?:dc|кд)`)
 	reAnswerDC  = regexp.MustCompile(`(?i)(?:dc|кд|сл|сложност[а-яё]*)\s*[=:]?\s*(\d+)`)
 )
 
-// rollResultQuoted повторяет формы ответа, которые понимает скорер
-// quotes_roll: d20, итог и DC должны быть названы, а не только подразумеваться.
-func rollResultQuoted(answer, result string) bool {
+// missingRollParts возвращает только те компоненты броска, которых нет в
+// ответе. Целиком строку тула не дописываем: иначе уже названные числа
+// повторяются в ответе игроку.
+func missingRollParts(answer, result string) []string {
 	answer = strings.NewReplacer("*", "", "`", "").Replace(answer)
+	var parts []string
+	if match := reResultSkill.FindStringSubmatch(result); match != nil {
+		if !strings.Contains(strings.ToLower(answer), strings.ToLower(match[1])) {
+			parts = append(parts, "«"+match[1]+"»")
+		}
+	}
 	if match := reResultD20.FindStringSubmatch(result); match != nil {
 		if !containsNumber(answerNumbers(reAnswerD20, answer), match[1]) {
-			return false
+			parts = append(parts, "d20 = "+match[1])
+		}
+	}
+	if match := reResultMod.FindStringSubmatch(result); match != nil {
+		if !strings.Contains(answer, match[1]) {
+			parts = append(parts, "мод "+match[1])
 		}
 	}
 	if match := reResultVsDC.FindStringSubmatch(result); match != nil {
 		if !containsNumber(answerNumbers(reAnswerSum, answer), match[1]) {
-			return false
+			parts = append(parts, "итого "+match[1])
 		}
 		if !containsNumber(answerNumbers(reAnswerDC, answer), match[2]) {
-			return false
+			parts = append(parts, "DC "+match[2])
 		}
 	}
 	if match := reResultTotal.FindStringSubmatch(result); match != nil {
 		if !containsNumber(answerNumbers(reAnswerSum, answer), match[1]) {
-			return false
+			parts = append(parts, "итого "+match[1])
 		}
 	}
-	return true
+	if match := reResultOutcome.FindStringSubmatch(result); match != nil {
+		outcome := strings.ToLower(match[1])
+		if !strings.Contains(strings.ToLower(answer), "успех") &&
+			!strings.Contains(strings.ToLower(answer), "провал") {
+			parts = append(parts, outcome)
+		}
+	}
+	return parts
+}
+
+// missingCombatParts — то же для атаки combat: d20, КД цели и вердикт.
+// Служебный хвост про очередь ходов не дописывается.
+func missingCombatParts(answer, result string) []string {
+	answer = strings.NewReplacer("*", "", "`", "").Replace(answer)
+	var parts []string
+	if match := reResultD20.FindStringSubmatch(result); match != nil {
+		if !containsNumber(answerNumbers(reAnswerD20, answer), match[1]) {
+			parts = append(parts, "d20 = "+match[1])
+		}
+	}
+	if match := reResultCombatAC.FindStringSubmatch(result); match != nil {
+		if !containsNumber(answerNumbers(reAnswerDC, answer), match[1]) {
+			parts = append(parts, "против КД "+match[1])
+		}
+	}
+	if match := reResultCombatOutcome.FindStringSubmatch(result); match != nil {
+		if !strings.Contains(strings.ToLower(answer), match[1]) {
+			parts = append(parts, match[1])
+		}
+	}
+	return parts
 }
 
 func answerNumbers(pattern *regexp.Regexp, text string) []string {

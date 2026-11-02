@@ -74,17 +74,6 @@ type memoryPolicy struct {
 	budgetWarn atomic.Bool
 	log        *slog.Logger
 	window     policies.AssemblyPolicy
-	// turns считает ходы этого DM. Первый ход — начало сессии: маркер
-	// начала должен переживать все раунды тулов внутри хода, а не только
-	// первый вызов модели.
-	turns atomic.Int64
-}
-
-// OnTurn отмечает начало хода. Новый DM (после рестарта) снова начинает
-// счёт с единицы, поэтому первый ход новой сессии получает маркер.
-func (p *memoryPolicy) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
-	p.turns.Add(1)
-	return next(ev, cx)
 }
 
 func newMemoryPolicy(st *store.Store, window int, budget int64, total func() int64, log *slog.Logger) *memoryPolicy {
@@ -115,13 +104,6 @@ func (p *memoryPolicy) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event
 		evs = reduced
 	}
 	block := BuildMemoryBlock(p.store, sessionFrom(cx), visibleEventIDs(evs))
-	if p.turns.Load() == 1 {
-		if block == "" {
-			block = sessionStartHint
-		} else {
-			block += "\n\n" + sessionStartHint
-		}
-	}
 	block = p.withBudgetNotice(block)
 	if block != "" {
 		evs = insertBeforeLastRequest(evs, block)

@@ -206,9 +206,10 @@ func New(cfg Config) (*DM, error) {
 		func() middleware.Middleware { return memory },
 	}
 	if !cfg.SkipToolkit {
-		// Броски публичны: недостающую цитату результата дописываем сами.
-		// В режиме скриптованных трасс (SkipToolkit) гарантия выключена:
-		// eval-скореры должны видеть сырой ответ модели.
+		// Броски публичны: недостающие компоненты цитаты дописываем сами.
+		// В скриптованных офлайн-тестах (SkipToolkit) гарантия выключена,
+		// чтобы скореры видели сырой ответ модели. Живой eval и бой идут с
+		// гарантией: это продуктовое правило, а не метрика модели.
 		factories = append(factories, func() middleware.Middleware { return &rollQuoteMW{} })
 	}
 	factories = append(factories, cfg.ExtraMiddleware...)

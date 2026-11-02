@@ -43,13 +43,31 @@ func TestRollQuoteAppendsMissingResult(t *testing.T) {
 
 	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 11 +0 = 11 vs DC 12 -> ПРОВАЛ"
 	reply := runRollQuote(t, "skill_check", result, "Ты ничего не замечаешь.")
-	for _, want := range []string{"d20 = 11", "DC 12"} {
+	for _, want := range []string{"«Восприятие»", "d20 = 11", "мод +0", "итого 11", "DC 12", "провал"} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("в ответе нет %q:\n%s", want, reply)
 		}
 	}
 	if !strings.Contains(reply, "Ты ничего не замечаешь.") {
 		t.Fatalf("ответ модели потерялся:\n%s", reply)
+	}
+	if strings.Contains(reply, "🎲") {
+		t.Fatalf("в ответ попала вся строка тула:\n%s", reply)
+	}
+}
+
+// Частичная цитата не дублируется: дописываются только недостающие поля.
+func TestRollQuoteAppendsOnlyMissingParts(t *testing.T) {
+	t.Parallel()
+
+	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 11 +0 = 11 vs DC 12 -> ПРОВАЛ"
+	answer := "Провал: d20 = 11, итог 11."
+	reply := runRollQuote(t, "skill_check", result, answer)
+	if strings.Count(reply, "d20 = 11") != 1 {
+		t.Fatalf("d20 продублирован:\n%s", reply)
+	}
+	if !strings.Contains(reply, "DC 12") {
+		t.Fatalf("DC не дописан:\n%s", reply)
 	}
 }
 
@@ -58,7 +76,7 @@ func TestRollQuoteKeepsQuotedResult(t *testing.T) {
 	t.Parallel()
 
 	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 11 +0 = 11 vs DC 12 -> ПРОВАЛ"
-	answer := "Провал: d20 = 11, итог 11 против DC 12."
+	answer := "Провал: «Восприятие», d20 = 11, мод +0, итог 11 против DC 12."
 	reply := runRollQuote(t, "skill_check", result, answer)
 	if reply != answer {
 		t.Fatalf("ответ изменился при цитате:\nбыло: %s\nстало: %s", answer, reply)
@@ -71,7 +89,7 @@ func TestRollQuoteAppendsDiceTotal(t *testing.T) {
 
 	result := "🎲 Бросок 3d6:\n3d6 → [4, 4, 4] = 12\nИтого: 12"
 	reply := runRollQuote(t, "roll_dice", result, "Ты находишь двенадцать монет.")
-	if !strings.Contains(reply, "Итого: 12") {
+	if !strings.Contains(reply, "итого 12") {
 		t.Fatalf("в ответе нет итога броска:\n%s", reply)
 	}
 }
@@ -86,6 +104,9 @@ func TestDodgeQuoteAppendsMissingDisadvantage(t *testing.T) {
 	if !strings.Contains(strings.ToLower(reply), "помех") {
 		t.Fatalf("в ответе нет помехи:\n%s", reply)
 	}
+	if strings.Contains(reply, "Следующий ход") || strings.Contains(reply, "(lisa)") {
+		t.Fatalf("в ответ попал служебный хвост очереди:\n%s", reply)
+	}
 }
 
 // Если помеха уже названа, результат не дублируется.
@@ -97,6 +118,22 @@ func TestDodgeQuoteKeepsStatedDisadvantage(t *testing.T) {
 	reply := runToolQuote(t, "combat", `{"action":"dodge","attacker":"Дэн"}`, result, answer)
 	if reply != answer {
 		t.Fatalf("ответ изменился при названной помехе:\nбыло: %s\nстало: %s", answer, reply)
+	}
+}
+
+// Атака combat без цитаты получает d20, КД и вердикт, но не хвост очереди.
+func TestRollQuoteAppendsCombatAttackParts(t *testing.T) {
+	t.Parallel()
+
+	result := "Дэн атакует Гоблин: d20 = 11 +5 против КД 13 → попадание, урон 5. Следующий ход: Лиса (lisa)."
+	reply := runToolQuote(t, "combat", `{"action":"attack","enemy":"goblin-1"}`, result, "Дэн бьёт гоблина, урон 5.")
+	for _, want := range []string{"d20 = 11", "против КД 13", "попадание"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("в ответе нет %q:\n%s", want, reply)
+		}
+	}
+	if strings.Contains(reply, "Следующий ход") || strings.Contains(reply, "(lisa)") {
+		t.Fatalf("в ответ попал служебный хвост очереди:\n%s", reply)
 	}
 }
 
