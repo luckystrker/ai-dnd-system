@@ -96,6 +96,11 @@ func compareSchemaObjects(t *testing.T, want, got []schemaObject) {
 
 // Golden DDL: схема, извлечённая из TS-исходников, и схема, которую создаёт Go,
 // должны совпадать объект в объект (таблицы, индексы, FTS, триггеры).
+//
+// Слайс 6 добавил в ту же базу таблицы Telegram-канала (inbox, offset,
+// durable-история). Прод-схема TS при этом не меняется: из Go-схемы
+// вычитаются только новые объекты с префиксами telegram_/event_streams,
+// всё остальное сверяется с golden 1:1.
 func TestSchemaMatchesTSGoldenDDL(t *testing.T) {
 	goldenSQL, err := os.ReadFile(filepath.Join("testdata", "schema_ts.sql"))
 	if err != nil {
@@ -122,9 +127,29 @@ func TestSchemaMatchesTSGoldenDDL(t *testing.T) {
 		t.Fatal("FTS5 недоступен")
 	}
 	goDB := goStore.db
-	got := readSQLiteMaster(t, goDB)
+	got := make([]schemaObject, 0, len(want))
+	for _, object := range readSQLiteMaster(t, goDB) {
+		if isChannelSchemaObject(object) {
+			continue
+		}
+		got = append(got, object)
+	}
 	compareSchemaObjects(t, want, got)
 	goStore.Close()
+}
+
+// channelTables — таблицы слайса 6 поверх той же базы (схема TS не тронута).
+var channelTables = map[string]bool{
+	"telegram_updates":    true,
+	"telegram_poll_state": true,
+	"event_streams":       true,
+}
+
+func isChannelSchemaObject(object schemaObject) bool {
+	if channelTables[object.Name] || channelTables[object.TblName] {
+		return true
+	}
+	return strings.HasPrefix(object.Name, "idx_telegram_")
 }
 
 // FTS-состояние, оставленное TS: Go должен дописать только хвост и не

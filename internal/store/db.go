@@ -202,6 +202,36 @@ var schema = []string{
   enemies TEXT NOT NULL,
   saved_at TEXT NOT NULL
 )`,
+
+	// --- durable Telegram-канал (слайс 6) -----------------------------------
+	// Апдейт попадает сюда до обработки. Первичный ключ по update_id — дедуп
+	// при повторной доставке (offset сохраняется отдельно и может отставать
+	// на один апдейт после падения). processed_at ставится после обработки:
+	// после рестарта необработанные апдейты дочитываются.
+	`CREATE TABLE IF NOT EXISTS telegram_updates (
+  update_id INTEGER PRIMARY KEY,
+  chat_key TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  processed_at TEXT
+)`,
+	`CREATE INDEX IF NOT EXISTS idx_telegram_updates_pending
+  ON telegram_updates (processed_at, update_id)`,
+	// Offset long-poll. Одна строка: следующее значение, которое просим у
+	// Telegram. Пишется после записи апдейтов в inbox.
+	`CREATE TABLE IF NOT EXISTS telegram_poll_state (
+  id TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+)`,
+	// Durable-история ходов чата: stream.Storage поверх SQLite. seq задаёт
+	// порядок событий в потоке; компакция переписывает поток через SetHistory.
+	`CREATE TABLE IF NOT EXISTS event_streams (
+  stream_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (stream_id, seq)
+)`,
 }
 
 // Store — соединение с базой кампаний и все операции памяти.
