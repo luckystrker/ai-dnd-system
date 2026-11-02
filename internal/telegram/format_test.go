@@ -120,4 +120,33 @@ func TestSplitMessageText(t *testing.T) {
 			t.Fatalf("кусок начинается с половины суррогатной пары: %q", chunk)
 		}
 	}
+
+	// Ровно на границе — один кусок; на байт больше — два.
+	if chunks := SplitMessageText(strings.Repeat("x", MessageLimit)); len(chunks) != 1 {
+		t.Fatalf("текст ровно в лимит разрезан на %d кусков", len(chunks))
+	}
+	if chunks := SplitMessageText(strings.Repeat("x", MessageLimit+1)); len(chunks) != 2 ||
+		utf16Len(chunks[0]) != MessageLimit || chunks[1] != "x" {
+		t.Fatalf("текст на единицу длиннее лимита: %v", chunks)
+	}
+
+	// Абзацный разрыв попадает на стык кусков: первый кусок кончается «\n\n».
+	paragraphText := strings.Repeat("а", 3000) + "\n\n" + strings.Repeat("б", 2000)
+	chunks = SplitMessageText(paragraphText)
+	if len(chunks) != 2 || !strings.HasSuffix(chunks[0], "\n\n") {
+		t.Fatalf("абзацный разрыв не стал границей: %v", chunks)
+	}
+	if joined := strings.Join(chunks, ""); joined != paragraphText {
+		t.Fatal("абзацный текст изменился при разбивке")
+	}
+
+	// Длинное слово без пробелов режется ровно по лимиту, без потерь.
+	word := strings.Repeat("я", MessageLimit*2+5)
+	chunks = SplitMessageText(word)
+	if len(chunks) != 3 || utf16Len(chunks[0]) != MessageLimit || utf16Len(chunks[1]) != MessageLimit {
+		t.Fatalf("длинное слово разрезано не по лимиту: %d кусков", len(chunks))
+	}
+	if joined := strings.Join(chunks, ""); joined != word {
+		t.Fatal("длинное слово изменилось при разбивке")
+	}
 }
