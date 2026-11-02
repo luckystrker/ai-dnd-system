@@ -87,7 +87,7 @@ func buildToolkit(name string, d Deps, allowed map[string]bool) (*agotools.Toolk
 
 func buildAll(d Deps) (map[string]agotools.Tool, error) {
 	groups := []func(Deps) ([]namedTool, error){
-		campaignTools, memoryTools, environmentTools,
+		campaignTools, memoryTools, environmentTools, diceTools,
 	}
 	out := map[string]agotools.Tool{}
 	for _, group := range groups {

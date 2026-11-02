@@ -202,7 +202,7 @@ func (d Deps) finishCampaign(sess *Session, args finishCampaignArgs) (any, error
 	return map[string]any{
 		"ok": true,
 		"campaign": map[string]any{
-			"id": finished.ID, "slug": finished.Slug, "title": finished.Title, "status": finished.Status,
+			"id": finished.ID, "slug": finished.Slug, "title": finished.Title, "status": string(finished.Status),
 		},
 		"note": fmt.Sprintf("Кампания «%s» завершена. Данные сохранены, чат свободен для новой кампании (/newcampaign). Попрощайся с игроками и подведи краткий итог их приключений.", finished.Title),
 	}, nil
