@@ -15,12 +15,15 @@ import (
 // Session — контекст вызова тула, который приходит через DI (aginject), а не
 // из аргументов модели: кампания сессии, говорящий, чат/топик.
 type Session struct {
-	CampaignID      string
-	CampaignSlug    string
-	UserID          string
-	Name            string
-	Username        string
-	ChatID          string
+	CampaignID   string
+	CampaignSlug string
+	UserID       string
+	Name         string
+	Username     string
+	ChatID       string
+	// ChatType — тип чата Telegram ("private", "group", "supergroup").
+	// Используется блоком памяти: в группе он напоминает, кто пишет сейчас.
+	ChatType        string
 	MessageThreadID *int
 	// Trusted — автоматизация (летописец): кампания задана кодом при запуске,
 	// проверка членства не нужна, но и админ-тулы ей недоступны (их нет в

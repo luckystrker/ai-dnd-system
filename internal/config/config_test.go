@@ -32,6 +32,38 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DBPath != config.DefaultDBPath {
 		t.Errorf("DBPath = %q, want %q", cfg.DBPath, config.DefaultDBPath)
 	}
+	if cfg.ContextWindowTokens != config.DefaultContextWindowTokens {
+		t.Errorf("ContextWindowTokens = %d, want %d", cfg.ContextWindowTokens, config.DefaultContextWindowTokens)
+	}
+	if cfg.TurnTimeoutSeconds != config.DefaultTurnTimeoutSeconds {
+		t.Errorf("TurnTimeoutSeconds = %d, want %d", cfg.TurnTimeoutSeconds, config.DefaultTurnTimeoutSeconds)
+	}
+	if cfg.TokenBudget != config.DefaultTokenBudget {
+		t.Errorf("TokenBudget = %d, want %d", cfg.TokenBudget, config.DefaultTokenBudget)
+	}
+}
+
+func TestLoadContextLimits(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{
+		"LLM_API_KEY":           "sk-test",
+		"CONTEXT_WINDOW_TOKENS": "64000",
+		"TURN_TIMEOUT_SECONDS":  "90",
+		"TOKEN_BUDGET":          "150000",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ContextWindowTokens != 64000 {
+		t.Errorf("ContextWindowTokens = %d, want 64000", cfg.ContextWindowTokens)
+	}
+	if cfg.TurnTimeoutSeconds != 90 {
+		t.Errorf("TurnTimeoutSeconds = %d, want 90", cfg.TurnTimeoutSeconds)
+	}
+	if cfg.TokenBudget != 150000 {
+		t.Errorf("TokenBudget = %d, want 150000", cfg.TokenBudget)
+	}
 }
 
 func TestLoadProviderKeyFallback(t *testing.T) {
@@ -105,6 +137,21 @@ func TestLoadErrors(t *testing.T) {
 			name:   "нулевой лимит раундов",
 			env:    map[string]string{"LLM_API_KEY": "k", "MAX_TOOL_ROUNDS": "0"},
 			substr: "MAX_TOOL_ROUNDS",
+		},
+		{
+			name:   "маленькое окно контекста",
+			env:    map[string]string{"LLM_API_KEY": "k", "CONTEXT_WINDOW_TOKENS": "100"},
+			substr: "CONTEXT_WINDOW_TOKENS",
+		},
+		{
+			name:   "битый дедлайн хода",
+			env:    map[string]string{"LLM_API_KEY": "k", "TURN_TIMEOUT_SECONDS": "0"},
+			substr: "TURN_TIMEOUT_SECONDS",
+		},
+		{
+			name:   "битый бюджет токенов",
+			env:    map[string]string{"LLM_API_KEY": "k", "TOKEN_BUDGET": "-1"},
+			substr: "TOKEN_BUDGET",
 		},
 	}
 
