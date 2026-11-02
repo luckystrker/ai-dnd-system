@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -246,6 +247,17 @@ type Store struct {
 	// дублируют fts_journal.
 	ftsMu    sync.Mutex
 	ftsReady bool
+	// log принимает проглоченные ошибки хранилища (FTS DDL и catch-up):
+	// поиск продолжает работать сканом, но слепого пятна в логах нет.
+	log *slog.Logger
+}
+
+// SetLogger задаёт логгер хранилища; nil — slog.Default().
+func (s *Store) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s.log = logger
 }
 
 // Open открывает базу кампаний: WAL, foreign_keys=ON, DDL и миграции старых
@@ -263,7 +275,7 @@ func Open(path string) (*Store, error) {
 	// Один писатель: modernc/SQLite не любит конкурентные записи в одном
 	// процессе, а WAL обслуживает внешних читателей (второй Store).
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, log: slog.Default()}
 	if err := store.initialize(); err != nil {
 		_ = db.Close()
 		return nil, err

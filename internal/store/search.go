@@ -137,6 +137,7 @@ func (s *Store) ensureFTSIndex() bool {
 	if !s.ftsReady {
 		for _, statement := range ftsSchema {
 			if _, err := s.db.Exec(statement); err != nil {
+				s.log.Warn("store: FTS DDL failed; falling back to JS scan", "error", err)
 				return false
 			}
 		}
@@ -146,9 +147,12 @@ func (s *Store) ensureFTSIndex() bool {
 		if !source.FTS {
 			continue
 		}
-		// Ошибку источника глотаем, как TS: остальные источники и JS-скан
-		// продолжают работать. Следующий поиск повторит catch-up.
-		_ = s.catchUpFTS(source)
+		// Ошибку источника не прерываем (остальные источники и JS-скан
+		// продолжают работать, следующий поиск повторит catch-up), но и не
+		// глотаем молча: без лога отказ FTS — слепое пятно в проде.
+		if err := s.catchUpFTS(source); err != nil {
+			s.log.Warn("store: FTS catch-up failed", "source", source.Table, "error", err)
+		}
 	}
 	return true
 }
