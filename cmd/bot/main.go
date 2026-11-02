@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luckystriker/ai-dnd-system/internal/chronicler"
 	"github.com/luckystriker/ai-dnd-system/internal/config"
+	"github.com/luckystriker/ai-dnd-system/internal/dayclose"
 	"github.com/luckystriker/ai-dnd-system/internal/dm"
 	"github.com/luckystriker/ai-dnd-system/internal/store"
 )
@@ -59,9 +61,30 @@ func run(args []string) error {
 	}
 	defer func() { _ = st.Close() }()
 
+	// Закрытие дня ставится в очередь из advance_day. После рестарта очередь
+	// дочитывает дни без саммари (ScanGaps), а сбой летописца закрывается
+	// fallback-дайджестом.
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(campaign *store.Campaign) (dayclose.Archivist, error) {
+			return chronicler.New(chronicler.Config{
+				Model:         modelCfg,
+				Store:         st,
+				CampaignID:    campaign.ID,
+				MaxToolRounds: cfg.MaxToolRounds,
+			})
+		},
+	})
+	if err != nil {
+		return err
+	}
+	queue.Start(context.Background())
+	defer queue.Close()
+
 	bot, err := dm.New(dm.Config{
 		Model:               modelCfg,
 		Store:               st,
+		DayCloser:           queue,
 		MaxToolRounds:       cfg.MaxToolRounds,
 		ContextWindowTokens: cfg.ContextWindowTokens,
 		TurnTimeout:         time.Duration(cfg.TurnTimeoutSeconds) * time.Second,

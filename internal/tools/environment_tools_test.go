@@ -37,6 +37,12 @@ func TestAdvanceDayAndDayCloser(t *testing.T) {
 	if payload["previousDay"] != 1 || payload["day"] != 2 {
 		t.Fatalf("result = %+v", payload)
 	}
+	if payload["closed"] != false || payload["queued"] != true {
+		t.Fatalf("result = %+v", payload)
+	}
+	if !strings.Contains(payload["note"].(string), "поставлено в очередь") {
+		t.Fatalf("note = %v", payload["note"])
+	}
 	updated, _ := env.store.GetCampaign(env.campaign.ID)
 	if updated.CurrentDay == nil || *updated.CurrentDay != 2 || updated.TimeOfDay == nil || *updated.TimeOfDay != store.TimeMorning {
 		t.Fatalf("campaign = %+v", updated)
@@ -45,15 +51,21 @@ func TestAdvanceDayAndDayCloser(t *testing.T) {
 	if day == nil || day.Note == nil || *day.Note != "ночёвка" {
 		t.Fatalf("day = %+v", day)
 	}
+}
 
-	// Без closer тул подсказывает вызвать летописца.
-	env.deps.DayCloser = nil
-	result, err = env.deps.advanceDay(env.player, advanceDayArgs{})
+// Без closer тул не просит модель вызывать летописца вручную.
+func TestAdvanceDayWithoutCloserDoesNotMentionChronicler(t *testing.T) {
+	env := newTestEnv(t)
+	result, err := env.deps.advanceDay(env.player, advanceDayArgs{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.(map[string]any)["note"].(string), "chronicler") {
-		t.Fatalf("note = %v", result)
+	note := result.(map[string]any)["note"].(string)
+	if strings.Contains(note, "chronicler") {
+		t.Fatalf("note = %q", note)
+	}
+	if result.(map[string]any)["queued"] != false {
+		t.Fatalf("result = %+v", result)
 	}
 }
 

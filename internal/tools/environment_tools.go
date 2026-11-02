@@ -64,28 +64,29 @@ func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
 		return nil, fromStoreError(err)
 	}
 	closed := false
+	queued := false
 	closeFailed := false
 	if d.DayCloser != nil {
 		if err := d.DayCloser.CloseDay(context.Background(), updated, previous); err != nil {
 			// День уже сдвинут: не просим модель повторить advance_day (это
-			// сдвинуло бы день ещё раз). Закрытие повторит код/очередь слайса 5.
+			// сдвинуло бы день ещё раз). Закрытие повторит код/очередь.
 			log.Printf("tools: advance_day: DayCloser failed for campaign %s day %d: %v", updated.ID, previous, err)
 			closeFailed = true
 		} else {
-			closed = true
+			queued = true
 		}
 	}
 	result := map[string]any{
 		"ok": true, "campaignSlug": updated.Slug, "previousDay": previous, "day": day,
-		"closed": closed,
+		"closed": closed, "queued": queued,
 	}
 	switch {
-	case closed:
-		result["note"] = fmt.Sprintf("Наступил игровой день %d. День %d закрыт летописцем.", day, previous)
 	case closeFailed:
-		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрыть день %d сразу не удалось; день уже сдвинут, повторный вызов advance_day не нужен — закрытие повторит код.", day, previous)
+		result["note"] = fmt.Sprintf("Наступил игровой день %d. Поставить закрытие дня %d в очередь не удалось; день уже сдвинут, повторный вызов advance_day не нужен — закрытие повторит код.", day, previous)
+	case queued:
+		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрытие дня %d поставлено в очередь летописца; повторный вызов advance_day не нужен.", day, previous)
 	default:
-		result["note"] = fmt.Sprintf("Наступил игровой день %d. Теперь вызови субагента chronicler, чтобы закрыть день %d: передай ему slug кампании номер закрытого дня и попроси записать саммари дня ключевые события и изменения NPC и персонажей.", day, previous)
+		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрытие дня выполнит код; повторный вызов advance_day не нужен.", day)
 	}
 	return result, nil
 }
@@ -132,7 +133,7 @@ func (d Deps) advanceTime(sess *Session, args advanceTimeArgs) (any, error) {
 	}
 	note := "Игровое время: " + timeLabel(next) + "."
 	if next == store.TimeMorning && current != store.TimeMorning {
-		note = "Прошла полночь — наступило утро. Теперь вызови advance_day чтобы перевести игру на новый день (и закрыть старый через chronicler)."
+		note = "Прошла полночь — наступило утро. Теперь вызови advance_day чтобы перевести игру на новый день; закрытие старого дня выполнит код."
 	}
 	return map[string]any{
 		"ok": true, "timeOfDay": string(next), "inGameDate": nullableString(updated.InGameDate), "note": note,

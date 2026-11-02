@@ -60,8 +60,9 @@ type ImagePoster interface {
 	PostImage(ctx context.Context, chatID string, messageThreadID *int, imageURL, caption string) error
 }
 
-// DayCloser — точка расширения advance_day: детерминированный запуск
-// летописца появится в слайсе 5, тул уже умеет его вызывать.
+// DayCloser — точка расширения advance_day: детерминированное закрытие дня
+// летописцем. Реализация (dayclose.Queue) ставит задачу в очередь и сразу
+// возвращает управление; повторять advance_day не нужно.
 type DayCloser interface {
 	CloseDay(ctx context.Context, campaign *store.Campaign, closedDay int) error
 }

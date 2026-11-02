@@ -1,0 +1,324 @@
+package dayclose_test
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/luckystrker/ago/events"
+	agotest "github.com/luckystrker/ago/testing"
+
+	"github.com/luckystriker/ai-dnd-system/internal/chronicler"
+	"github.com/luckystriker/ai-dnd-system/internal/dayclose"
+	"github.com/luckystriker/ai-dnd-system/internal/store"
+)
+
+type fakeArchivist struct {
+	calls       []int
+	campaignIDs []string
+	err         error
+	mutate      func(campaign *store.Campaign, day int) error
+}
+
+func (f *fakeArchivist) CloseDay(_ context.Context, campaign *store.Campaign, day int, _ string) (chronicler.Report, error) {
+	f.calls = append(f.calls, day)
+	f.campaignIDs = append(f.campaignIDs, campaign.ID)
+	if f.mutate != nil {
+		if err := f.mutate(campaign, day); err != nil {
+			return chronicler.Report{}, err
+		}
+	}
+	return chronicler.Report{}, f.err
+}
+
+func newCampaignAtDayTwo(t *testing.T) (*store.Store, *store.Campaign) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "campaigns.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	campaign, err := st.CreateCampaign(store.NewCampaignInput{
+		Title: "Тест", Length: store.LengthShort, Setting: "s", Theme: "t",
+	}, store.NewOwnerInput{UserID: "dm-1"})
+	if err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	author := "dm-1"
+	if err := st.AppendTranscriptEntry(campaign.Slug, 1, store.TranscriptEntry{
+		Kind: "player", Author: &author, Text: "Странник осматривает дверь",
+	}); err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	if err := st.AppendTranscriptEntry(campaign.Slug, 1, store.TranscriptEntry{
+		Kind: "dm", Text: "Дверь заперта, слышен скрип.",
+	}); err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	if _, err := st.BindAndActivate(campaign.ID, "dm-1", store.BoundChat{ChatID: "-100"}); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	updated, err := st.AdvanceDay(campaign.ID, "dm-1")
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	return st, updated
+}
+
+func queueWith(t *testing.T, st *store.Store, fake *fakeArchivist) *dayclose.Queue {
+	t.Helper()
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	return queue
+}
+
+func TestQueueClosesDayThroughArchivist(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	if err := queue.CloseDay(context.Background(), campaign, 1); err != nil {
+		t.Fatalf("CloseDay: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0] != 1 {
+		t.Fatalf("вызовы летописца = %v, want [1]", fake.calls)
+	}
+}
+
+func TestQueueEnqueueIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	for i := 0; i < 3; i++ {
+		if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+			t.Fatalf("Enqueue %d: %v", i+1, err)
+		}
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("день закрыт %d раз, want 1", len(fake.calls))
+	}
+}
+
+func TestQueueWritesFallbackDigestOnFailure(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	fake := &fakeArchivist{err: errors.New("модель недоступна")}
+	queue := queueWith(t, st, fake)
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err == nil {
+		t.Fatal("ожидалась ошибка летописца")
+	}
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record == nil || record.Summary == nil || !strings.HasPrefix(*record.Summary, store.AutoDigestMark) {
+		t.Fatalf("fallback-дайджест не записан: %+v", record)
+	}
+	if !strings.Contains(*record.Summary, "Дверь заперта") {
+		t.Fatalf("дайджест не содержит события дня: %q", *record.Summary)
+	}
+}
+
+// Летописец «отработал» без ошибки, но ничего не записал: день всё равно не
+// остаётся без саммари.
+func TestQueueWritesFallbackWhenArchivistWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record == nil || record.Summary == nil || !strings.HasPrefix(*record.Summary, store.AutoDigestMark) {
+		t.Fatalf("fallback-дайджест не записан: %+v", record)
+	}
+}
+
+// Fallback не затирает уже записанное настоящее саммари.
+func TestQueueFallbackKeepsExistingSummary(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	if err := st.SetDaySummary(campaign.Slug, 1, "настоящее саммари летописца"); err != nil {
+		t.Fatalf("SetDaySummary: %v", err)
+	}
+	fake := &fakeArchivist{err: errors.New("сбой")}
+	queue := queueWith(t, st, fake)
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	_ = queue.RunPending(context.Background())
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record.Summary == nil || *record.Summary != "настоящее саммари летописца" {
+		t.Fatalf("саммари затёрто: %+v", record.Summary)
+	}
+}
+
+// После рестарта очередь дочитывает дни без саммари: durable-состояние — это
+// отсутствие summary в campaign_days, отдельной таблицы нет.
+func TestQueueScanGapsFindsUnclosedDays(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0] != 1 {
+		t.Fatalf("ScanGaps не подхватил день 1: %v", fake.calls)
+	}
+
+	if err := st.SetDaySummary(campaign.Slug, 1, "настоящее саммари"); err != nil {
+		t.Fatalf("SetDaySummary: %v", err)
+	}
+	fake.calls = nil
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("закрытый день снова в очереди: %v", fake.calls)
+	}
+}
+
+// День без записей закрывать нечем: летописец не вызывается и денег не тратит.
+func TestQueueScanGapsSkipsEmptyDays(t *testing.T) {
+	t.Parallel()
+
+	st, _ := newCampaignAtDayTwo(t)
+	// Новая кампания: день 2 наступил, но день 1 пуст.
+	empty, err := st.CreateCampaign(store.NewCampaignInput{
+		Title: "Пустой день", Length: store.LengthShort, Setting: "s", Theme: "t",
+	}, store.NewOwnerInput{UserID: "dm-1"})
+	if err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	if _, err := st.BindAndActivate(empty.ID, "dm-1", store.BoundChat{ChatID: "-200"}); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if _, err := st.AdvanceDay(empty.ID, "dm-1"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	for index, campaignID := range fake.campaignIDs {
+		if campaignID == empty.ID {
+			t.Fatalf("пустой день %d попал в очередь", fake.calls[index])
+		}
+	}
+	// День 1 у кампании с транскриптом должен быть в очереди.
+	if len(fake.calls) != 1 || fake.calls[0] != 1 {
+		t.Fatalf("вызовы летописца = %v, want [1]", fake.calls)
+	}
+}
+
+// Очередь без фабрики летописца всё равно закрывает день дайджестом.
+func TestQueueWithoutArchivistFallsBack(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	queue, err := dayclose.New(dayclose.Config{Store: st})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record == nil || record.Summary == nil {
+		t.Fatalf("день без саммари: %+v", record)
+	}
+}
+
+// Сквозной сценарий: очередь выполняет настоящего летописца, и день получает
+// саммари и ключевое событие из БД (а не из слов модели).
+func TestQueueRunsRealChronicler(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	cfg := agotest.NewTestConfig(
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID: "c1", Name: "update_day_summary",
+			Arguments: `{"day":1,"summary":"Партия вошла в трактир.","headline":"Трактир"}`,
+		}}}},
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID: "c2", Name: "append_key_event",
+			Arguments: `{"event":"Марта обещала помочь.","day":1}`,
+		}}}},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "Готово."}},
+	)
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(c *store.Campaign) (dayclose.Archivist, error) {
+			return chronicler.New(chronicler.Config{Model: cfg, Store: st, CampaignID: c.ID})
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if err := queue.CloseDay(context.Background(), campaign, 1); err != nil {
+		t.Fatalf("CloseDay: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record == nil || record.Summary == nil || !strings.Contains(*record.Summary, "трактир") {
+		t.Fatalf("саммари не записано: %+v", record)
+	}
+	permanent, regular, err := st.SplitKeyEvents(campaign.Slug)
+	if err != nil {
+		t.Fatalf("SplitKeyEvents: %v", err)
+	}
+	if len(permanent)+len(regular) != 1 {
+		t.Fatalf("ключевые события = %v / %v, want 1", permanent, regular)
+	}
+}
