@@ -407,9 +407,13 @@ type fixtureUser struct {
 }
 
 func buildFixture(st *store.Store, caseName string, meta evalgame.CaseMeta) (fixture, error) {
+	// Цель кампании — такая же реальная часть состояния, как партия и
+	// локация: без неё кейс открытия сессии требует «активную цель», которой
+	// нет в базе. Фикстура задаёт её так же, как это сделал бы start_campaign.
+	goal := "оборонять деревню от гоблинов"
 	campaign, err := st.CreateCampaign(store.NewCampaignInput{
 		Title: "Eval " + caseName, Length: store.LengthShort,
-		Setting: "приграничье с гоблинами", Theme: "оборона деревни",
+		Setting: "приграничье с гоблинами", Theme: "оборона деревни", Goal: &goal,
 	}, store.NewOwnerInput{UserID: fixtureDM.ID, Name: &fixtureDM.Name, Username: &fixtureDM.Username})
 	if err != nil {
 		return fixture{}, fmt.Errorf("evalrun: кампания: %w", err)

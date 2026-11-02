@@ -2,6 +2,7 @@ package evalrun
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -241,6 +242,31 @@ func requireReportScore(t *testing.T, report *evalgame.Report, caseName, scorer 
 		}
 	}
 	t.Fatalf("скорер %s не найден у %s", scorer, caseName)
+}
+
+// Фикстура задаёт цель кампании: кейс открытия сессии проверяет пересказ
+// «какая цель активна», и цель должна быть в базе, а не только в теме.
+func TestFixtureCampaignHasGoal(t *testing.T) {
+	t.Parallel()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "campaigns.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	fixture, err := buildFixture(st, "day-04-session-opener", evalgame.CaseMeta{
+		Category: "day", Speaker: "Дэн", Role: "player",
+	})
+	if err != nil {
+		t.Fatalf("buildFixture: %v", err)
+	}
+	campaign, err := st.GetCampaign(fixture.campaignID)
+	if err != nil || campaign == nil {
+		t.Fatalf("GetCampaign: %v", err)
+	}
+	if campaign.Goal == nil || strings.TrimSpace(*campaign.Goal) == "" {
+		t.Fatalf("у кампании фикстуры нет цели: %+v", campaign.Goal)
+	}
 }
 
 // fakeArchivist пишет саммари и шапку, как настоящий летописец, без LLM.
