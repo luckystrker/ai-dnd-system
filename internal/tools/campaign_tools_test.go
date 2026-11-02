@@ -195,3 +195,37 @@ func TestGetGameContextNoCampaign(t *testing.T) {
 		t.Fatalf("campaign = %v", result)
 	}
 }
+
+func TestSaveCharacterBoundSessionRestrictsCampaign(t *testing.T) {
+	env := newTestEnv(t)
+	other, err := env.store.CreateCampaign(store.NewCampaignInput{
+		Title: "Другая", Length: store.LengthShort, Setting: "s", Theme: "t",
+	}, store.NewOwnerInput{UserID: "u-other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.store.AddMember(other.ID, "u-other", store.NewMemberInput{UserID: "u-player"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Привязанная сессия A не может создать персонажа в B.
+	_, err = env.deps.saveCharacter(env.player, saveCharacterArgs{
+		CampaignID: other.ID, Name: "Чужой", CharacterClass: "воин", Race: "человек",
+	})
+	wantToolCode(t, err, CodeAccessDenied)
+
+	// В своей кампании — можно.
+	if _, err := env.deps.saveCharacter(env.player, saveCharacterArgs{
+		CampaignID: env.campaign.ID, Name: "Свой", CharacterClass: "воин", Race: "человек",
+	}); err != nil {
+		t.Fatalf("saveCharacter in own campaign: %v", err)
+	}
+
+	// Личка без привязки: можно в любую кампанию, где вызывающий участник.
+	unbound := &Session{UserID: "u-player", ChatID: "-private"}
+	if _, err := env.deps.saveCharacter(unbound, saveCharacterArgs{
+		CampaignID: other.ID, Name: "Из лички", CharacterClass: "плут", Race: "эльф",
+	}); err != nil {
+		t.Fatalf("saveCharacter unbound: %v", err)
+	}
+}

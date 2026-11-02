@@ -295,6 +295,27 @@ func (d Deps) saveCharacter(sess *Session, args saveCharacterArgs) (any, error) 
 	if sess == nil || sess.UserID == "" {
 		return nil, errNoIdentity()
 	}
+	// Привязанная сессия не может создавать персонажа в другой кампании:
+	// явный campaignId нужен только для /newchar в личке без привязки.
+	if sessionKey := sessionCampaignKey(sess); sessionKey != "" {
+		target, err := d.DB.GetCampaign(args.CampaignID)
+		if err != nil {
+			return nil, fromStoreError(err)
+		}
+		if target == nil {
+			return nil, errNotFound("Кампания «"+args.CampaignID+"» не найдена.",
+				"Check the campaign id or slug with list_campaigns and retry.")
+		}
+		sessionCampaign, err := d.DB.GetCampaign(sessionKey)
+		if err != nil {
+			return nil, fromStoreError(err)
+		}
+		if sessionCampaign != nil && target.ID != sessionCampaign.ID {
+			return nil, toolError(CodeAccessDenied, false,
+				"Нельзя создать персонажа в другой кампании из привязанного чата.",
+				"Create the character in the campaign bound to this chat, or use a private chat without a bound campaign.")
+		}
+	}
 	stats := map[string]float64{}
 	for key, value := range args.Stats {
 		stats[key] = float64(value)
@@ -529,6 +550,16 @@ func (d Deps) getGameContext(sess *Session) (any, error) {
 }
 
 // --- общие преобразования ---
+
+func sessionCampaignKey(sess *Session) string {
+	if sess == nil {
+		return ""
+	}
+	if sess.CampaignID != "" {
+		return sess.CampaignID
+	}
+	return sess.CampaignSlug
+}
 
 func optionalString(value string) *string {
 	if value == "" {
