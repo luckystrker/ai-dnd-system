@@ -187,29 +187,38 @@ func New(cfg Config) (*DM, error) {
 
 	memory := newMemoryPolicy(cfg.Store, window, budget, monitor.Total, logger)
 
+	factories := []middleware.Factory{
+		// Сессия (говорящий/кампания) обновляется в начале каждого хода:
+		// один DM обслуживает весь чат, а автор сообщения меняется.
+		func() middleware.Middleware { return sessionMiddleware{sessionFn: sessionFn} },
+		// Индикатор «печатает…» на старте хода и перед вызовами тулов.
+		func() middleware.Middleware { return activityMiddleware{fn: cfg.OnToolActivity} },
+		// Бюджет токенов — на ход: сбрасываем счётчик до первого вызова
+		// модели этого хода.
+		func() middleware.Middleware { return budgetReset{monitor: monitor} },
+		// Компакция — после хода и после записи ответа в транскрипт.
+		// Ошибку компакции глотаем, чтобы готовый ответ не превратился
+		// в нейтральный.
+		safeCompactionFactory(compactionFactory(client, window), logger),
+		func() middleware.Middleware {
+			return &transcriptMW{store: cfg.Store, log: logger}
+		},
+		func() middleware.Middleware { return memory },
+	}
+	if !cfg.SkipToolkit {
+		// Броски публичны: недостающую цитату результата дописываем сами.
+		// В режиме скриптованных трасс (SkipToolkit) гарантия выключена:
+		// eval-скореры должны видеть сырой ответ модели.
+		factories = append(factories, func() middleware.Middleware { return &rollQuoteMW{} })
+	}
+	factories = append(factories, cfg.ExtraMiddleware...)
+
 	agentOpts := []agent.Option{
 		agent.WithConfig(cfg.Model),
 		agent.WithTools(agentTools...),
 		agent.WithDependencies(map[string]any{sessionDepKey: session}),
 		agent.WithStreamBase(conversation),
-		agent.WithMiddleware(append([]middleware.Factory{
-			// Сессия (говорящий/кампания) обновляется в начале каждого хода:
-			// один DM обслуживает весь чат, а автор сообщения меняется.
-			func() middleware.Middleware { return sessionMiddleware{sessionFn: sessionFn} },
-			// Индикатор «печатает…» на старте хода и перед вызовами тулов.
-			func() middleware.Middleware { return activityMiddleware{fn: cfg.OnToolActivity} },
-			// Бюджет токенов — на ход: сбрасываем счётчик до первого вызова
-			// модели этого хода.
-			func() middleware.Middleware { return budgetReset{monitor: monitor} },
-			// Компакция — после хода и после записи ответа в транскрипт.
-			// Ошибку компакции глотаем, чтобы готовый ответ не превратился
-			// в нейтральный.
-			safeCompactionFactory(compactionFactory(client, window), logger),
-			func() middleware.Middleware {
-				return &transcriptMW{store: cfg.Store, log: logger}
-			},
-			func() middleware.Middleware { return memory },
-		}, cfg.ExtraMiddleware...)...),
+		agent.WithMiddleware(factories...),
 	}
 	agentOpts = append(agentOpts, agent.WithMaxToolRounds(maxToolRounds))
 	a := agent.New("dm", instructions, agentOpts...)

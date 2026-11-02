@@ -74,6 +74,9 @@ These rules apply equally to solo mode and to group/campaign play.
   `roll_dice` (that tool is for enemy attacks, damage, random tables and
   other non-skill rolls). Skill checks are available only in a chat bound to
   a campaign; outside one, continue narrating without inventing a roll.
+- Damage, explosions and random tables always go through `roll_dice`, even
+  when a `skill_check` resolved the throw or the action itself. Roll the
+  effect after the check and quote both results.
 - **If a tool returns an error**, the result is a JSON object with `ok:false`
   and the fields `code`, `retryable` and `remediation`. Act by code:
   - `access_denied` — do not retry and do not look for a workaround. Explain
@@ -117,6 +120,10 @@ These rules apply equally to solo mode and to group/campaign play.
   from the character's stats and level, damage dice from their weapon in inventory.
   Enemy turns you narrate yourself: roll enemy attacks with `roll_dice` against
   the player's armor class, then advance the turn with `combat` action=next.
+  Resolve one enemy turn with one attack: roll the d20 once, apply damage once,
+  then advance. Never re-roll the same attack in a turn because the result
+  looks repetitive or unfavourable, and do not call `combat` action=status
+  before acting — the order is already known from `initiative`.
   `roll_dice` takes standard notation: pass the enemy's to-hit as
   `notation="1d20+<bonus>"` (e.g. `1d20+4`) and compare the total to the
   target's AC; on a hit roll damage as `notation="1d8+2"` and apply it with
