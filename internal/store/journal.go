@@ -118,41 +118,7 @@ func (s *Store) AppendTranscriptEntry(campaignSlug string, day int, entry Transc
 	if err != nil || !ok {
 		return err
 	}
-	text := jsTrim(collapseNewlines(entry.Text))
-	if text == "" {
-		return nil
-	}
-	time := nowISO()
-	if entry.At != nil {
-		time = *entry.At
-	}
-	clock := ""
-	if len(time) >= 16 {
-		clock = time[11:16]
-	}
-	var line string
-	switch entry.Kind {
-	case "player":
-		author := "?"
-		if entry.Author != nil {
-			author = *entry.Author
-		}
-		line = fmt.Sprintf("- [%s] **Игрок @%s**: %s", clock, author, text)
-	case "dm":
-		line = fmt.Sprintf("- [%s] **DM**: %s", clock, text)
-	default:
-		line = fmt.Sprintf("- [%s] *%s*", clock, text)
-	}
-	var marker any
-	if entry.EventID != nil && *entry.EventID != "" {
-		marker = "evt:" + *entry.EventID
-		line += fmt.Sprintf(" <!-- evt:%s -->", *entry.EventID)
-	}
-	_, err = s.db.Exec(
-		"INSERT OR IGNORE INTO transcript_entries (campaign_id, day, line, event_id) VALUES (?, ?, ?, ?)",
-		id, day, line, marker,
-	)
-	return err
+	return insertTranscriptEntry(s.db, id, day, entry)
 }
 
 // ReadDay читает день целиком; nil, если дня нет.
@@ -341,25 +307,7 @@ func (s *Store) AppendKeyEvent(campaignSlug string, day int, text string, eventI
 	if err != nil || !ok {
 		return err
 	}
-	clean := jsTrim(collapseNewlines(text))
-	if clean == "" {
-		return nil
-	}
-	prefix := ""
-	if permanent {
-		prefix = "[важно] "
-	}
-	line := fmt.Sprintf("- %s**День %d**: %s", prefix, day, clean)
-	dedupID := contentEventID(id, day, clean, permanent)
-	if eventID != nil && *eventID != "" {
-		dedupID = *eventID
-		line += fmt.Sprintf(" <!-- evt:%s -->", *eventID)
-	}
-	_, err = s.db.Exec(
-		"INSERT OR IGNORE INTO key_events (campaign_id, day, line, permanent, event_id) VALUES (?, ?, ?, ?, ?)",
-		id, day, line, boolToInt(permanent), "evt:"+dedupID,
-	)
-	return err
+	return insertKeyEvent(s.db, id, day, text, eventID, permanent)
 }
 
 // SplitKeyEvents разделяет события на permanent и обычные.
@@ -454,33 +402,7 @@ func (s *Store) AppendLedgerRow(campaignSlug string, row LedgerRow, eventID *str
 	if err != nil || !ok {
 		return err
 	}
-	item := jsTrim(collapseNewlines(row.ItemOrGold))
-	if item == "" {
-		return nil
-	}
-	verb := "найдено"
-	if row.Type == LedgerSpent {
-		verb = "потрачено"
-	}
-	by := ""
-	if row.By != nil && *row.By != "" {
-		by = fmt.Sprintf(" (%s)", *row.By)
-	}
-	note := ""
-	if row.Note != nil && jsTrim(*row.Note) != "" {
-		note = " — " + jsTrim(collapseNewlines(*row.Note))
-	}
-	line := fmt.Sprintf("- [День %d] %s: %s%s%s", row.Day, verb, item, by, note)
-	var marker any
-	if eventID != nil && *eventID != "" {
-		marker = "evt:" + *eventID
-		line += fmt.Sprintf(" <!-- evt:%s -->", *eventID)
-	}
-	_, err = s.db.Exec(
-		"INSERT OR IGNORE INTO ledger_rows (campaign_id, day, type, line, event_id) VALUES (?, ?, ?, ?, ?)",
-		id, row.Day, string(row.Type), line, marker,
-	)
-	return err
+	return insertLedgerRow(s.db, id, row, eventID)
 }
 
 // ReadLedgerRaw читает журнал экономики сырым текстом.

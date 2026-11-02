@@ -2,6 +2,7 @@ package dm
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -617,5 +618,56 @@ func TestAdvanceDayThroughDMToolkitEnqueuesCloser(t *testing.T) {
 	updated, err := st.GetCampaign(campaign.ID)
 	if err != nil || updated.CurrentDay == nil || *updated.CurrentDay != 2 {
 		t.Fatalf("день не сдвинут: %+v, %v", updated, err)
+	}
+}
+
+// Отмена хода не подменяется нейтральным ответом: вызывающий код должен знать,
+// что ответ устарел.
+type cancelConfig struct{ started chan struct{} }
+
+func (cancelConfig) Provider() agoconfig.Provider { return agotest.ProviderTest }
+func (cancelConfig) Model() string                { return "cancel" }
+func (c cancelConfig) Create() (agoconfig.LLMClient, error) {
+	return c, nil
+}
+func (c cancelConfig) Clone(map[string]any) (agoconfig.ModelConfig, error) {
+	return c, nil
+}
+func (c cancelConfig) Call(ctx context.Context, _ []events.Event, _ *agocontext.Context, _ agoconfig.CallOptions) (*events.ModelResponse, error) {
+	close(c.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestTurnCancellationPropagates(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	cfg := cancelConfig{started: make(chan struct{})}
+	d, err := New(Config{Model: cfg, Store: st, Session: playerSession(campaign), SkipToolkit: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type outcome struct {
+		reply string
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		reply, err := d.Ask(ctx, "играем")
+		done <- outcome{reply: reply, err: err}
+	}()
+	<-cfg.started
+	cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("ошибка = %v, want context.Canceled", got.err)
+	}
+	if got.reply != "" {
+		t.Fatalf("ответ = %q, want пусто", got.reply)
 	}
 }

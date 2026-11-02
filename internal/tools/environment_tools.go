@@ -86,7 +86,7 @@ func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
 	case queued:
 		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрытие дня %d поставлено в очередь летописца; повторный вызов advance_day не нужен.", day, previous)
 	default:
-		result["note"] = fmt.Sprintf("Наступил игровой день %d. Закрытие дня выполнит код; повторный вызов advance_day не нужен.", day)
+		result["note"] = fmt.Sprintf("Наступил игровой день %d.", day)
 	}
 	return result, nil
 }

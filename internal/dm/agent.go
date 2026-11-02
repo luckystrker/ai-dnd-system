@@ -206,7 +206,10 @@ func (d *DM) Ask(ctx context.Context, text string) (string, error) {
 		case errors.Is(err, context.DeadlineExceeded) || errors.Is(runCtx.Err(), context.DeadlineExceeded):
 			d.log.Warn("dm: turn deadline exceeded", "timeout", d.timeout)
 		case errors.Is(err, context.Canceled):
+			// Отмена — не сбой DM: отдаём её наверх, чтобы вызывающий код не
+			// отправил игрокам устаревший ответ.
 			d.log.Info("dm: turn cancelled")
+			return "", err
 		default:
 			d.log.Error("dm: turn failed", "error", err)
 		}

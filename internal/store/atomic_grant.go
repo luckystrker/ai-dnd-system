@@ -75,13 +75,13 @@ func (s *Store) LevelUpCharacter(campaignIDOrSlug, nameOrSlug string, day int, i
 		}
 	}
 	if strings.TrimSpace(input.KeyEventText) != "" {
-		if err := appendKeyEventTx(tx, campaign.ID, day, input.KeyEventText, &input.KeyEventID, false); err != nil {
+		if err := insertKeyEvent(tx, campaign.ID, day, input.KeyEventText, &input.KeyEventID, false); err != nil {
 			return nil, err
 		}
 	}
 	if strings.TrimSpace(input.TranscriptText) != "" {
 		eventID := input.KeyEventID
-		if err := appendTranscriptTx(tx, campaign.ID, day, TranscriptEntry{
+		if err := insertTranscriptEntry(tx, campaign.ID, day, TranscriptEntry{
 			Kind: "action", Text: input.TranscriptText, EventID: &eventID,
 		}); err != nil {
 			return nil, err
@@ -160,7 +160,7 @@ func (s *Store) GrantCharacterWithLedger(campaignIDOrSlug, nameOrSlug string, pa
 		return nil, err
 	}
 	for _, entry := range ledger {
-		if err := appendLedgerTx(tx, campaign.ID, entry.Row, entry.EventID); err != nil {
+		if err := insertLedgerRow(tx, campaign.ID, entry.Row, entry.EventID); err != nil {
 			return nil, err
 		}
 	}
@@ -172,7 +172,7 @@ func (s *Store) GrantCharacterWithLedger(campaignIDOrSlug, nameOrSlug string, pa
 }
 
 // appendKeyEventTx — та же строка, что AppendKeyEvent, но в транзакции.
-func appendKeyEventTx(ex interface {
+func insertKeyEvent(ex interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }, campaignID string, day int, text string, eventID *string, permanent bool) error {
 	clean := jsTrim(collapseNewlines(text))
@@ -197,7 +197,7 @@ func appendKeyEventTx(ex interface {
 }
 
 // appendTranscriptTx — та же строка, что AppendTranscriptEntry, но в транзакции.
-func appendTranscriptTx(ex interface {
+func insertTranscriptEntry(ex interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }, campaignID string, day int, entry TranscriptEntry) error {
 	if _, err := ex.Exec(
@@ -244,7 +244,7 @@ func appendTranscriptTx(ex interface {
 }
 
 // appendLedgerTx — та же строка, что AppendLedgerRow, но в транзакции.
-func appendLedgerTx(ex interface {
+func insertLedgerRow(ex interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }, campaignID string, row LedgerRow, eventID *string) error {
 	item := jsTrim(collapseNewlines(row.ItemOrGold))
