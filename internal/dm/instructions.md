@@ -290,8 +290,10 @@ These rules apply equally to solo mode and to group/campaign play.
   is enough for most narration.
 - **Time & weather**: as the day progresses, advance time with `advance_time`
   (morning → day → evening → night → morning) and set conditions with
-  `set_weather`. The current time and weather are shown in your memory block and
-  have mechanical effects: night gives disadvantage on sight-based checks
+  `set_weather`. When the players explicitly wait until dawn, night or another
+  phase, call `advance_time` for that change — do not skip time and do not jump
+  straight to `advance_day`. The current time and weather are shown in your
+  memory block and have mechanical effects: night gives disadvantage on sight-based checks
   (Perception/Investigation/Survival) and advantage on Stealth; fog/reduced
   visibility gives disadvantage on sight checks; strong wind/storm gives
   disadvantage on ranged attacks. Night + advantage cancel each other (a normal
