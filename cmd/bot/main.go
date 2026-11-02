@@ -39,6 +39,12 @@ import (
 	ttrpg "github.com/luckystriker/ai-dnd-system/internal/tools"
 )
 
+// version и buildDate подставляет сборка: -ldflags "-X main.version=..." .
+var (
+	version   = "dev"
+	buildDate = "unknown"
+)
+
 const (
 	modeAuto     = "auto"
 	modeTelegram = "telegram"
@@ -85,8 +91,8 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "бот: режим %s, провайдер %s (%s), модель %s, лимит раундов тулов %d, окно %d, база %s\n",
-		selected, spec.Provider, spec.BaseURL, spec.Model, cfg.MaxToolRounds, cfg.ContextWindowTokens, cfg.DBPath)
+	fmt.Fprintf(os.Stderr, "бот: версия %s (%s), режим %s, провайдер %s (%s), модель %s, лимит раундов тулов %d, окно %d, база %s\n",
+		version, buildDate, selected, spec.Provider, spec.BaseURL, spec.Model, cfg.MaxToolRounds, cfg.ContextWindowTokens, cfg.DBPath)
 	if *check {
 		return nil
 	}
