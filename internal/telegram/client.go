@@ -23,6 +23,11 @@ const (
 	DefaultRetryBackoff = 300 * time.Millisecond
 	// DefaultMaxDownloadBytes — политика вложений TS: 25 МБ.
 	DefaultMaxDownloadBytes = 25 * 1024 * 1024
+
+	// requestTimeout — предел одного запроса Bot API. Long-poll выставляет
+	// свой контекст (таймаут опроса + запас), скачивание — свой.
+	requestTimeout  = 70 * time.Second
+	downloadTimeout = 2 * time.Minute
 )
 
 // APIError — ответ Telegram с ok=false. Текст не содержит URL с токеном.
@@ -79,9 +84,11 @@ func WithMaxRetries(retries int) Option {
 // NewClient создаёт клиент Bot API.
 func NewClient(token string, opts ...Option) *Client {
 	client := &Client{
-		token:            token,
-		baseURL:          DefaultBaseURL,
-		http:             &http.Client{Timeout: 70 * time.Second},
+		token:   token,
+		baseURL: DefaultBaseURL,
+		// Таймаут задаётся контекстом каждого вызова: у long-poll он
+		// зависит от TELEGRAM_POLL_TIMEOUT_SECONDS, у остальных — 70 с.
+		http:             &http.Client{},
 		maxRetries:       DefaultMaxRetries,
 		retryBackoff:     DefaultRetryBackoff,
 		maxDownloadBytes: DefaultMaxDownloadBytes,
@@ -109,7 +116,16 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 
 // call выполняет метод Bot API с ретраями на 429 и 5xx. Любая ошибка клиента
 // очищается от токена: URL запроса в тексте не остаётся.
-func (c *Client) call(ctx context.Context, method string, payload any, out any) error {
+//
+// retryTransport разрешает повтор при сетевой ошибке (обрыв соединения).
+// Только для идемпотентных методов: sendMessage/sendPhoto после обрыва могли
+// уже дойти до Telegram, и повтор дал бы игроку дубль ответа.
+func (c *Client) call(ctx context.Context, method string, payload any, out any, retryTransport bool, timeout time.Duration) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("telegram %s: encode: %w", method, err)
@@ -140,12 +156,18 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if !retryTransport {
+				return lastErr
+			}
 			continue
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 		response.Body.Close()
 		if readErr != nil {
 			lastErr = &transportError{method: method, err: c.redact(readErr)}
+			if !retryTransport {
+				return lastErr
+			}
 			continue
 		}
 		var envelope struct {
@@ -159,6 +181,9 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 		}
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			lastErr = &transportError{method: method, err: fmt.Errorf("invalid JSON response: %w", err)}
+			if !retryTransport {
+				return lastErr
+			}
 			continue
 		}
 		if !envelope.OK {
@@ -222,7 +247,11 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 		payload["allowed_updates"] = allowed
 	}
 	var raws []json.RawMessage
-	if err := c.call(ctx, "getUpdates", payload, &raws); err != nil {
+	// Long-poll держит соединение timeout секунд; клиентский контекст должен
+	// быть длиннее, иначе опрос обрывался бы раньше ответа Telegram.
+	pollCtx, cancel := context.WithTimeout(ctx, timeout+15*time.Second)
+	defer cancel()
+	if err := c.call(pollCtx, "getUpdates", payload, &raws, true, 0); err != nil {
 		return nil, err
 	}
 	updates := make([]RawUpdate, 0, len(raws))
@@ -240,7 +269,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 
 // DeleteWebhook снимает вебхук: решение владельца — long-poll.
 func (c *Client) DeleteWebhook(ctx context.Context) error {
-	return c.call(ctx, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil)
+	return c.call(ctx, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil, true, requestTimeout)
 }
 
 // SendMessage отправляет текст. parseMode пустой — plain text.
@@ -252,7 +281,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, threadID *int, 
 	if parseMode != "" {
 		payload["parse_mode"] = parseMode
 	}
-	return c.call(ctx, "sendMessage", payload, nil)
+	return c.call(ctx, "sendMessage", payload, nil, false, requestTimeout)
 }
 
 // SendRichText отправляет ответ модели: Markdown → HTML, при любой ошибке
@@ -277,7 +306,7 @@ func (c *Client) SendChatAction(ctx context.Context, chatID string, threadID *in
 	if threadID != nil {
 		payload["message_thread_id"] = *threadID
 	}
-	return c.call(ctx, "sendChatAction", payload, nil)
+	return c.call(ctx, "sendChatAction", payload, nil, false, requestTimeout)
 }
 
 // SendPhoto публикует картинку по URL с подписью.
@@ -289,7 +318,7 @@ func (c *Client) SendPhoto(ctx context.Context, chatID string, threadID *int, ph
 	if threadID != nil {
 		payload["message_thread_id"] = *threadID
 	}
-	return c.call(ctx, "sendPhoto", payload, nil)
+	return c.call(ctx, "sendPhoto", payload, nil, false, requestTimeout)
 }
 
 // AnswerCallbackQuery отвечает на нажатие кнопки.
@@ -298,13 +327,13 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID, text strin
 	if text != "" {
 		payload["text"] = text
 	}
-	return c.call(ctx, "answerCallbackQuery", payload, nil)
+	return c.call(ctx, "answerCallbackQuery", payload, nil, false, requestTimeout)
 }
 
 // GetFile резолвит file_id в путь для скачивания.
 func (c *Client) GetFile(ctx context.Context, fileID string) (FileInfo, error) {
 	var info FileInfo
-	if err := c.call(ctx, "getFile", map[string]any{"file_id": fileID}, &info); err != nil {
+	if err := c.call(ctx, "getFile", map[string]any{"file_id": fileID}, &info, true, requestTimeout); err != nil {
 		return FileInfo{}, err
 	}
 	return info, nil
@@ -330,7 +359,9 @@ func (c *Client) DownloadFile(ctx context.Context, info FileInfo, maxBytes int64
 		segments[index] = url.PathEscape(segment)
 	}
 	endpoint := c.baseURL + "/file/bot" + c.token + "/" + strings.Join(segments, "/")
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	downloadCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("telegram download: request: %w", c.redact(err))
 	}

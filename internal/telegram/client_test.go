@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -308,3 +309,81 @@ func TestClientDeleteWebhook(t *testing.T) {
 		t.Fatalf("requests = %+v", *requests)
 	}
 }
+
+// Обрыв соединения повторяется только для идемпотентных методов: повтор
+// sendMessage/sendPhoto после обрыва мог бы дать игроку дубль ответа.
+func TestClientTransportRetriesOnlyIdempotentCalls(t *testing.T) {
+	t.Parallel()
+
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			t.Error("сервер не поддерживает hijack")
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	client := NewClient(testToken,
+		WithBaseURL(server.URL),
+		WithHTTPClient(&http.Client{}),
+		WithRetryBackoff(time.Millisecond),
+		WithMaxRetries(2),
+	)
+
+	if err := client.SendMessage(context.Background(), "1", nil, "x", ""); err == nil {
+		t.Fatal("ожидалась транспортная ошибка")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("sendMessage попыток = %d, want 1 (без повтора отправок)", got)
+	}
+
+	atomic.StoreInt32(&attempts, 0)
+	if _, err := client.GetUpdates(context.Background(), 0, 100*time.Millisecond, nil); err == nil {
+		t.Fatal("ожидалась транспортная ошибка getUpdates")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Fatalf("getUpdates попыток = %d, want 3 (чтение повторяется)", got)
+	}
+}
+
+// Long-poll живёт дольше общего таймаута запроса: deadline контекста
+// вычисляется из TELEGRAM_POLL_TIMEOUT_SECONDS, а не из фиксированных 70 с.
+func TestClientLongPollDeadlineOutlivesRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	var pollDeadline time.Time
+	client := NewClient(testToken, WithHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			pollDeadline, _ = request.Context().Deadline()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":[]}`)),
+				Request:    request,
+			}, nil
+		}),
+	}))
+
+	pollTimeout := 5 * time.Minute
+	if _, err := client.GetUpdates(context.Background(), 0, pollTimeout, nil); err != nil {
+		t.Fatalf("GetUpdates: %v", err)
+	}
+	if pollDeadline.IsZero() {
+		t.Fatal("у long-poll нет дедлайна: его обрежет таймаут HTTP-клиента")
+	}
+	if remaining := time.Until(pollDeadline); remaining < pollTimeout {
+		t.Fatalf("дедлайн long-poll %s меньше таймаута опроса %s", remaining, pollTimeout)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
