@@ -61,13 +61,19 @@ func mechanicalOnly(c eval.Case) eval.Case {
 // возвращает результат с механическими скорерами.
 func runMechanical(t *testing.T, suite Suite, name string, scripted []tools.Tool, responses ...*events.ModelResponse) eval.CaseResult {
 	t.Helper()
+	cfg := agotest.NewTestConfig(responses...)
+	a := agent.New("dm", "test", agent.WithConfig(cfg), agent.WithTools(scripted...))
+	return runCase(t, suite, name, a)
+}
+
+// runCase прогоняет один кейс на готовом агенте: так eval проверяет и
+// настоящего DM-агента, а не только голый цикл ago.
+func runCase(t *testing.T, suite Suite, name string, a *agent.Agent) eval.CaseResult {
+	t.Helper()
 	c := mechanicalOnly(findCase(t, suite, name))
 	if len(c.Scorers) == 0 {
 		t.Fatalf("у кейса %q нет механических скореров", name)
 	}
-
-	cfg := agotest.NewTestConfig(responses...)
-	a := agent.New("dm", "test", agent.WithConfig(cfg), agent.WithTools(scripted...))
 	result, err := eval.Run(context.Background(), a, eval.Suite{c}, eval.WithConcurrency(1))
 	if err != nil {
 		t.Fatalf("eval.Run: %v", err)
