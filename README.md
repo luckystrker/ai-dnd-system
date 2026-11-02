@@ -1,214 +1,227 @@
-# TTRPG Telegram bot (eve agent)
+# TTRPG Telegram bot (Go / ago)
 
-Eve-агент, который ведёт настольную ролевую игру в Telegram: соло-партия в
-личном чате или группа до 6 игроков.
+Бот ведёт настольную ролевую игру в Telegram: соло-партия в личном чате или
+группа до 6 игроков. Переписан с eve (TypeScript) на Go поверх
+[ago](https://github.com/luckystrker/ago); схема SQLite та же, миграция данных
+не нужна.
+
+- **Long-poll**: отдельный webhook, Caddy и Node не нужны. Один Go-бинарь под
+  systemd.
+- **Модель**: OpenAI-совместимый Chat Completions; провайдер по умолчанию —
+  OpenCode Go (`deepseek-v4.1-flash`).
+- **Память**: одна SQLite-база `data/campaigns.db`. В группе сообщения
+  склеиваются (2.5 с) и проходят дешёвый гейт «отвечать ли».
 
 ## Структура
 
 ```
-agent/
-├── agent.ts              # defineAgent: модель LLM (OpenRouter по умолчанию)
-├── instructions.md       # системный промпт DM (соло / группа до 6)
-├── channels/telegram.ts  # Telegram-канал (webhook POST /eve/v1/telegram)
-├── tools/
-│   ├── roll_dice.ts      # скилл: броски костей
-│   ├── skill_check.ts    # скилл: проверки характеристик
-│   ├── combat.ts         # скилл: пошаговый бой (HP/AC врагов)
-│   ├── initiative.ts     # скилл: очередь ходов
-│   ├── save_campaign.ts  # сохраняет новую кампанию после опросника
-│   ├── list_campaigns.ts # кампании пользователя (owner/member)
-│   ├── start_campaign.ts # запуск кампании: привязка к чату/топику
-│   ├── get_game_context.ts # кампания + персонажи привязанного чата в контекст
-│   ├── save_character.ts # персонаж внутри кампании
-│   └── invite_member.ts  # приглашение участника (только DM)
-├── skills/
-│   ├── create-campaign/  # процедура опросника создания кампании
-│   └── create-character/ # процедура создания персонажа
-└── lib/
-    ├── engine/dnd5e.ts   # правила: броски и проверки
-    ├── memory.ts         # состояние партии (defineState)
-    ├── rate-limit.ts     # sliding-window лимитер webhook (чат/пользователь)
-    └── campaigns/        # вся память кампаний: SQLite (data/campaigns.db)
+cmd/
+├── bot/            # точка входа: long-poll, repl, -check
+├── eval/           # живой eval-прогон, калибровка судьи/Telegram, гейт
+├── e2e/            # Telegram-апдейт через канал против fake Bot API
+└── dump-sessions/  # переписка из event_streams и транскрипта
+internal/
+├── config/         # env → Config (дефолты и валидация)
+├── llm/            # провайдеры, base URL, x-opencode-session
+├── engine/         # d20, проверки, бой, награды (без LLM и SQLite)
+├── store/          # SQLite: кампании, память, inbox, event_streams, FTS5
+├── tools/          # 42 тула DM + 25 тулов летописца, авторизация
+├── dm/             # промпт, память в хвосте, компакция, лимиты хода
+├── chronicler/     # субагент закрытия дня
+├── dayclose/       # детерминированная очередь закрытия дня
+├── telegram/       # long-poll, durable-inbox, очередь, гейт, отправка
+├── evalgame/       # кейсы, скореры, судья, гейт, отчёт
+├── evalrun/        # исполнение кейса настоящим DM на временной SQLite
+└── calibrate/      # офлайн-калибровка гейта и склейки Telegram
+eval/
+├── cases/*.jsonl   # 43 синтетических сценария
+└── judge/          # калибровка судьи: хорошие/плохие ответы
+deploy/             # systemd, backup, setup, ops-референс
 ```
 
-## Кампании и персонажи
+## Быстрый старт
 
-Команды бота: `/newcampaign` (опросник создания кампании), `/mycampaigns`
-(список), `/startcampaign` (запуск и привязка к текущему чату/топику),
-`/join` (вступление игрока в кампанию чата), `/newchar` (создание персонажа),
-`/invite` (приглашение игрока, только DM).
-
-- Вся память кампаний — кампании, участники, персонажи, квесты, открытые
-  нити, транскрипты дней, саммари и ключевые события, лут-журнал, состояние
-  мира, NPC, локации и фракции — хранится в одной SQLite-базе
-  `data/campaigns.db` (переопределяется `CAMPAIGN_DB_PATH`).
-- Кампания создаётся где угодно, но после `/startcampaign` привязывается к
-  чату (или топику форум-группы); один чат — одна активная кампания.
-- Роли: `dm` (администратор, создатель кампании) и `player`. Приглашает
-  участников DM, назначать новых DM может только владелец. Персонаж существует
-  только внутри кампании и принадлежит создавшему его игроку: проверки и бой
-  за чужого персонажа разрешены только DM.
-- Вступление в кампанию только явное: игрок пишет `/join` в привязанном
-  чате/топике, либо DM приглашает через `/invite` (лимит 6 игроков).
-  Сообщения игроков не в адрес бота записываются в транскрипт дня — DM видит
-  диалоги игроков между собой.
-- Зарегистрируйте команды в BotFather (`/setcommands`):
-
-  ```
-  newcampaign - Создать кампанию
-  mycampaigns - Мои кампании
-  startcampaign - Запустить кампанию в этом чате
-  join - Вступить в кампанию этого чата
-  newchar - Создать персонажа
-  invite - Пригласить игрока в кампанию
-  ```
-
-## Локальный запуск
+Нужен **Go 1.24+** (модуль объявляет `go 1.24`, образец — Go 1.27).
 
 ```bash
-npm install
-npm run dev -- --no-ui
+cp .env.example .env       # впишите LLM_API_KEY и TELEGRAM_BOT_TOKEN
+go run ./cmd/bot           # auto: telegram при токене, иначе repl
+go run ./cmd/bot -mode repl
+go run ./cmd/bot -check    # проверить env/конфиг без сети
 ```
 
-Задайте в окружении `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`,
-`TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`
-(шаблон в `.env.example`).
+Проверки:
 
-Дополнительные настройки защиты и хранилища:
+```bash
+go vet ./...
+go test ./...              # офлайн, ключи не нужны
+go test -race ./...        # в CI (локально нужен cgo, здесь его нет)
+go build ./...
+go build -trimpath -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o bin/ai-dnd ./cmd/bot
+```
+
+## Провайдеры
+
+Все три — OpenAI-совместимый Chat Completions; `LLM_BASE_URL` и `LLM_MODEL`
+переопределяют значения провайдера.
+
+| `LLM_PROVIDER` | Base URL по умолчанию | Модель | Ключ |
+|---|---|---|---|
+| `opencode-go` (по умолчанию) | `https://opencode.ai/zen/go/v1` | `deepseek-v4.1-flash` | `LLM_API_KEY` / `OPENCODE_API_KEY` |
+| `openrouter` | `https://openrouter.ai/api/v1` | `deepseek/deepseek-v4.1-flash` | `LLM_API_KEY` / `OPENROUTER_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | `deepseek-flash` | `LLM_API_KEY` / `DEEPSEEK_API_KEY` |
+
+OpenCode Go **требует** заголовок `x-opencode-session`: без него любой запрос
+падает с `HTTP 400 MissingSessionID`. `internal/llm` ставит его сам — у каждого
+Telegram-чата, летописца и судьи eval своя сессия (хеш chat id, не сам id).
+
+Eval-судья по умолчанию — `muse-spark-1.3-contributor` через Responses API
+того же провайдера; переопределяется `EVAL_JUDGE_PROVIDER` / `EVAL_JUDGE_MODEL`.
+
+## Переменные окружения
+
+Всё читает `internal/config`. Значения по умолчанию — из кода; шаблон —
+`.env.example`.
 
 | Переменная | По умолчанию | Назначение |
-|------------|--------------|------------|
-| `CAMPAIGN_DB_PATH` | `data/campaigns.db` | путь к SQLite-базе всей памяти кампаний |
-| `TELEGRAM_RATE_LIMIT_CHAT_PER_MIN` | `20` | лимит сообщений на чат/топик в минуту |
-| `TELEGRAM_RATE_LIMIT_USER_PER_MIN` | `10` | лимит сообщений на пользователя в минуту |
-| `TELEGRAM_MAX_UPDATE_BYTES` | `1048576` | максимальный размер входящего update (413 при превышении) |
+|---|---|---|
+| `LLM_PROVIDER` | `opencode-go` | `openrouter`, `opencode-go`, `deepseek` |
+| `LLM_API_KEY` | — | ключ провайдера (иначе переменная провайдера) |
+| `LLM_BASE_URL` | значение провайдера | корень эндпоинта **без** `/chat/completions` |
+| `LLM_MODEL` | значение провайдера | id модели |
+| `MAX_TOOL_ROUNDS` | `12` | лимит раундов «модель → тулы» в одном ходу |
+| `CAMPAIGN_DB_PATH` | `data/campaigns.db` | SQLite-база всей памяти и inbox |
+| `CONTEXT_WINDOW_TOKENS` | `96000` (16000..512000) | фиксированное окно; компакция на 75% |
+| `TURN_TIMEOUT_SECONDS` | `180` (1..3600) | дедлайн одного хода DM |
+| `TOKEN_BUDGET` | `200000` | бюджет токенов одного хода |
+| `DAYCLOSE_BACKFILL_MAX` | `2` | сколько пропущенных дней закрывать летописцем на старте; `-1` — не догонять |
+| `DAYCLOSE_BACKFILL_DAYS` | `2` (1..30) | окно последних дней для летописца; старше — дайджест |
+| `TELEGRAM_BOT_TOKEN` | — | без него запускается repl |
+| `TELEGRAM_BOT_USERNAME` | — | username без `@`, для команд и упоминаний |
+| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | корень Bot API |
+| `TELEGRAM_COALESCE_MS` | `2500` (1..60000) | окно склейки сообщений чата |
+| `TELEGRAM_FOLLOW_UP_MINUTES` | `10` (1..1440) | окно «ответ на реплику DM» |
+| `TELEGRAM_RATE_LIMIT_CHAT_PER_MIN` | `20` | сообщений чата в минуту |
+| `TELEGRAM_RATE_LIMIT_USER_PER_MIN` | `10` | сообщений игрока в минуту |
+| `TELEGRAM_MAX_UPDATE_BYTES` | `1048576` | предел входящего апдейта |
+| `TELEGRAM_POLL_TIMEOUT_SECONDS` | `50` (1..300) | long-poll `getUpdates` |
+| `TELEGRAM_MAX_ATTACHMENT_BYTES` | `26214400` | предел скачиваемого вложения |
+| `RUNWARE_API_KEY` | — | без ключа `illustrate_scene` просит продолжать текстом |
+| `RUNWARE_MODEL` | `runware:101@1` | модель генерации |
+| `RUNWARE_WIDTH` / `RUNWARE_HEIGHT` | `1024` | размер картинки |
+| `EVAL_JUDGE_PROVIDER` | `opencode-go` | провайдер судьи eval |
+| `EVAL_JUDGE_MODEL` | `muse-spark-1.3-contributor` | модель судьи eval |
 
-### Получение сообщений без публичного URL (long polling)
+Устаревшие переменные TS/eve (`TELEGRAM_WEBHOOK_SECRET_TOKEN`, `PORT`, `HOST`,
+`NITRO_*`) Go-боту не нужны и игнорируются до слайса 8.
 
-Телеграм-канал eve принимает только webhook на `POST /eve/v1/telegram`, поэтому
-в локальной разработке достаточно проксировать webhook-обновления из long
-polling во второй терминал:
+## Команды бота
+
+`/join` и `/kick` обрабатываются кодом без LLM; остальные — DM-агентом по
+инструкциям.
+
+| Команда | Кто | Что делает |
+|---|---|---|
+| `/newcampaign` | любой | опросник создания кампании и `save_campaign` |
+| `/mycampaigns` | любой | список кампаний пользователя |
+| `/startcampaign` | DM кампании | привязка кампании к чату/топику, запуск |
+| `/join` | игрок | явное вступление в кампанию этого чата (код) |
+| `/kick` | DM | убрать игрока (реплай или `@username`); персонаж и история остаются (код) |
+| `/newchar` | игрок | создание персонажа |
+| `/mychar` (`/sheet`, `/stats`, `/character`) | игрок | карточка персонажа |
+| `/invite` | DM | пригласить игрока, пока в партии есть место |
+
+Дополнительно:
+
+- любой не-бот, который пишет в привязанном чате/топике активной кампании,
+  автоматически регистрируется игроком (до 6) — без LLM;
+- в группе LLM будится только на команду, `@упоминание`, реплай на бота,
+  обращение «ДМ/мастер/ведущий», свой ход в бою или первый ответ на реплику
+  DM в пределах `TELEGRAM_FOLLOW_UP_MINUTES`; остальные сообщения пишутся в
+  транскрипт и видны модели в блоке памяти, но хода не запускают;
+- в личке бот отвечает на любое сообщение.
+
+Для групп выключите privacy mode в BotFather (`/setprivacy → Disable`) или
+сделайте бота админом, иначе он не увидит переписку игроков.
+
+## Eval и гейт качества
+
+Набор — `eval/cases/*.jsonl` (43 кейса, `eval/README.md`). Офлайн (CI, без
+ключей):
 
 ```bash
-npm run poll
+go test ./internal/evalgame/ ./internal/evalrun/   # скриптованные траектории
+go run ./cmd/eval -check-only                       # состав набора
+go run ./cmd/eval -telegram                         # калибровка гейта/склейки
 ```
 
-Скрипт опрашивает Telegram (`getUpdates`) и пересылает каждое обновление в
-локальный eve на `http://localhost:2000/eve/v1/telegram` (путь можно поменять
-через `EVE_URL`). Никакого туннеля не нужно. На VPS без домена так же можно
-поднять бота одной командой — `npm run start:local` (`deploy/start-polling.sh`)
-запускает оба процесса в двух tmux-сессиях (`bot` и `poll`), переживающих
-отключение SSH. В групповых чатах бот реагирует
-на `/`-команды, `@упоминания` и ответы на свои сообщения (плюс молча
-записывает остальные сообщения в привязанных к кампании чатах); в личных —
-на любой текст. При старте локального режима скрипт сам сбрасывает
-зарегистрированный webhook (webhook и polling в Telegram несовместимы).
-
-### Альтернатива: webhook на деплое
-
-Зарегистрируйте публичный URL (деплой или туннель вроде cloudflared):
+Живой прогон (нужен `LLM_API_KEY`; стоит денег — 43 кейса, судья и летописец):
 
 ```bash
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://your-app.example.com/eve/v1/telegram",
-       "secret_token":"'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
-       "allowed_updates":["message","callback_query"]}'
+# один прогон набора
+go run ./cmd/eval -n 1 -out eval-results/last.json
+# повторы только проблемных кейсов (Pass@k / Pass^k)
+go run ./cmd/eval -case rolls-05-narrate-per-tool-output -n 5 -out eval-results/rolls.json
+# регрессионный гейт относительно прошлого прогона
+go run ./cmd/eval -baseline eval-results/baseline.json -gate
 ```
 
-В групповых чатах бот реагирует на `/`-команды, `@упоминания` и ответы на свои
-сообщения; в личных — на любой текст.
+Что делает раннер:
 
-### Privacy mode в группах
+- собирает временную SQLite-кампанию: DM, партия (Дэн/Лиса), персонажи,
+  привязка к чату, сессия говорящего с его ролью (`player` / `dm`), начало боя;
+- прогоняет кейс через настоящего DM-агента (`internal/dm`) и настоящие тулы;
+- исполняет `postconditions` по БД (например, `day_summary` закрытого дня
+  вместе с очередью летописца);
+- исполняет `fault`: результат тула подменяется ошибкой на N-м вызове;
+- использует детерминированный rand; `rolls-05` идёт дважды — с натуральной
+  20 и натуральной 1;
+- считает Pass@k / Pass^k по повторам, пишет JSON и сводку по категориям,
+  отдаёт совместимый `eval.RunResult` для `eval.Diff`;
+- калибрует судью на 4 хороших и 4 плохих ответах (`eval/judge/calibration.jsonl`):
+  good должен пройти, bad — провалиться.
 
-Чтобы бот видел ВСЕ сообщения группы (диалоги игроков между собой), у бота
-должен быть выключен privacy mode: в BotFather выполните `/setprivacy →
-Disable`, либо добавьте бота администратором группы. При включённом privacy
-mode Telegram доставляет боту только команды, @упоминания и реплаи на его
-сообщения — запись диалогов работать не будет.
+Абсолютный гейт (`-gate`) — флаг, а не дефолт: пороги по категориям и
+обязательные кейсы задаются `-min-pass`, `-category`, `-required`. Предложенные
+значения — в `evalgame.ProposedGate()`; они ждут решения владельца.
 
 ## Деплой на VPS
 
-Стек: bare metal + systemd (supervisor) + Caddy (reverse proxy с авто-TLS).
-Скрипты и конфиги лежат в `deploy/`, подробный ops-референс — в
-[`deploy/README.md`](deploy/README.md).
-
-### Пререквизиты
-
-- VPS на Ubuntu/Debian (x86_64/arm64), порты 80 и 443 открыты.
-- Домен с A-записью, указывающей на IP сервера (нужен для TLS-сертификата).
-- Токен бота Telegram, LLM API-ключ (`LLM_*`), секрет webhook'а.
-
-### 1. Первичная установка
+Стек: bare metal + systemd, long-poll. Подробности — `deploy/README.md`.
 
 ```bash
-ssh root@your-vps
-git clone https://github.com/luckystrker/ai-dnd-system.git /tmp/repo
-cp -r /tmp/repo/deploy /tmp/deploy-bundle
-# либо, если репо уже на сервере — просто:
-cd /opt/ai-dnd-system   # ещё не существует — setup.sh создаст
-sudo bash deploy/setup.sh
-```
-
-`setup.sh` ставит Node 24 и Caddy, создаёт пользователя `ai-dnd`, клонирует
-репо в `/opt/ai-dnd-system`, собирает билд и включает сервисы в автозагрузку.
-
-### 2. Конфигурация
-
-```bash
-sudo -u ai-dnd cp /opt/ai-dnd-system/.env.example /opt/ai-dnd-system/.env
+sudo bash deploy/setup.sh          # Go, пользователь, клон, bin/ai-dnd, unit
+sudo -u ai-dnd cp .env.example /opt/ai-dnd-system/.env
 sudo -u ai-dnd nano /opt/ai-dnd-system/.env
-# впишите: LLM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME,
-#          TELEGRAM_WEBHOOK_SECRET_TOKEN
-
-sudo nano /etc/caddy/Caddyfile   # замените bot.example.com на ваш домен
-```
-
-### 3. Запуск и регистрация webhook
-
-```bash
-sudo systemctl start caddy      # получает TLS-сертификат автоматически
 sudo systemctl start ai-dnd
-curl -s http://127.0.0.1:3000/eve/v1/health    # должно вернуть {"ok":true,...}
-
-# Регистрируем публичный webhook (подставьте домен и секрет из .env):
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://ВАШ-ДОМЕН/eve/v1/telegram",
-       "secret_token":"'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
-       "allowed_updates":["message","callback_query"]}'
+journalctl -u ai-dnd -f
 ```
 
-### 4. Обновления и бэкапы
-
-Обновить бота одной командой (на сервере, из репо):
+Обновление и бэкапы:
 
 ```bash
-cd /opt/ai-dnd-system && ./deploy.sh
-#                    # git pull → npm ci → build → restart + health-check
-./deploy.sh --skip-backup    # пропустить преддеплойный бэкап
+cd /opt/ai-dnd-system && ./deploy.sh     # pull → go build → restart
+sudo crontab -e                          # 0 3 * * * /opt/ai-dnd-system/deploy/backup.sh
 ```
 
-Ночные бэкапы `data/` (SQLite `.backup`, ротация 14 копий):
+`deploy/backup.sh` снимает SQLite через `sqlite3 .backup` (не копированием
+файла: в WAL данные лежат в `-wal`), проверяет `integrity_check` и хранит 14
+копий. Юнит: `KillSignal=SIGTERM`, `TimeoutStopSec=25` (graceful shutdown 15 с
++ запас), `ProtectSystem=strict` и запись только в `data/`.
+
+Caddy/webhook и `ai-dnd-ts.service` — устаревший TS-путь, сохранён для отката
+до слайса 8.
+
+## Диагностика
 
 ```bash
-sudo crontab -e
-# добавить: 0 3 * * * /opt/ai-dnd-system/deploy/backup.sh
+go run ./cmd/dump-sessions                  # все чаты из event_streams + транскрипт
+go run ./cmd/dump-sessions den              # по username/имени/user id
+go run ./cmd/dump-sessions -7770001         # по chat id
+go run ./cmd/e2e                            # канал против fake Bot API (офлайн)
+go run ./cmd/e2e -live                      # то же с живой моделью
 ```
 
-### Эксплуатация
-
-```bash
-journalctl -u ai-dnd -f                  # логи в реальном времени
-systemctl status ai-dnd                  # статус процесса
-curl -s http://127.0.0.1:3000/eve/v1/health   # проверка живости
-curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"  # диагностика Telegram
-```
-
-## Проверка
-
-```bash
-npm run typecheck
-npm run build
-npm run smoke          # смоук-тест хранилища кампаний (SQLite)
-```
+Логи — `journalctl -u ai-dnd -f`. `HTTP 400 MissingSessionID` означает, что
+заголовок OpenCode Go потерялся (см. `internal/llm`). `SQLITE_BUSY` — запущен
+второй процесс на той же базе.
