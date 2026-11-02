@@ -244,6 +244,22 @@ func TestToolOKScorer(t *testing.T) {
 		t.Fatal("tool_ok не должен проходить на {ok:false}")
 	}
 
+	// Успешный JSON-результат с «запрещено»/«ошибка» в тексте — не отказ:
+	// upsert_npc/create_quest эхом возвращают заметку, написанную моделью.
+	successEcho := &eval.Trace{ToolCalls: []eval.ToolCall{{
+		Name:   "upsert_npc",
+		Result: `{"ok":true,"npc":{"name":"Купец","memory":"здесь колдовать запрещено, но ошибка была его"},"note":"error в описании"}`,
+	}}}
+	if score, _ = (ToolOK{Tool: "upsert_npc"}).Score(context.Background(), successEcho); !score.Passed {
+		t.Fatalf("успешная запись с «запрещено» в заметке должна проходить, детали: %v", score.Details)
+	}
+
+	// Пустое поле error — не отказ.
+	emptyError := &eval.Trace{ToolCalls: []eval.ToolCall{{Name: "create_quest", Result: `{"ok":true,"error":""}`}}}
+	if score, _ = (ToolOK{Tool: "create_quest"}).Score(context.Background(), emptyError); !score.Passed {
+		t.Fatalf("пустой error не должен считаться отказом, детали: %v", score.Details)
+	}
+
 	// Аргументы не совпали — вызов не считается.
 	if score, _ = (ToolOK{Tool: "combat", Args: map[string]any{"action": "attack"}}).Score(context.Background(), clean); score.Passed {
 		t.Fatal("tool_ok не должен проходить, когда подходящего по аргументам вызова нет")
@@ -263,16 +279,30 @@ func TestQuotesRollAnchors(t *testing.T) {
 	t.Parallel()
 
 	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 7 +3 = 10 vs DC 15 -> ПРОВАЛ"
-	trace := &eval.Trace{
-		ToolCalls:     []eval.ToolCall{{Name: "skill_check", Result: result}},
-		FinalResponse: "d20 7, итог 10 против DC 15 — провал.",
+
+	// Формы, которыми живой DM честно цитирует бросок; все должны проходить.
+	good := []string{
+		"Бросок d20+3: выпало 7, итого 10 против DC 15.",
+		"Выпало 7 на d20, с бонусом 10 — не дотягивает до DC 15.",
+		"d20 = 7, +3 = 10 против DC 15.",
+		"В итоге ты теряешь 2 минуты. d20 = 7, итог 10 против DC 15.",
+		"d20 7, итог 10 против DC 15 — провал.",
 	}
-	if score, _ := (QuotesRoll{}).Score(context.Background(), trace); !score.Passed {
-		t.Fatalf("корректный бросок должен проходить, детали: %v", score.Details)
+	for _, answer := range good {
+		trace := &eval.Trace{
+			ToolCalls:     []eval.ToolCall{{Name: "skill_check", Result: result}},
+			FinalResponse: answer,
+		}
+		if score, _ := (QuotesRoll{}).Score(context.Background(), trace); !score.Passed {
+			t.Errorf("корректный ответ %q должен проходить, детали: %v", answer, score.Details)
+		}
 	}
 
 	// Числа в ответе есть, но рядом с якорями — выдуманные.
-	trace.FinalResponse = "Бросок 12, итог 14 против 9 — провал. В комнате 7 факелов, до рассвета 15 минут."
+	trace := &eval.Trace{
+		ToolCalls:     []eval.ToolCall{{Name: "skill_check", Result: result}},
+		FinalResponse: "Бросок 12, итог 14 против 9 — провал. В комнате 7 факелов, до рассвета 15 минут.",
+	}
 	score, _ := (QuotesRoll{}).Score(context.Background(), trace)
 	if score.Passed {
 		t.Fatal("выдуманные числа у якорей должны валить quotes_roll")

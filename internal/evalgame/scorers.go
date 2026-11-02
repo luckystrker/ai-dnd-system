@@ -117,22 +117,20 @@ type ToolOK struct {
 
 func (s ToolOK) Name() string { return "tool_ok" }
 
-// refusalMarkers — признаки отказа в результате тула. TS-тулы возвращают
-// ошибку строкой или объектом {ok:false}, а не через Err трассы.
-var refusalMarkers = []string{
+// plainRefusalMarkers — точные фразы авторизации в НЕ-JSON результате тула.
+// TS-тулы, которые отказывают по правам, возвращают plain-строку
+// (access.reason в combat.ts); успешные результаты — JSON-объекты, поэтому
+// общие слова вроде «ошибка» или «запрещено» здесь не ищем: они бывают
+// обычным текстом в описании NPC/квеста.
+var plainRefusalMarkers = []string{
 	"доступно только администратору",
 	"принадлежит другому игроку",
 	"не участник этой кампании",
 	"не удалось определить, кто вы",
 	"нет привязанной кампании",
-	"запрещено",
+	"действие от имени этого персонажа запрещено",
 	"access_denied",
 	"permission denied",
-	"not allowed",
-	"\"ok\":false",
-	"\"ok\": false",
-	"ошибка",
-	"error",
 }
 
 func (s ToolOK) Score(_ context.Context, t *eval.Trace) (eval.Score, error) {
@@ -169,11 +167,45 @@ func (s ToolOK) Score(_ context.Context, t *eval.Trace) (eval.Score, error) {
 	return boolScore(s.Name(), false, details), nil
 }
 
+// refusalMarker определяет отказ: JSON-результат — только ok:false или
+// непустое поле error; plain-строка — точные фразы авторизации.
 func refusalMarker(result string) string {
+	trimmed := strings.TrimSpace(result)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var payload any
+		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
+			return jsonRefusalMarker(payload)
+		}
+	}
 	lower := strings.ToLower(result)
-	for _, marker := range refusalMarkers {
+	for _, marker := range plainRefusalMarkers {
 		if strings.Contains(lower, marker) {
 			return marker
+		}
+	}
+	return ""
+}
+
+// jsonRefusalMarker смотрит только структурные признаки отказа, не текст:
+// успешный upsert_npc/create_quest может эхом вернуть «запрещено» из заметки.
+func jsonRefusalMarker(payload any) string {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if raw, exists := object["ok"]; exists {
+		if value, isBool := raw.(bool); isBool && !value {
+			return `"ok":false`
+		}
+	}
+	if raw, exists := object["error"]; exists && raw != nil {
+		switch value := raw.(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return "error: " + truncate(value, 120)
+			}
+		default:
+			return "error"
 		}
 	}
 	return ""
@@ -476,74 +508,104 @@ var (
 	reAC       = regexp.MustCompile(`(?i)(?:кд|ac)\s*(\d+)`)
 )
 
-// anchorExpect — число, которое в ответе должно стоять рядом со своим
-// маркером (d20, итог, DC/КД), а не где угодно в тексте.
-type anchorExpect struct {
-	Label   string
-	Anchors []string
-	Number  string
-}
-
+// reAnswer* — формы, в которых живой ответ называет число броска. Одних
+// якорей «d20/итог/DC» мало: нормальные ответы пишут «выпало 7», «d20 = 7,
+// +3 = 10» или «с бонусом 10», и это не должно считаться выдумкой.
 var (
-	anchorD20 = []string{"d20", "д20"}
-	anchorSum = []string{"итог", "итого", "всего", "сумма", "total"}
-	anchorDC  = []string{"dc", "кд", "сложност"}
+	reAnswerD20After  = regexp.MustCompile(`(?i)d20\s*[=:]?\s*(\d+)`)
+	reAnswerD20Rolled = regexp.MustCompile(`(?i)выпало\s*(\d+)`)
+	reAnswerD20Before = regexp.MustCompile(`(\d+)\s+на\s+d20`)
+	reAnswerSumWord   = regexp.MustCompile(`(?i)(?:итог[а-яё]*|всего|сумма|total)\D{0,15}(\d+)`)
+	reAnswerEquation  = regexp.MustCompile(`=\s*(\d+)`)
+	reAnswerBonus     = regexp.MustCompile(`(?i)бонус[а-яё]*\s*(\d+)`)
+	reAnswerVsDC      = regexp.MustCompile(`(\d+)\s+против\s+(?:dc|кд)`)
+	reAnswerDC        = regexp.MustCompile(`(?i)(?:dc|кд|сложност[а-яё]*)\s*[=:]?\s*(\d+)`)
+	reAnswerRolled    = regexp.MustCompile(`(?i)(?:итог[а-яё]*|всего|сумма|total|выпало)\D{0,15}(\d+)`)
 )
 
-// rollAnchors возвращает ожидаемые пары «якорь → число» из результата тула.
+type anchorPattern struct {
+	re    *regexp.Regexp
+	group int
+}
+
+// anchorExpect — число, которое ответ должен подтвердить одной из форм.
+type anchorExpect struct {
+	Label    string
+	Number   string
+	Patterns []anchorPattern
+}
+
+func pat(re *regexp.Regexp) anchorPattern { return anchorPattern{re: re, group: 1} }
+
+var (
+	d20Patterns  = []anchorPattern{pat(reAnswerD20After), pat(reAnswerD20Rolled), pat(reAnswerD20Before)}
+	sumPatterns  = []anchorPattern{pat(reAnswerSumWord), pat(reAnswerEquation), pat(reAnswerBonus), pat(reAnswerVsDC)}
+	dcPatterns   = []anchorPattern{pat(reAnswerDC)}
+	rollPatterns = []anchorPattern{pat(reAnswerRolled), pat(reAnswerEquation)}
+)
+
+// rollAnchors возвращает ожидаемые пары «что → число» из результата тула.
 func rollAnchors(tool, result string) []anchorExpect {
 	switch tool {
 	case "skill_check":
 		var out []anchorExpect
 		if match := reD20.FindStringSubmatch(result); match != nil {
-			out = append(out, anchorExpect{Label: "d20", Anchors: anchorD20, Number: match[1]})
+			out = append(out, anchorExpect{Label: "d20", Number: match[1], Patterns: d20Patterns})
 		}
 		if match := reSkillVs.FindStringSubmatch(result); match != nil {
 			out = append(out,
-				anchorExpect{Label: "итог", Anchors: anchorSum, Number: match[1]},
-				anchorExpect{Label: "DC", Anchors: anchorDC, Number: match[2]},
+				anchorExpect{Label: "итог", Number: match[1], Patterns: sumPatterns},
+				anchorExpect{Label: "DC", Number: match[2], Patterns: dcPatterns},
 			)
 		}
 		return out
 	case "roll_dice":
 		if match := reTotal.FindStringSubmatch(result); match != nil {
-			anchors := append([]string{"выпало"}, anchorSum...)
-			return []anchorExpect{{Label: "итог", Anchors: anchors, Number: match[1]}}
+			return []anchorExpect{{Label: "итог", Number: match[1], Patterns: rollPatterns}}
 		}
 	case "combat":
 		var out []anchorExpect
 		if match := reD20.FindStringSubmatch(result); match != nil {
-			out = append(out, anchorExpect{Label: "d20", Anchors: anchorD20, Number: match[1]})
+			out = append(out, anchorExpect{Label: "d20", Number: match[1], Patterns: d20Patterns})
 		}
 		if match := reAC.FindStringSubmatch(result); match != nil {
-			out = append(out, anchorExpect{Label: "КД", Anchors: []string{"кд", "ac"}, Number: match[1]})
+			out = append(out, anchorExpect{Label: "КД", Number: match[1], Patterns: dcPatterns})
 		}
 		return out
 	}
 	return nil
 }
 
-// checkAnchors ищет в ответе каждый якорь с ближайшим числом. Отсутствие
-// якоря — missing, другое число рядом с якорем — wrong (выдуманный бросок).
+// checkAnchors сверяет ответ с результатом: число должно встретиться хотя бы
+// в одной из форм. «Выдуманным» ответ считается, только если ни одно из
+// найденных чисел не совпало с ожидаемым, — иначе «В итоге ... 2 минуты»
+// рядом с корректным «итог 10» давало бы ложный fail.
 func checkAnchors(answer string, expects []anchorExpect) (missing, wrong []string) {
 	for _, expect := range expects {
-		alternatives := make([]string, 0, len(expect.Anchors))
-		for _, anchor := range expect.Anchors {
-			alternatives = append(alternatives, regexp.QuoteMeta(anchor))
-		}
-		re := regexp.MustCompile(`(?i)(?:` + strings.Join(alternatives, "|") + `)\D{0,15}(\d+)`)
-		matches := re.FindAllStringSubmatch(answer, -1)
-		if len(matches) == 0 {
+		candidates := anchorCandidates(answer, expect.Patterns)
+		if len(candidates) == 0 {
 			missing = append(missing, fmt.Sprintf("%s %s", expect.Label, expect.Number))
 			continue
 		}
-		for _, match := range matches {
-			if match[1] != expect.Number {
-				wrong = append(wrong, fmt.Sprintf("%s: ожидалось %s, в ответе %s", expect.Label, expect.Number, match[1]))
+		if contains(candidates, expect.Number) {
+			continue
+		}
+		wrong = append(wrong, fmt.Sprintf("%s: ожидалось %s, в ответе %s",
+			expect.Label, expect.Number, strings.Join(candidates, ", ")))
+	}
+	return missing, wrong
+}
+
+func anchorCandidates(answer string, patterns []anchorPattern) []string {
+	var out []string
+	for _, pattern := range patterns {
+		for _, match := range pattern.re.FindAllStringSubmatch(answer, -1) {
+			if len(match) > pattern.group {
+				out = append(out, match[pattern.group])
 			}
 		}
 	}
-	return missing, wrong
+	return dedupe(out)
 }
 
 // rollNumbers возвращает числа из результата тула без якорей (инициатива):
