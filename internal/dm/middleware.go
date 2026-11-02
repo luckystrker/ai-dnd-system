@@ -46,9 +46,16 @@ func newMemoryPolicy(st *store.Store, window int, budget int64, total func() int
 }
 
 func (p *memoryPolicy) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
+	// Сначала убираем телеметрию и прочие неразговорные события, затем
+	// ограничиваем разговорную часть окном. PromptLines не переписываем:
+	// системный префикс должен быть стабилен.
+	_, reduced, err := policies.NewConversationPolicy().Apply(cx.PromptLines(), evs, cx)
+	if err != nil {
+		return nil, err
+	}
+	evs = reduced
 	if p.window != nil {
-		// PromptLines не переписываем: системный префикс должен быть стабилен.
-		_, reduced, err := p.window.Apply(cx.PromptLines(), evs, cx)
+		_, reduced, err = p.window.Apply(cx.PromptLines(), evs, cx)
 		if err != nil {
 			return nil, err
 		}
