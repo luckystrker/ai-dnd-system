@@ -592,6 +592,60 @@ func TestChannelJoinWithoutCampaignRefused(t *testing.T) {
 	}
 }
 
+// Команды в форум-топике находят кампанию, привязанную ко всему чату: тот же
+// поиск, что у обычных сообщений (точный топик → чат).
+func TestChannelCommandsInTopicUseChatCampaign(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaignOwnedBy(t, st, "-100", "1")
+	if _, err := st.AutoRegister(campaign.ID, store.NewMemberInput{
+		UserID: "200", Username: strPtr("ivan"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+	thread := 7
+
+	kick := groupMessage(-100, 1, "/kick @ivan")
+	kick.MessageThreadID = &thread
+	kick.IsTopicMessage = true
+	if err := channel.ingest(rawUpdate(t, 1, kick)); err != nil {
+		t.Fatal(err)
+	}
+	sent := waitSent(t, api, 1)
+	if !strings.Contains(sent[0].text, "удалён") {
+		t.Fatalf("ответ на /kick из топика = %q", sent[0].text)
+	}
+
+	join := groupMessage(-100, 300, "/join")
+	join.MessageThreadID = &thread
+	join.IsTopicMessage = true
+	if err := channel.ingest(rawUpdate(t, 2, join)); err != nil {
+		t.Fatal(err)
+	}
+	sent = waitSent(t, api, 2)
+	if !strings.Contains(sent[1].text, "присоединился") {
+		t.Fatalf("ответ на /join из топика = %q", sent[1].text)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	players := map[string]bool{}
+	for _, member := range updated.Members {
+		players[member.UserID] = true
+	}
+	if players["200"] || !players["300"] {
+		t.Fatalf("состав после команд из топика: %+v", updated.Members)
+	}
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("команды из топика разбудили LLM: %d вызовов", calls)
+	}
+}
+
 // /kick @username ищет цель без учёта регистра.
 func TestChannelKickByUsername(t *testing.T) {
 	t.Parallel()

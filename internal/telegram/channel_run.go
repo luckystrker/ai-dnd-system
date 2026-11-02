@@ -234,7 +234,7 @@ func (c *Channel) handleJoin(message *Message) {
 		return
 	}
 	identity := IdentityFromMessage(message)
-	campaign, err := c.store.FindByBoundChat(identity.ChatID, TopicOf(message), false)
+	campaign, err := FindCampaignForIdentity(c.store, identity)
 	if err != nil {
 		c.log.Error("telegram: /join lookup failed", "chat", identity.ChatID, "error", err)
 		return
@@ -289,7 +289,7 @@ func (c *Channel) handleJoin(message *Message) {
 // автоприсоединение.
 func (c *Channel) handleKick(message *Message) {
 	identity := IdentityFromMessage(message)
-	campaign, err := c.store.FindByBoundChat(identity.ChatID, TopicOf(message), false)
+	campaign, err := FindCampaignForIdentity(c.store, identity)
 	if err != nil {
 		c.log.Error("telegram: /kick lookup failed", "chat", identity.ChatID, "error", err)
 		return
