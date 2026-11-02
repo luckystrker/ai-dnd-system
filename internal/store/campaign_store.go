@@ -206,6 +206,28 @@ func (s *Store) AdvanceDay(campaignID, actorUserID string) (*Campaign, error) {
 	return s.mustGetCampaign(campaign.ID)
 }
 
+// AdvanceDayForMember двигает день без проверки роли dm: по новой
+// авторизации день — операция памяти кампании, её может делать любой участник;
+// роль dm осталась только у административных команд.
+func (s *Store) AdvanceDayForMember(campaignID string) (*Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	campaign, err := s.mustGetCampaign(campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if campaign.Status != StatusActive {
+		return nil, storeError("Игровые дни можно двигать только в активной кампании.", ErrConflict)
+	}
+	if _, err := s.db.Exec(
+		"UPDATE campaigns SET current_day = COALESCE(current_day, 1) + 1, time_of_day = 'morning' WHERE id = ?",
+		campaign.ID,
+	); err != nil {
+		return nil, err
+	}
+	return s.mustGetCampaign(campaign.ID)
+}
+
 // SetEnvironment обновляет игровое время/окружение.
 func (s *Store) SetEnvironment(campaignID string, patch EnvironmentPatch) (*Campaign, error) {
 	s.mu.Lock()
@@ -653,6 +675,28 @@ func (s *Store) UpdateQuest(campaignIDOrSlug, questIDOrSlug string, patch QuestP
 		nullableInt(updated.DeadlineDay), stringValue(updated.UpdatedAt), row.ID,
 	)
 	if err != nil {
+		return nil, err
+	}
+	return s.mustGetQuest(row.ID)
+}
+
+// SetQuestStatus меняет статус квеста без ограничения update_quest: этим
+// пользуется complete_quest, который сам выдаёт награды перед закрытием.
+func (s *Store) SetQuestStatus(campaignIDOrSlug, questIDOrSlug string, status QuestStatus) (*Quest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	campaign, err := s.mustGetCampaign(campaignIDOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.findQuestRow(campaign.ID, questIDOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(
+		"UPDATE quests SET status = ?, updated_at = ? WHERE id = ?",
+		string(status), nowISO(), row.ID,
+	); err != nil {
 		return nil, err
 	}
 	return s.mustGetQuest(row.ID)
