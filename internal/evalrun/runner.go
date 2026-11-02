@@ -449,6 +449,11 @@ func buildFixture(st *store.Store, caseName string, meta evalgame.CaseMeta) (fix
 	if err := seedCombat(st, campaign.Slug); err != nil {
 		return fixture{}, err
 	}
+	// Бой виден модели только через транскрипт: в настоящей сессии инициатива
+	// и начало боя уже записаны прошлыми ходами, и DM знает, что бой идёт.
+	if err := seedCombatTranscript(st, campaign.Slug); err != nil {
+		return fixture{}, err
+	}
 	return fixture{campaignID: campaign.ID, session: session}, nil
 }
 
@@ -465,6 +470,22 @@ func fixtureSpeaker(meta evalgame.CaseMeta) fixtureUser {
 	default:
 		return fixtureDen
 	}
+}
+
+// seedCombatTranscript пишет в день 1 начало боя так, как его записал бы
+// прошлый ход: без этой строки модель не знает о бое, и кейс memory-01
+// («меня снова ранили») превращается в проверку догадки, а не записи памяти.
+func seedCombatTranscript(st *store.Store, campaignSlug string) error {
+	entries := []string{
+		"DM: Из-за деревьев выскакивают два гоблина с ржавыми кинжалами.",
+		"Инициатива: Дэн — 17, Лиса — 15, гоблин-1 — 13, гоблин-2 — 11. Бой начат, раунд 1. Первый ход: Дэн.",
+	}
+	for _, line := range entries {
+		if err := st.AppendTranscriptEntry(campaignSlug, 1, store.TranscriptEntry{Kind: "dm", Text: line}); err != nil {
+			return fmt.Errorf("evalrun: транскрипт боя: %w", err)
+		}
+	}
+	return nil
 }
 
 // seedCombat ставит кампанию в начало боя: кейсы вроде memory-01 («меня

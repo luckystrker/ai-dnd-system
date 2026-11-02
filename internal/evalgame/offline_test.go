@@ -264,10 +264,10 @@ func TestMechanicalScorersMemoryWrite(t *testing.T) {
 		requireScore(t, cr, "tool_ok", true)
 	})
 
-	t.Run("забытый update_character ловится", func(t *testing.T) {
+	t.Run("забытый combat ловится", func(t *testing.T) {
 		t.Parallel()
 		cr := runMechanical(t, suite, "memory-01-damage-on-player-turn", toolset,
-			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{damageCall}}},
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{persistCall}}},
 			&events.ModelResponse{Message: &events.ModelMessage{Content: "Кинжал рассекает плечо: минус 4 хита. Следующая — Лиса."}},
 		)
 		requireScore(t, cr, "tools_called", false)

@@ -26,6 +26,7 @@ import (
 	agoconfig "github.com/luckystrker/ago/config"
 	"github.com/luckystrker/ago/eval"
 
+	telegramcal "github.com/luckystriker/ai-dnd-system/internal/calibrate"
 	"github.com/luckystriker/ai-dnd-system/internal/chronicler"
 	"github.com/luckystriker/ai-dnd-system/internal/config"
 	"github.com/luckystriker/ai-dnd-system/internal/dayclose"
@@ -61,9 +62,15 @@ func run(ctx context.Context, args []string) error {
 	calibrate := fs.Bool("judge-calibration", true, "калибровать судью на вручную написанных ответах")
 	calibrationPath := fs.String("calibration", "eval/judge/calibration.jsonl", "фикстуры калибровки судьи")
 	checkOnly := fs.Bool("check-only", false, "только загрузить и проверить набор, без модели")
+	telegramCalibration := fs.Bool("telegram", false, "только офлайн-калибровка гейта и склейки Telegram")
 	timeout := fs.Duration("timeout", evalrun.DefaultTurnTimeout, "дедлайн одного хода")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *telegramCalibration {
+		fmt.Fprint(os.Stdout, telegramcal.Run(telegramcal.Scenarios(), telegramcal.DefaultConfig()).Summary())
+		return nil
 	}
 
 	var judgeClient agoconfig.LLMClient

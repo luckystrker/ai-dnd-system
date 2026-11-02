@@ -43,6 +43,24 @@ func (s *EventStreamStorage) SaveEvent(streamID string, ev events.Event) error {
 	return nil
 }
 
+// ListStreamIDs возвращает id всех durable-потоков.
+func (s *EventStreamStorage) ListStreamIDs() ([]string, error) {
+	rows, err := s.store.db.Query("SELECT DISTINCT stream_id FROM event_streams ORDER BY stream_id")
+	if err != nil {
+		return nil, fmt.Errorf("store: список потоков: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // GetHistory читает поток в порядке seq.
 func (s *EventStreamStorage) GetHistory(streamID string) ([]events.Event, error) {
 	rows, err := s.store.db.Query(
