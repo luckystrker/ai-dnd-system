@@ -81,6 +81,9 @@ type Config struct {
 	SkillsDir string
 	// ExtraTools добавляются к DM toolkit (eval и узкие тесты).
 	ExtraTools []agotools.Tool
+	// ExtraMiddleware добавляются после встроенных: eval подменяет результат
+	// тула ошибкой (fault) на N-м вызове, не трогая сам тул.
+	ExtraMiddleware []middleware.Factory
 	// SkipToolkit собирает агента только из ExtraTools: eval на скриптованных
 	// траекториях проверяет промпт, память и лимиты без живой БД-кампании.
 	SkipToolkit bool
@@ -189,7 +192,7 @@ func New(cfg Config) (*DM, error) {
 		agent.WithTools(agentTools...),
 		agent.WithDependencies(map[string]any{sessionDepKey: session}),
 		agent.WithStreamBase(conversation),
-		agent.WithMiddleware(
+		agent.WithMiddleware(append([]middleware.Factory{
 			// Сессия (говорящий/кампания) обновляется в начале каждого хода:
 			// один DM обслуживает весь чат, а автор сообщения меняется.
 			func() middleware.Middleware { return sessionMiddleware{sessionFn: sessionFn} },
@@ -206,7 +209,7 @@ func New(cfg Config) (*DM, error) {
 				return &transcriptMW{store: cfg.Store, log: logger}
 			},
 			func() middleware.Middleware { return memory },
-		),
+		}, cfg.ExtraMiddleware...)...),
 	}
 	agentOpts = append(agentOpts, agent.WithMaxToolRounds(maxToolRounds))
 	a := agent.New("dm", instructions, agentOpts...)

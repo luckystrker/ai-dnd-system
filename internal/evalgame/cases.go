@@ -107,15 +107,15 @@ func (s Suite) Skipped() []string {
 // MetaFor возвращает метаданные кейса (пустые, если имени нет).
 func (s Suite) MetaFor(name string) CaseMeta { return s.Meta[name] }
 
-// CountByCategory считает активные кейсы по категориям.
-func (s Suite) CountByCategory() map[string]int {
+// CountByCategory считает кейсы по категориям, доступные на старте набора
+// (слайс 0): skip_until-кейсы не входят.
+func (s Suite) CountByCategory() map[string]int { return s.CountByCategoryAt(0) }
+
+// CountByCategoryAt считает кейсы по категориям, активные на слайсе slice.
+func (s Suite) CountByCategoryAt(slice int) map[string]int {
 	counts := map[string]int{}
-	for _, c := range s.Cases {
-		meta := s.Meta[c.Name]
-		if meta.SkipUntil != "" {
-			continue
-		}
-		counts[meta.Category]++
+	for _, c := range s.ActiveAt(slice) {
+		counts[s.Meta[c.Name].Category]++
 	}
 	return counts
 }
