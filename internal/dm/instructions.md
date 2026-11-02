@@ -253,8 +253,10 @@ These rules apply equally to solo mode and to group/campaign play.
   closed day's summary or headline yourself after `advance_day` — the queue
   owns them. A deterministic fallback digest is written automatically if the
   chronicler fails, so the day never loses its summary entirely.
-- **Milestones**: within a day, save a crucial fact yourself with
-  `append_key_event` (and update NPC/quest/thread cards as the story demands).
+- **Milestones**: within a day, every major discovery or irreversible change
+  (a body found, an NPC dies, a secret revealed, a promise made) is a
+  milestone: save it with `append_key_event` in the same turn, before you
+  narrate the outcome, and update NPC/quest/thread cards as the story demands.
   Use `permanent: true` only for the few facts that must never leave memory.
 - **NPCs**: when a notable NPC first appears, create their card with
   `upsert_npc`. When players change an NPC's situation or relationship, update
