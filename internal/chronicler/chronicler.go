@@ -23,6 +23,10 @@ import (
 //go:embed instructions.md
 var instructions string
 
+// defaultMaxToolRounds ограничивает цикл тулов летописца, если конфиг не задал
+// свой: без лимита модель может крутить дорогие вызовы бесконечно.
+const defaultMaxToolRounds = 12
+
 // Report — итог закрытия дня. Счётчики считаются по изменениям в БД, а не по
 // словам модели.
 type Report struct {
@@ -100,6 +104,8 @@ func New(cfg Config) (*Chronicler, error) {
 	}
 	if cfg.MaxToolRounds > 0 {
 		agentOpts = append(agentOpts, agent.WithMaxToolRounds(cfg.MaxToolRounds))
+	} else {
+		agentOpts = append(agentOpts, agent.WithMaxToolRounds(defaultMaxToolRounds))
 	}
 	return &Chronicler{
 		agent:   agent.New("chronicler", instructions, agentOpts...),

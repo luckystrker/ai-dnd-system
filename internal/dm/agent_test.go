@@ -544,3 +544,78 @@ func TestNewBuildsFullAgent(t *testing.T) {
 		t.Fatal("агент или монитор не собраны")
 	}
 }
+
+// Два одинаковых сообщения игрока в разных ходах — две записи транскрипта
+// (ключ хода не должен схлопываться по тексту).
+func TestTranscriptKeepsIdenticalMessagesAcrossTurns(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	cfg := agotest.NewTestConfig(plain("Первый"), plain("Второй"))
+	d, err := New(Config{Model: cfg, Store: st, Session: playerSession(campaign)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	for i := 0; i < 2; i++ {
+		if _, err := d.Ask(context.Background(), "Жду."); err != nil {
+			t.Fatalf("Ask %d: %v", i+1, err)
+		}
+	}
+	day, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	playerLines := 0
+	for _, line := range day.Entries {
+		if strings.Contains(line, "Игрок @den") && strings.Contains(line, "Жду.") {
+			playerLines++
+		}
+	}
+	if playerLines != 2 {
+		t.Fatalf("строк игрока = %d, want 2:\n%s", playerLines, strings.Join(day.Entries, "\n"))
+	}
+}
+
+type recordingCloser struct {
+	campaignID string
+	day        int
+}
+
+func (c *recordingCloser) CloseDay(_ context.Context, campaign *store.Campaign, day int) error {
+	c.campaignID = campaign.ID
+	c.day = day
+	return nil
+}
+
+// Настоящий toolkit DM получает DayCloser из конфига: advance_day ставит
+// закрытие прошлого дня в очередь, а не просит модель звать летописца.
+func TestAdvanceDayThroughDMToolkitEnqueuesCloser(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	closer := &recordingCloser{}
+	cfg := agotest.NewTestConfig(
+		toolCall("a1", "advance_day", `{}`),
+		plain("Наступило утро."),
+	)
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign), DayCloser: closer,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "Ночуем в трактире."); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if closer.campaignID != campaign.ID || closer.day != 1 {
+		t.Fatalf("closer = %+v, want campaign %s day 1", closer, campaign.ID)
+	}
+	updated, err := st.GetCampaign(campaign.ID)
+	if err != nil || updated.CurrentDay == nil || *updated.CurrentDay != 2 {
+		t.Fatalf("день не сдвинут: %+v, %v", updated, err)
+	}
+}

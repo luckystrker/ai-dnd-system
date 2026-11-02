@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
@@ -179,6 +180,11 @@ var actionLabels = map[string]string{
 }
 
 func (m *transcriptMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
+	// Событие ещё не отправлено в stream: ставим время создания сами, чтобы
+	// ключ хода был уникальным и переживал повторную обработку той же трассы.
+	if ev != nil && ev.At().IsZero() {
+		ev.StampNow(time.Now())
+	}
 	m.turn = turnKey(ev)
 	session := sessionFrom(cx)
 	if text := requestText(ev); text != "" {

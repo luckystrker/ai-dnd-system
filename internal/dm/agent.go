@@ -41,6 +41,9 @@ const (
 	DefaultTurnTimeout = 180 * time.Second
 	// DefaultTokenBudget — бюджет токенов одной сессии (чата).
 	DefaultTokenBudget int64 = 200000
+	// DefaultMaxToolRounds — лимит раундов тулов, если конфиг не задал свой
+	// (решение владельца: 12).
+	DefaultMaxToolRounds = 12
 	// NeutralFailureReply — ответ игрокам при терминальном сбое хода: без
 	// диагностики и кодов. Записанное тулами при этом не откатывается.
 	NeutralFailureReply = "DM задумался, повтори ход."
@@ -100,6 +103,10 @@ func New(cfg Config) (*DM, error) {
 	budget := cfg.TokenBudget
 	if budget <= 0 {
 		budget = DefaultTokenBudget
+	}
+	maxToolRounds := cfg.MaxToolRounds
+	if maxToolRounds <= 0 {
+		maxToolRounds = DefaultMaxToolRounds
 	}
 	session := cfg.Session
 	if session == nil {
@@ -164,9 +171,7 @@ func New(cfg Config) (*DM, error) {
 			compactionFactory(client, window),
 		),
 	}
-	if cfg.MaxToolRounds > 0 {
-		agentOpts = append(agentOpts, agent.WithMaxToolRounds(cfg.MaxToolRounds))
-	}
+	agentOpts = append(agentOpts, agent.WithMaxToolRounds(maxToolRounds))
 	a := agent.New("dm", instructions, agentOpts...)
 	return &DM{agent: a, monitor: monitor, timeout: timeout, log: logger, cleanup: cleanup}, nil
 }
