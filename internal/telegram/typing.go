@@ -13,6 +13,11 @@ import (
 // поэтому чаще раза в 4 секунды его отправлять бессмысленно.
 const TypingThrottle = 4 * time.Second
 
+// typingSweepThreshold — порог, после которого Activity вычищает записи last,
+// которым больше не нужен троттл. Без чистки карта росла бы вместе с числом
+// чатов, где бот когда-либо печатал.
+const typingSweepThreshold = 1000
+
 // ChatActionSender — минимум Bot API, нужный индикатору набора (его
 // реализует и Client, и fake в тестах).
 type ChatActionSender interface {
@@ -65,6 +70,14 @@ func (n *TypingNotifier) Activity(session func() *tools.Session) func() {
 			return
 		}
 		n.last[key] = now
+		if len(n.last) > typingSweepThreshold {
+			cutoff := now.Add(-10 * n.throttle)
+			for chat, at := range n.last {
+				if at.Before(cutoff) {
+					delete(n.last, chat)
+				}
+			}
+		}
 		n.mu.Unlock()
 
 		threadID := current.MessageThreadID

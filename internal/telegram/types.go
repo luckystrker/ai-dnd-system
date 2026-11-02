@@ -1,9 +1,15 @@
 package telegram
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// commandPattern повторяет isBotCommand из TS-канала:
+// /^\/(?<command>[A-Za-z0-9_]+)(?:@(?<target>[A-Za-z0-9_]+))?(?:\s|$)/u.
+// Одиночный «/», «/@bot» и «/join!» командами не считаются.
+var commandPattern = regexp.MustCompile(`^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s|$)`)
 
 // RawUpdate — один апдейт long-poll: сырой JSON и его update_id. Сырой payload
 // пишется в durable-inbox до разбора и обработки.
@@ -186,19 +192,11 @@ func (m *Message) TextContent() string {
 // IsCommand сообщение-команда (/join, /join@bot). target — адресат после @;
 // он должен совпадать с username бота (регистр не важен) или отсутствовать.
 func (m *Message) IsCommand(botUsername string) bool {
-	text := strings.TrimSpace(m.TextContent())
-	if !strings.HasPrefix(text, "/") {
+	match := commandPattern.FindStringSubmatch(strings.TrimSpace(m.TextContent()))
+	if match == nil {
 		return false
 	}
-	head := text
-	if index := strings.IndexAny(head, " \t\n"); index >= 0 {
-		head = head[:index]
-	}
-	command := strings.TrimPrefix(head, "/")
-	target := ""
-	if index := strings.Index(command, "@"); index >= 0 {
-		target = command[index+1:]
-	}
+	target := match[2]
 	if target == "" {
 		return true
 	}
@@ -207,19 +205,11 @@ func (m *Message) IsCommand(botUsername string) bool {
 
 // CommandName — имя команды без слэша и адресата (lowercase), "" — не команда.
 func (m *Message) CommandName() string {
-	text := strings.TrimSpace(m.TextContent())
-	if !strings.HasPrefix(text, "/") {
+	match := commandPattern.FindStringSubmatch(strings.TrimSpace(m.TextContent()))
+	if match == nil {
 		return ""
 	}
-	head := text
-	if index := strings.IndexAny(head, " \t\n"); index >= 0 {
-		head = head[:index]
-	}
-	name := strings.TrimPrefix(head, "/")
-	if index := strings.Index(name, "@"); index >= 0 {
-		name = name[:index]
-	}
-	return strings.ToLower(name)
+	return strings.ToLower(match[1])
 }
 
 // FileInfo — результат getFile.

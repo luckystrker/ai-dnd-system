@@ -84,9 +84,14 @@ type Channel struct {
 	clock              func() time.Time
 	newDM              DMFactory
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// chats — агенты по ключу чата. Выселение не делаем: оно должно
+	// согласовываться с идущим ходом и очередью чата, иначе Close() агента
+	// оборвёт ход. История при этом durable (SQLite), так что при росте
+	// аудитории eviction можно добавить отдельной задачей; пока чистка — в Stop.
 	chats map[string]*chatSession
 
+	runCtx    context.Context
 	runCancel context.CancelFunc
 }
 

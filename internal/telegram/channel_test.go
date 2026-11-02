@@ -192,7 +192,7 @@ func modelFactory(st *store.Store, model agoconfig.ModelConfig, extra ...agotool
 	}
 }
 
-func newTestChannel(t *testing.T, api *fakeAPI, st *store.Store, factory DMFactory, mutate func(*Config)) *Channel {
+func newTestChannel(t *testing.T, api API, st *store.Store, factory DMFactory, mutate func(*Config)) *Channel {
 	t.Helper()
 	cfg := Config{
 		API: api, Store: st, BotUsername: "dnd_bot",
@@ -777,4 +777,115 @@ func TestChannelNeutralReplyOnModelFailure(t *testing.T) {
 	if sent[0].text != dm.NeutralFailureReply {
 		t.Fatalf("ответ = %q, want %q", sent[0].text, dm.NeutralFailureReply)
 	}
+}
+
+// Негабаритный апдейт без поздних соседей не должен крутиться в long-poll:
+// offset сохраняется и для пропущенного апдейта.
+func TestChannelOversizedUpdateAdvancesOffset(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	api := newFakeBotAPI()
+	api.queue <- []RawUpdate{{UpdateID: 42, Payload: []byte(`{"update_id":42,"padding":"` + strings.Repeat("x", 2048) + `"}`)}}
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), func(cfg *Config) {
+		cfg.MaxUpdateBytes = 1024
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- channel.Run(ctx) }()
+	waitFor(t, func() bool {
+		offset, err := st.TelegramOffset()
+		return err == nil && offset == 43
+	})
+	pending, err := st.PendingTelegramUpdates()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("негабарит попал в inbox: %+v, %v", pending, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run не остановился")
+	}
+}
+
+// Если агент чата не собрался, сообщение не теряется: оно уходит в транскрипт.
+func TestChannelFactoryFailureKeepsTranscript(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaign(t, st, "-100")
+	api := newFakeBotAPI()
+	failing := func(string, stream.Stream, func() *ttrpg.Session) (*dm.DM, error) {
+		return nil, errors.New("skills dir is broken")
+	}
+	channel := newTestChannel(t, api, st, failing, nil)
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 100, "ДМ, я открываю дверь"))); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		pending, _ := st.PendingTelegramUpdates()
+		return len(pending) == 0
+	})
+	day, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(day.Entries, "\n"), "открываю дверь") {
+		t.Fatalf("сообщение потерялось: %v", day.Entries)
+	}
+}
+
+// Служебные отправки (callback, /join, postText) идут под контекстом Run:
+// при остановке процесса они отменяются вместе с ним.
+func TestChannelServiceCallsUseRunContext(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	api := &contextCapturingAPI{
+		fakeAPI:   newFakeBotAPI(),
+		callbacks: make(chan context.Context, 1),
+		texts:     make(chan context.Context, 1),
+	}
+	channel := newTestChannel(t, api, st, modelFactory(st, agotest.NewTestConfig()), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- channel.Run(ctx) }()
+	waitFor(t, func() bool { return channel.baseContext().Done() != nil })
+
+	if err := channel.route(1, &Update{CallbackQuery: &CallbackQuery{ID: "cb-1"}}); err != nil {
+		t.Fatalf("route callback: %v", err)
+	}
+	callbackCtx := <-api.callbacks
+	channel.postText(groupMessage(-100, 100, "привет"), "служебный текст")
+	textCtx := <-api.texts
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run не остановился")
+	}
+	if callbackCtx.Err() == nil {
+		t.Fatal("answerCallbackQuery не отменился вместе с каналом")
+	}
+	if textCtx.Err() == nil {
+		t.Fatal("postText не отменился вместе с каналом")
+	}
+}
+
+type contextCapturingAPI struct {
+	*fakeAPI
+	callbacks chan context.Context
+	texts     chan context.Context
+}
+
+func (a *contextCapturingAPI) AnswerCallbackQuery(ctx context.Context, _, _ string) error {
+	a.callbacks <- ctx
+	return nil
+}
+
+func (a *contextCapturingAPI) SendRichText(ctx context.Context, _ string, _ *int, _ string) error {
+	a.texts <- ctx
+	return nil
 }

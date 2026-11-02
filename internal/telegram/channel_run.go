@@ -21,7 +21,7 @@ import (
 func (c *Channel) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
-	c.runCancel = cancel
+	c.runCtx, c.runCancel = runCtx, cancel
 	c.mu.Unlock()
 	defer cancel()
 
@@ -99,7 +99,12 @@ func (c *Channel) poll(ctx context.Context, offset int64) error {
 			}
 			if len(raw.Payload) > c.maxUpdateBytes {
 				c.log.Warn("telegram: update too large; skipped", "update", raw.UpdateID, "bytes", len(raw.Payload))
+				// Offset двигаем и для пропуска: иначе негабаритный апдейт
+				// без поздних соседей возвращался бы из getUpdates вечно.
 				offset = raw.UpdateID + 1
+				if err := c.store.SaveTelegramOffset(offset); err != nil {
+					c.log.Error("telegram: save offset failed", "offset", offset, "error", err)
+				}
 				continue
 			}
 			if err := c.ingest(raw); err != nil {
@@ -159,7 +164,7 @@ func (c *Channel) recoverUpdate(item store.TelegramUpdate) {
 // update_id попадает в батч и помечается обработанным после хода.
 func (c *Channel) route(updateID int64, update *Update) error {
 	if update.CallbackQuery != nil {
-		_ = c.api.AnswerCallbackQuery(context.Background(), update.CallbackQuery.ID, "Unsupported action.")
+		_ = c.api.AnswerCallbackQuery(c.baseContext(), update.CallbackQuery.ID, "Unsupported action.")
 		return c.store.MarkTelegramUpdateProcessed(updateID)
 	}
 	message := update.Message
@@ -258,7 +263,7 @@ func (c *Channel) handleJoin(message *Message) {
 
 // postText отправляет служебный текст в чат сообщения.
 func (c *Channel) postText(message *Message, text string) {
-	if err := c.api.SendRichText(context.Background(), ChatIDString(message.Chat.ID), TopicOf(message), text); err != nil {
+	if err := c.api.SendRichText(c.baseContext(), ChatIDString(message.Chat.ID), TopicOf(message), text); err != nil {
 		c.log.Warn("telegram: send failed", "chat", message.Chat.ID, "error", err)
 	}
 }
@@ -349,6 +354,12 @@ func (c *Channel) handleBatch(ctx context.Context, batch Batch) error {
 
 	chat, err := c.chatSession(batch.Key)
 	if err != nil {
+		// Гейт уже пропустил сообщения, но агент не собрался (например,
+		// битый каталог скиллов). Не теряем переписку: пишем в транскрипт,
+		// иначе после рестарта были бы бесконечные повторы.
+		for _, item := range batch.Messages {
+			c.recordTranscript(item)
+		}
 		markProcessed()
 		return err
 	}
@@ -534,6 +545,17 @@ func RepairHistory(history *stream.History) (int, error) {
 		return 0, err
 	}
 	return dropped, nil
+}
+
+// baseContext — контекст запуска канала для коротких служебных отправок
+// (callback, /join): при остановке они отменяются вместе с процессом.
+func (c *Channel) baseContext() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runCtx != nil {
+		return c.runCtx
+	}
+	return context.Background()
 }
 
 func sleepCtx(ctx context.Context, duration time.Duration) bool {

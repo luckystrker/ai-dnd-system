@@ -14,6 +14,11 @@ import (
 // ответом на реплику DM, а не перепиской игроков между собой.
 const DefaultFollowUpWindow = 10 * time.Minute
 
+// gateSweepThreshold — порог, после которого MarkBotReply вычищает истёкшие
+// записи awaiting. Запись нужна только на время follow-up окна; без чистки
+// карта росла бы вместе с числом чатов, где бот когда-либо отвечал.
+const gateSweepThreshold = 1000
+
 // Incoming — сообщение, попавшее в очередь чата.
 type Incoming struct {
 	Message  *Message
@@ -71,7 +76,18 @@ func (g *Gate) SetFollowUpWindow(window time.Duration) {
 func (g *Gate) MarkBotReply(chatKey string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.awaiting[chatKey] = g.clock()
+	now := g.clock()
+	g.awaiting[chatKey] = now
+	// Замолчавшие чаты не должны копиться вечно: запись нужна только на
+	// время follow-up окна.
+	if len(g.awaiting) > gateSweepThreshold {
+		cutoff := now.Add(-g.followUp)
+		for key, at := range g.awaiting {
+			if at.Before(cutoff) {
+				delete(g.awaiting, key)
+			}
+		}
+	}
 }
 
 // ShouldReply решает, будить ли LLM для склеенного батча чата. Состояние

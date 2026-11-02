@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -203,5 +204,27 @@ func TestGateMentionBounds(t *testing.T) {
 	message := gateMessage(-100, "supergroup", 100, "den", "Пишу @dnd_bot_extra и всё")
 	if gate.ShouldReply("-100:", []Incoming{{Message: message}}) {
 		t.Fatal("упоминание с другим username посчитано нашим")
+	}
+}
+
+// Замолчавшие чаты не копятся в awaiting вечно.
+func TestGateSweepsStaleAwaiting(t *testing.T) {
+	t.Parallel()
+
+	gate, _, _ := newGate(t)
+	gate.SetFollowUpWindow(time.Minute)
+	now := time.Unix(1_700_000_000, 0)
+	gate.SetClock(func() time.Time { return now })
+	for index := 0; index < 1000; index++ {
+		gate.MarkBotReply("chat-" + strconv.Itoa(index))
+	}
+	later := now.Add(2 * time.Minute)
+	gate.SetClock(func() time.Time { return later })
+	gate.MarkBotReply("fresh")
+	gate.mu.Lock()
+	size := len(gate.awaiting)
+	gate.mu.Unlock()
+	if size != 1 {
+		t.Fatalf("awaiting = %d, want 1 после чистки", size)
 	}
 }
