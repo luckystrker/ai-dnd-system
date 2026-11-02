@@ -28,26 +28,30 @@ const (
 	// внутри (закрытие дня) идёт в фоне и в дедлайн не входит.
 	DefaultTurnTimeoutSeconds = 180
 
-	// DefaultTokenBudget — порог накопленных токенов, которые считает
-	// TokenMonitor по UsageEvent. При превышении модель получает просьбу
-	// завершить сцену, игроки — нет. Семантика порога (на ход, на сессию,
-	// скользящее окно) — решение владельца; текущая реализация накопительная.
+	// DefaultTokenBudget — бюджет токенов одного хода: TokenMonitor
+	// сбрасывается в начале хода, при превышении модель получает просьбу
+	// завершить сцену, игроки — нет.
 	DefaultTokenBudget int64 = 200000
 
 	// DefaultDayCloseBackfillMax — сколько пропущенных дней на старте максимум
 	// закрывать полным летописцем (дорого и может затирать текущий мир).
-	DefaultDayCloseBackfillMax = 3
+	DefaultDayCloseBackfillMax = 2
+
+	// DefaultDayCloseBackfillDays — окно последних закрытых дней, которые
+	// закрывает летописец; более старые дни — только fallback-дайджест.
+	DefaultDayCloseBackfillDays = 2
 )
 
 // Config — вся конфигурация процесса бота.
 type Config struct {
-	LLM                 llm.Settings
-	MaxToolRounds       int
-	DBPath              string
-	ContextWindowTokens int
-	TurnTimeoutSeconds  int
-	TokenBudget         int64
-	DayCloseBackfillMax int
+	LLM                  llm.Settings
+	MaxToolRounds        int
+	DBPath               string
+	ContextWindowTokens  int
+	TurnTimeoutSeconds   int
+	TokenBudget          int64
+	DayCloseBackfillMax  int
+	DayCloseBackfillDays int
 }
 
 // Load читает переменные окружения через getenv (подменяется в тестах).
@@ -63,9 +67,11 @@ type Config struct {
 //	CONTEXT_WINDOW_TOKENS фиксированное окно контекста, 16000..512000
 //	                     (по умолчанию 96000); компакция на 75%
 //	TURN_TIMEOUT_SECONDS дедлайн одного хода DM, 1..3600 (по умолчанию 180)
-//	TOKEN_BUDGET         порог накопленных токенов сессии (по умолчанию 200000)
+//	TOKEN_BUDGET         бюджет токенов одного хода (по умолчанию 200000)
 //	DAYCLOSE_BACKFILL_MAX сколько пропущенных дней на старте закрывать полным
-//	                     летописцем: -1 — не догонять, 0 — по умолчанию 3
+//	                     летописцем: -1 — не догонять, 0 — по умолчанию 2
+//	DAYCLOSE_BACKFILL_DAYS окно последних закрытых дней для летописца
+//	                     (1..30, по умолчанию 2); старше — только дайджест
 //	CAMPAIGN_DB_PATH     путь к SQLite-базе кампаний (по умолчанию data/campaigns.db)
 func Load(getenv func(string) string) (Config, error) {
 	spec, err := llm.Lookup(getenv("LLM_PROVIDER"))
@@ -129,6 +135,14 @@ func Load(getenv func(string) string) (Config, error) {
 			backfillMax = parsed
 		}
 	}
+	backfillDays := DefaultDayCloseBackfillDays
+	if raw := strings.TrimSpace(getenv("DAYCLOSE_BACKFILL_DAYS")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < 1 || parsed > 30 {
+			return Config{}, fmt.Errorf("DAYCLOSE_BACKFILL_DAYS: ожидается 1..30, получено %q", raw)
+		}
+		backfillDays = parsed
+	}
 
 	return Config{
 		LLM: llm.Settings{
@@ -137,11 +151,12 @@ func Load(getenv func(string) string) (Config, error) {
 			BaseURL:  strings.TrimSpace(getenv("LLM_BASE_URL")),
 			Model:    strings.TrimSpace(getenv("LLM_MODEL")),
 		},
-		MaxToolRounds:       maxRounds,
-		DBPath:              dbPath,
-		ContextWindowTokens: contextWindow,
-		TurnTimeoutSeconds:  turnTimeout,
-		TokenBudget:         tokenBudget,
-		DayCloseBackfillMax: backfillMax,
+		MaxToolRounds:        maxRounds,
+		DBPath:               dbPath,
+		ContextWindowTokens:  contextWindow,
+		TurnTimeoutSeconds:   turnTimeout,
+		TokenBudget:          tokenBudget,
+		DayCloseBackfillMax:  backfillMax,
+		DayCloseBackfillDays: backfillDays,
 	}, nil
 }

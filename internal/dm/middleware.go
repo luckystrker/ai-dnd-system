@@ -26,7 +26,7 @@ const sessionDepKey = "ttrpg.session"
 // ходами остаётся валидным: меняется только хвост истории.
 //
 // Заодно применяется жёсткий лимит окна к истории (страховка поверх compact)
-// и один раз за сессию добавляется предупреждение о превышении бюджета.
+// и предупреждение о превышении бюджета токенов в рамках хода.
 type memoryPolicy struct {
 	middleware.Base
 	store      *store.Store
@@ -46,6 +46,9 @@ func newMemoryPolicy(st *store.Store, window int, budget int64, total func() int
 }
 
 func (p *memoryPolicy) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
+	// Блок пересобирается на каждый LLM-вызов (решение владельца): модель
+	// видит свежие HP/NPC/мир после тулов, даже если хвост меняется внутри
+	// хода и кэш провайдера по хвосту инвалидируется.
 	// Сначала убираем телеметрию и прочие неразговорные события, затем
 	// ограничиваем разговорную часть окном. PromptLines не переписываем:
 	// системный префикс должен быть стабилен.
@@ -77,10 +80,10 @@ func (p *memoryPolicy) withBudgetNotice(block string) string {
 		return block
 	}
 	if p.budgetWarn.CompareAndSwap(false, true) {
-		p.log.Warn("dm: session token budget exceeded",
+		p.log.Warn("dm: turn token budget exceeded",
 			"budget", p.budget, "used", p.total())
 	}
-	notice := "Внимание: бюджет токенов этой сессии превышен. Заверши текущую сцену " +
+	notice := "Внимание: бюджет токенов этого хода превышен. Заверши текущую сцену " +
 		"коротко, предложи игрокам паузу и не начинай новых больших сцен без явной просьбы."
 	if block == "" {
 		return notice

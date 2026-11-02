@@ -44,17 +44,21 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DayCloseBackfillMax != config.DefaultDayCloseBackfillMax {
 		t.Errorf("DayCloseBackfillMax = %d, want %d", cfg.DayCloseBackfillMax, config.DefaultDayCloseBackfillMax)
 	}
+	if cfg.DayCloseBackfillDays != config.DefaultDayCloseBackfillDays {
+		t.Errorf("DayCloseBackfillDays = %d, want %d", cfg.DayCloseBackfillDays, config.DefaultDayCloseBackfillDays)
+	}
 }
 
 func TestLoadContextLimits(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := config.Load(envMap(map[string]string{
-		"LLM_API_KEY":           "sk-test",
-		"CONTEXT_WINDOW_TOKENS": "64000",
-		"TURN_TIMEOUT_SECONDS":  "90",
-		"TOKEN_BUDGET":          "150000",
-		"DAYCLOSE_BACKFILL_MAX": "2",
+		"LLM_API_KEY":            "sk-test",
+		"CONTEXT_WINDOW_TOKENS":  "64000",
+		"TURN_TIMEOUT_SECONDS":   "90",
+		"TOKEN_BUDGET":           "150000",
+		"DAYCLOSE_BACKFILL_MAX":  "1",
+		"DAYCLOSE_BACKFILL_DAYS": "1",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -68,8 +72,11 @@ func TestLoadContextLimits(t *testing.T) {
 	if cfg.TokenBudget != 150000 {
 		t.Errorf("TokenBudget = %d, want 150000", cfg.TokenBudget)
 	}
-	if cfg.DayCloseBackfillMax != 2 {
-		t.Errorf("DayCloseBackfillMax = %d, want 2", cfg.DayCloseBackfillMax)
+	if cfg.DayCloseBackfillMax != 1 {
+		t.Errorf("DayCloseBackfillMax = %d, want 1", cfg.DayCloseBackfillMax)
+	}
+	if cfg.DayCloseBackfillDays != 1 {
+		t.Errorf("DayCloseBackfillDays = %d, want 1", cfg.DayCloseBackfillDays)
 	}
 }
 
@@ -164,6 +171,11 @@ func TestLoadErrors(t *testing.T) {
 			name:   "битый backfill",
 			env:    map[string]string{"LLM_API_KEY": "k", "DAYCLOSE_BACKFILL_MAX": "1001"},
 			substr: "DAYCLOSE_BACKFILL_MAX",
+		},
+		{
+			name:   "битое окно backfill",
+			env:    map[string]string{"LLM_API_KEY": "k", "DAYCLOSE_BACKFILL_DAYS": "0"},
+			substr: "DAYCLOSE_BACKFILL_DAYS",
 		},
 	}
 

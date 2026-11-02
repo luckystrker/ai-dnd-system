@@ -1,19 +1,19 @@
 // Package dayclose — детерминированное закрытие игрового дня.
 //
 // Очередь в процессе живёт поверх durable-состояния кампании: сам факт
-// «день закрыт» — это непустые summary или headline в campaign_days. Новых
+// «день закрыт» — это настоящее саммари/headline в campaign_days. Новых
 // таблиц нет, схема БД остаётся 1:1 с TS. После рестарта ScanGaps дочитывает
-// дни, у которых саммари так и не появилось (отсутствие summary и есть
-// durable-задача), поэтому недозакрытый день не теряется.
+// последние BackfillDays дней летописцем, более старые дни без саммари
+// закрывает дешёвым дайджестом (без LLM и без записи в состояние мира).
 //
 // Провал летописца или его «пустой» прогон закрывается детерминированным
 // дайджестом (store.BuildDayDigest) — день никогда не остаётся без саммари.
-// Авто-дайджест сейчас считается окончательным закрытием: ScanGaps его не
-// перезапускает. Нужно ли автоматически повышать дайджест до настоящего
-// саммари — отдельное решение владельца; до него поведение фиксировано.
-// Повторных попыток летописца внутри процесса нет намеренно: сбой обычно
-// детерминированный (ключ, контекст), а платный повтор удваивает стоимость;
-// падение процесса лечится ScanGaps при следующем старте.
+// Авто-дайджест в окне возраста один раз пробует повысить летописец; после
+// неудачной попытки в саммари остаётся durable-маркер, и день окончателен
+// даже после рестарта. Повторных попыток летописца внутри процесса нет
+// намеренно: сбой обычно детерминированный (ключ, контекст), а платный
+// повтор удваивает стоимость; падение процесса лечится ScanGaps при
+// следующем старте.
 package dayclose
 
 import (
@@ -52,24 +52,37 @@ type Config struct {
 	DigestSentences int
 	// BackfillMax — сколько пропущенных дней на старт максимум закрывать
 	// полным летописцем. 0 — DefaultBackfillMax, отрицательное — не
-	// догонять прошлые дни вовсе (только fallback при явной постановке).
-	// Без лимита боевая база TS даёт шторм вызовов на первом старте.
+	// догонять прошлые дни вовсе. Без лимита боевая база TS даёт шторм
+	// вызовов на первом старте.
 	BackfillMax int
+	// BackfillDays — окно возраста дня: только последние N закрытых дней
+	// закрываются летописцем. Более старые дни без саммари получают только
+	// fallback-дайджест (без LLM и без записи в состояние мира).
+	// 0 — DefaultBackfillDays.
+	BackfillDays int
 }
 
-// DefaultBackfillMax — предохранитель на старт: полный летописец дорогой, а
-// старые дни к тому же могут затирать актуальное состояние мира.
-const DefaultBackfillMax = 3
+const (
+	// DefaultBackfillMax — предохранитель на старт: полный летописец дорогой.
+	DefaultBackfillMax = 2
+	// DefaultBackfillDays — окно последних закрытых дней для летописца.
+	DefaultBackfillDays = 2
+	// autoDigestUpgradeFailedNote — durable-маркер: попытка повысить
+	// авто-дайджест до настоящего саммари уже была и не удалась. Второй раз
+	// день не трогаем даже после рестарта.
+	autoDigestUpgradeFailedNote = " (повышение до саммари не удалось)"
+)
 
 // Queue — in-process очередь закрытия дней. Поток закрытия один: прогоны
 // летописца не конкурируют за одну кампанию и не множат платные вызовы.
 type Queue struct {
-	store       *store.Store
-	newWorker   ArchivistFactory
-	timeout     time.Duration
-	log         *slog.Logger
-	sentences   int
-	backfillMax int
+	store        *store.Store
+	newWorker    ArchivistFactory
+	timeout      time.Duration
+	log          *slog.Logger
+	sentences    int
+	backfillMax  int
+	backfillDays int
 
 	mu      sync.Mutex
 	pending map[string]job
@@ -108,10 +121,15 @@ func New(cfg Config) (*Queue, error) {
 	if backfillMax == 0 {
 		backfillMax = DefaultBackfillMax
 	}
+	backfillDays := cfg.BackfillDays
+	if backfillDays <= 0 {
+		backfillDays = DefaultBackfillDays
+	}
 	return &Queue{
 		store: cfg.Store, newWorker: cfg.NewArchivist, timeout: timeout,
 		log: logger, sentences: sentences, backfillMax: backfillMax,
-		pending: map[string]job{}, wake: make(chan struct{}, 1),
+		backfillDays: backfillDays,
+		pending:      map[string]job{}, wake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -200,14 +218,14 @@ func (q *Queue) RunPending(ctx context.Context) error {
 	}
 }
 
-// ScanGaps ставит в очередь прошлые дни без саммари. Это и есть durable
-// восстановление: состояние дня уже лежит в SQLite, отдельная таблица не
-// нужна. Дни без записей закрывать нечем — они пропускаются.
+// ScanGaps досматривает прошлые дни при старте.
 //
-// BackfillMax ограничивает число полных прогонов летописца на старт. Дни
-// выбираются от новых к старым и распределяются по кампаниям по кругу:
-// старый день 3 при текущем дне 20 не должен затирать актуальное состояние
-// мира, а боевая TS-база не должна дать шторм дорогих вызовов.
+// Последние BackfillDays закрытых дней закрывает летописец (BackfillMax штук
+// на старт, от новых к старым). Более старые дни без саммари получают только
+// детерминированный дайджест: полный летописец дорог, а запись событий
+// двадцатидневной давности поверх текущего мира вредна. День с авто-дайджестом
+// в окне возраста один раз пробует повысить летописец; маркер неудачи делает
+// попытку окончательной и переживает рестарт.
 func (q *Queue) ScanGaps() {
 	if q.backfillMax < 0 {
 		return
@@ -217,66 +235,83 @@ func (q *Queue) ScanGaps() {
 		q.log.Error("dayclose: list campaigns failed", "error", err)
 		return
 	}
-	type campaignGaps struct {
+	type recentDay struct {
 		campaign *store.Campaign
-		days     []int // от новых к старым
+		day      int
 	}
-	gaps := make([]campaignGaps, 0, len(campaigns))
+	recent := make([]recentDay, 0)
 	for index := range campaigns {
 		campaign := &campaigns[index]
 		if campaign.Status != store.StatusActive {
 			continue
 		}
-		current := 1
-		if campaign.CurrentDay != nil {
-			current = *campaign.CurrentDay
-		}
-		days := make([]int, 0, current-1)
+		current := campaignDay(campaign)
+		threshold := current - q.backfillDays
 		for day := current - 1; day >= 1; day-- {
 			record, err := q.store.ReadDay(campaign.Slug, day)
 			if err != nil {
 				q.log.Error("dayclose: read day failed", "campaign", campaign.ID, "day", day, "error", err)
 				continue
 			}
-			if !hasContent(record) || dayClosed(record) {
+			if !hasContent(record) || realSummary(record) || hasHeadline(record) {
 				continue
 			}
-			days = append(days, day)
-		}
-		if len(days) > 0 {
-			gaps = append(gaps, campaignGaps{campaign: campaign, days: days})
+			if hasAnySummary(record) && !needsUpgrade(record) {
+				// Авто-дайджест уже пробовали повысить — окончателен.
+				continue
+			}
+			if day >= threshold {
+				recent = append(recent, recentDay{campaign: campaign, day: day})
+				continue
+			}
+			if !hasAnySummary(record) {
+				// Старый день без саммари: только дешёвый дайджест, без LLM.
+				q.fallback(campaign, day, false)
+			}
 		}
 	}
 	enqueued := 0
-	for round := 0; enqueued < q.backfillMax; round++ {
-		added := false
-		for _, gap := range gaps {
-			if round >= len(gap.days) {
-				continue
-			}
-			if err := q.Enqueue(gap.campaign.ID, gap.days[round], ""); err != nil {
-				q.log.Error("dayclose: enqueue gap failed", "campaign", gap.campaign.ID, "day", gap.days[round], "error", err)
-				return
-			}
-			enqueued++
-			added = true
-			if enqueued >= q.backfillMax {
-				break
-			}
+	for _, candidate := range recent {
+		if enqueued >= q.backfillMax {
+			// Лимит на старт исчерпан: день всё равно не должен остаться без
+			// саммари. Дайджест можно будет повысить на следующем старте.
+			q.fallback(candidate.campaign, candidate.day, false)
+			continue
 		}
-		if !added {
+		if err := q.Enqueue(candidate.campaign.ID, candidate.day, ""); err != nil {
+			q.log.Error("dayclose: enqueue gap failed", "campaign", candidate.campaign.ID, "day", candidate.day, "error", err)
 			return
 		}
+		enqueued++
 	}
 }
 
-// dayClosed: саммари уже есть (включая авто-дайджест) или летописец записал
-// шапку дня.
-func dayClosed(record *store.DayRecord) bool {
-	if record == nil {
-		return true
+// realSummary — настоящее саммари, а не авто-дайджест.
+func realSummary(record *store.DayRecord) bool {
+	if record == nil || record.Summary == nil {
+		return false
 	}
-	return nonEmpty(record.Summary) || nonEmpty(record.Headline)
+	return strings.TrimSpace(*record.Summary) != "" && !strings.HasPrefix(*record.Summary, store.AutoDigestMark)
+}
+
+func hasHeadline(record *store.DayRecord) bool {
+	return record != nil && nonEmpty(record.Headline)
+}
+
+func hasAnySummary(record *store.DayRecord) bool {
+	return record != nil && nonEmpty(record.Summary)
+}
+
+// needsUpgrade: день закрыт авто-дайджестом, попытки повышения ещё не было.
+func needsUpgrade(record *store.DayRecord) bool {
+	if record == nil || record.Summary == nil {
+		return false
+	}
+	summary := strings.TrimSpace(*record.Summary)
+	if !strings.HasPrefix(summary, store.AutoDigestMark) {
+		return false
+	}
+	return !strings.Contains(summary, autoDigestUpgradeFailedNote)
 }
 
 func hasContent(record *store.DayRecord) bool {
@@ -338,11 +373,15 @@ func (q *Queue) run(parent context.Context, task job) error {
 	if err != nil {
 		return err
 	}
-	// Нечего закрывать или день уже закрыт (повторная постановка) — не тратим
-	// вызов модели.
-	if !hasContent(record) || dayClosed(record) {
+	// Нечего закрывать, день уже закрыт настоящим саммари/шапкой или
+	// повышение дайджеста уже провалилось — не тратим вызов модели.
+	if !hasContent(record) || realSummary(record) || hasHeadline(record) {
 		return nil
 	}
+	if hasAnySummary(record) && !needsUpgrade(record) {
+		return nil
+	}
+	upgrade := needsUpgrade(record)
 	ctx, cancel := context.WithTimeout(parent, q.timeout)
 	defer cancel()
 
@@ -350,7 +389,7 @@ func (q *Queue) run(parent context.Context, task job) error {
 		if parent.Err() != nil {
 			return parent.Err()
 		}
-		q.fallback(campaign, task.day)
+		q.fallback(campaign, task.day, upgrade)
 		return nil
 	}
 	worker, err := q.newWorker(campaign)
@@ -358,7 +397,7 @@ func (q *Queue) run(parent context.Context, task job) error {
 		if parent.Err() != nil {
 			return err
 		}
-		q.fallback(campaign, task.day)
+		q.fallback(campaign, task.day, upgrade)
 		return err
 	}
 	highlights := task.highlights
@@ -381,7 +420,7 @@ func (q *Queue) run(parent context.Context, task job) error {
 		if parent.Err() != nil {
 			return err
 		}
-		q.fallback(campaign, task.day)
+		q.fallback(campaign, task.day, upgrade)
 		return err
 	}
 	q.log.Info("dayclose: day closed",
@@ -393,33 +432,40 @@ func (q *Queue) run(parent context.Context, task job) error {
 	// Летописец мог «отработать» без ошибки, но ничего не записать: день всё
 	// равно не должен остаться без саммари.
 	after, readErr := q.store.ReadDay(campaign.Slug, task.day)
-	if readErr == nil && !dayClosed(after) {
+	if readErr == nil && !realSummary(after) && !hasHeadline(after) {
 		if parent.Err() != nil {
 			return parent.Err()
 		}
-		q.fallback(campaign, task.day)
+		q.fallback(campaign, task.day, upgrade)
 	}
 	return nil
 }
 
 // fallback пишет детерминированный дайджест, но никогда не затирает
-// человеческое саммари или шапку дня.
-func (q *Queue) fallback(campaign *store.Campaign, day int) {
+// настоящее саммари или шапку дня. attemptedUpgrade помечает неудачную
+// попытку повышения: второй раз день уже не трогаем даже после рестарта.
+func (q *Queue) fallback(campaign *store.Campaign, day int, attemptedUpgrade bool) {
 	record, err := q.store.ReadDay(campaign.Slug, day)
 	if err != nil {
 		q.log.Error("dayclose: fallback read day failed", "campaign", campaign.ID, "day", day, "error", err)
 		return
 	}
-	if !hasContent(record) || dayClosed(record) {
+	if !hasContent(record) || realSummary(record) || hasHeadline(record) {
+		return
+	}
+	if hasAnySummary(record) && !needsUpgrade(record) {
 		return
 	}
 	digest := store.BuildDayDigest(record.Entries, q.sentences)
 	if digest == "" {
 		return
 	}
+	if attemptedUpgrade {
+		digest += autoDigestUpgradeFailedNote
+	}
 	if err := q.store.SetDaySummary(campaign.Slug, day, digest); err != nil {
 		q.log.Error("dayclose: fallback digest failed", "campaign", campaign.ID, "day", day, "error", err)
 		return
 	}
-	q.log.Warn("dayclose: chronicler failed, wrote fallback digest", "campaign", campaign.ID, "day", day)
+	q.log.Info("dayclose: fallback digest written", "campaign", campaign.ID, "day", day, "upgrade", attemptedUpgrade)
 }

@@ -455,3 +455,124 @@ func TestQueueWarnsOnRetroactiveDay(t *testing.T) {
 		t.Fatalf("в предупреждении нет текущего дня: %q", fake.highlights[0])
 	}
 }
+
+// Старые дни без саммари получают только дайджест; летописец — не более
+// BackfillMax раз и только для последних BackfillDays дней.
+func TestQueueBackfillsOldDaysWithDigest(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	for day := 2; day <= 30; day++ {
+		if err := st.AppendTranscriptEntry(campaign.Slug, day, store.TranscriptEntry{
+			Kind: "dm", Text: "Событие дня.",
+		}); err != nil {
+			t.Fatalf("transcript day %d: %v", day, err)
+		}
+		if _, err := st.AdvanceDay(campaign.ID, "dm-1"); err != nil {
+			t.Fatalf("advance day %d: %v", day, err)
+		}
+	}
+	fake := &fakeArchivist{}
+	queue, err := dayclose.New(dayclose.Config{Store: st, NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+		return fake, nil
+	}})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 2 || fake.calls[0] != 30 || fake.calls[1] != 29 {
+		t.Fatalf("летописец зван %v, want [30 29]", fake.calls)
+	}
+	for day := 1; day <= 30; day++ {
+		record, err := st.ReadDay(campaign.Slug, day)
+		if err != nil {
+			t.Fatalf("ReadDay %d: %v", day, err)
+		}
+		if record == nil || record.Summary == nil {
+			t.Fatalf("день %d остался без саммари", day)
+		}
+	}
+}
+
+// Авто-дайджест в окне возраста один раз повышается летописцем; после
+// неудачной попытки маркер делает её окончательной и переживает рестарт.
+func TestQueueUpgradesAutoDigestOnce(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	if err := st.SetDaySummary(campaign.Slug, 1, store.AutoDigestMark+" старый дайджест"); err != nil {
+		t.Fatalf("SetDaySummary: %v", err)
+	}
+	fake := &fakeArchivist{mutate: func(c *store.Campaign, day int) error {
+		return st.SetDaySummary(c.Slug, day, "настоящее саммари")
+	}}
+	queue := queueWith(t, st, fake)
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record.Summary == nil || *record.Summary != "настоящее саммари" {
+		t.Fatalf("дайджест не повышен: %+v", record.Summary)
+	}
+
+	// Вторая попытка: летописец ничего не пишет — дайджест помечается
+	// провалившимся и больше не трогается.
+	if err := st.SetDaySummary(campaign.Slug, 1, store.AutoDigestMark+" снова дайджест"); err != nil {
+		t.Fatalf("SetDaySummary: %v", err)
+	}
+	failing := &fakeArchivist{}
+	second := queueWith(t, st, failing)
+	second.ScanGaps()
+	if err := second.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending 2: %v", err)
+	}
+	if len(failing.calls) != 1 {
+		t.Fatalf("попыток повышения = %d, want 1", len(failing.calls))
+	}
+	record, err = st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record.Summary == nil || !strings.Contains(*record.Summary, "повышение до саммари не удалось") {
+		t.Fatalf("нет маркера неудачи: %+v", record.Summary)
+	}
+	failing.calls = nil
+	second.ScanGaps()
+	if err := second.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending 3: %v", err)
+	}
+	if len(failing.calls) != 0 {
+		t.Fatalf("провалившийся дайджест снова в очереди: %v", failing.calls)
+	}
+}
+
+// Дайджест старше окна возраста окончателен: летописец его не трогает.
+func TestQueueOldDigestIsFinal(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	for day := 2; day <= 9; day++ {
+		if _, err := st.AdvanceDay(campaign.ID, "dm-1"); err != nil {
+			t.Fatalf("advance day %d: %v", day, err)
+		}
+	}
+	if err := st.SetDaySummary(campaign.Slug, 1, store.AutoDigestMark+" старый дайджест"); err != nil {
+		t.Fatalf("SetDaySummary: %v", err)
+	}
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("старый дайджест поднят летописцем: %v", fake.calls)
+	}
+}

@@ -473,7 +473,9 @@ func TestTranscriptDeduplicatesRepeatedTurn(t *testing.T) {
 
 // Бюджет токенов: при превышении модель один раз получает просьбу свернуть
 // сцену, ход не обрывается.
-func TestTokenBudgetNoticeInMemoryBlock(t *testing.T) {
+// Бюджет токенов — на ход: сброс в начале хода, поэтому несколько ходов
+// подряд под бюджетом не оставляют вечного предупреждения.
+func TestTokenBudgetResetsEveryTurn(t *testing.T) {
 	t.Parallel()
 
 	st := testStore(t)
@@ -482,6 +484,7 @@ func TestTokenBudgetNoticeInMemoryBlock(t *testing.T) {
 	cfg := agotest.NewTestConfig(
 		&events.ModelResponse{Message: &events.ModelMessage{Content: "Первый"}, Usage: usage},
 		&events.ModelResponse{Message: &events.ModelMessage{Content: "Второй"}, Usage: usage},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "Третий"}, Usage: usage},
 	)
 	d, err := New(Config{
 		Model: cfg, Store: st, Session: playerSession(campaign),
@@ -491,18 +494,64 @@ func TestTokenBudgetNoticeInMemoryBlock(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer func() { _ = d.Close() }()
-	if _, err := d.Ask(context.Background(), "раз"); err != nil {
-		t.Fatalf("Ask 1: %v", err)
+	for i := 0; i < 3; i++ {
+		if _, err := d.Ask(context.Background(), "ход"); err != nil {
+			t.Fatalf("Ask %d: %v", i+1, err)
+		}
 	}
-	if _, err := d.Ask(context.Background(), "два"); err != nil {
-		t.Fatalf("Ask 2: %v", err)
+	for index, snapshot := range cfg.Calls() {
+		blocks := memoryBlocks(snapshot)
+		if len(blocks) != 1 {
+			t.Fatalf("вызов %d: блоков памяти = %d, want 1", index+1, len(blocks))
+		}
+		if strings.Contains(blocks[0], "бюджет токенов") {
+			t.Fatalf("вызов %d: предупреждение пережило сброс хода: %s", index+1, blocks[0])
+		}
 	}
-	if used := d.Monitor().Total(); used < 1000 {
-		t.Fatalf("монитор насчитал %d токенов, want 1000", used)
+}
+
+// Внутри одного хода бюджет уже израсходован первым вызовом — следующий
+// раунд получает просьбу свернуть сцену.
+func TestTokenBudgetNoticeWithinTurn(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	usage := events.Usage{TotalTokens: events.I64(500)}
+	tick, err := tools.NewFunctionTool("tick", "Ticks", func(args struct{}) (string, error) {
+		return "tock", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
 	}
-	blocks := memoryBlocks(cfg.Calls()[1])
-	if len(blocks) != 1 || !strings.Contains(blocks[0], "бюджет токенов") {
-		t.Fatalf("нет предупреждения о бюджете: %v", blocks)
+	cfg := agotest.NewTestConfig(
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID: "c1", Name: "tick", Arguments: `{}`,
+		}}}, Usage: usage},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "Готово"}, Usage: usage},
+	)
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign),
+		TokenBudget: 100, SkipToolkit: true, ExtraTools: []tools.Tool{tick},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "играем"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	calls := cfg.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("вызовов модели = %d, want 2", len(calls))
+	}
+	first := memoryBlocks(calls[0])
+	if len(first) == 1 && strings.Contains(first[0], "бюджет токенов") {
+		t.Fatalf("предупреждение появилось до расхода бюджета: %s", first[0])
+	}
+	second := memoryBlocks(calls[1])
+	if len(second) != 1 || !strings.Contains(second[0], "бюджет токенов") {
+		t.Fatalf("во втором раунде нет предупреждения: %v", second)
 	}
 }
 

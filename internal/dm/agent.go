@@ -40,7 +40,9 @@ const (
 	DefaultContextWindowTokens = 96000
 	// DefaultTurnTimeout — дедлайн одного хода DM.
 	DefaultTurnTimeout = 180 * time.Second
-	// DefaultTokenBudget — бюджет токенов одной сессии (чата).
+	// DefaultTokenBudget — бюджет токенов одного хода. TokenMonitor
+	// сбрасывается в начале хода; при превышении модель получает просьбу
+	// завершить сцену, игроки — нет.
 	DefaultTokenBudget int64 = 200000
 	// DefaultMaxToolRounds — лимит раундов тулов, если конфиг не задал свой
 	// (решение владельца: 12).
@@ -168,9 +170,12 @@ func New(cfg Config) (*DM, error) {
 		agent.WithDependencies(map[string]any{sessionDepKey: session}),
 		agent.WithStreamBase(conversation),
 		agent.WithMiddleware(
-			// Компакция — самая внешняя: её OnTurn выполняется после хода и
-			// после записи ответа в транскрипт. Ошибку компакции глотаем,
-			// чтобы готовый ответ не превратился в нейтральный.
+			// Бюджет токенов — на ход: сбрасываем счётчик до первого вызова
+			// модели этого хода.
+			func() middleware.Middleware { return budgetReset{monitor: monitor} },
+			// Компакция — после хода и после записи ответа в транскрипт.
+			// Ошибку компакции глотаем, чтобы готовый ответ не превратился
+			// в нейтральный.
 			safeCompactionFactory(compactionFactory(client, window), logger),
 			func() middleware.Middleware {
 				return &transcriptMW{store: cfg.Store, log: logger}
@@ -230,10 +235,24 @@ func (s *safeCompaction) OnTurn(next middleware.TurnFunc, ev *events.ModelReques
 	return compacted, nil
 }
 
+// budgetReset сбрасывает TokenMonitor в начале каждого хода: бюджет токенов
+// считается на ход, а не накопленно за всё время жизни чата.
+type budgetReset struct {
+	middleware.Base
+	monitor *observers.TokenMonitor
+}
+
+func (b budgetReset) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
+	if b.monitor != nil {
+		b.monitor.Reset()
+	}
+	return next(ev, cx)
+}
+
 // Agent возвращает нижележащего агента (TUI, eval).
 func (d *DM) Agent() *agent.Agent { return d.agent }
 
-// Monitor возвращает монитор токенов сессии.
+// Monitor возвращает монитор токенов текущего хода.
 func (d *DM) Monitor() *observers.TokenMonitor { return d.monitor }
 
 // Ask выполняет один ход. Терминальные сбои (ErrMaxToolRounds, дедлайн,

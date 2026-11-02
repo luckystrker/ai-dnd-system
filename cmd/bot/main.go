@@ -73,8 +73,9 @@ func run(args []string) error {
 	// дочитывает дни без саммари (ScanGaps), а сбой летописца закрывается
 	// fallback-дайджестом.
 	queue, err := dayclose.New(dayclose.Config{
-		Store:       st,
-		BackfillMax: cfg.DayCloseBackfillMax,
+		Store:        st,
+		BackfillMax:  cfg.DayCloseBackfillMax,
+		BackfillDays: cfg.DayCloseBackfillDays,
 		NewArchivist: func(campaign *store.Campaign) (dayclose.Archivist, error) {
 			return chronicler.New(chronicler.Config{
 				Model:         modelCfg,
