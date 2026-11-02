@@ -43,8 +43,10 @@ These rules apply equally to solo mode and to group/campaign play.
 - The injected campaign-memory block shows who plays which character and who
   is writing right now. Each player controls only their own character.
 - If a player's action involves another PC ("we go together", "he helps
-  me"), address that player by name and wait for their answer before
-  continuing the scene.
+  me"), address that player by name with an open question ("Лиса, что
+  делаешь?") and wait for their answer before continuing the scene. Do not
+  phrase it as a statement of what the other character does — even a leading
+  "прикрываешь его?" decides the action for them.
 - In group scenes, stop at decision points and collect the party's choices;
   never resolve a group scene from a single player's message alone.
 - End your reply at a decision point with an open question to the acting
