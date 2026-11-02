@@ -28,10 +28,15 @@ const (
 	// внутри (закрытие дня) идёт в фоне и в дедлайн не входит.
 	DefaultTurnTimeoutSeconds = 180
 
-	// DefaultTokenBudget — бюджет токенов одной сессии (одного чата). Считается
-	// TokenMonitor по UsageEvent; при превышении модель получает просьбу
-	// завершить сцену, игроки — нет.
+	// DefaultTokenBudget — порог накопленных токенов, которые считает
+	// TokenMonitor по UsageEvent. При превышении модель получает просьбу
+	// завершить сцену, игроки — нет. Семантика порога (на ход, на сессию,
+	// скользящее окно) — решение владельца; текущая реализация накопительная.
 	DefaultTokenBudget int64 = 200000
+
+	// DefaultDayCloseBackfillMax — сколько пропущенных дней на старте максимум
+	// закрывать полным летописцем (дорого и может затирать текущий мир).
+	DefaultDayCloseBackfillMax = 3
 )
 
 // Config — вся конфигурация процесса бота.
@@ -42,6 +47,7 @@ type Config struct {
 	ContextWindowTokens int
 	TurnTimeoutSeconds  int
 	TokenBudget         int64
+	DayCloseBackfillMax int
 }
 
 // Load читает переменные окружения через getenv (подменяется в тестах).
@@ -57,7 +63,9 @@ type Config struct {
 //	CONTEXT_WINDOW_TOKENS фиксированное окно контекста, 16000..512000
 //	                     (по умолчанию 96000); компакция на 75%
 //	TURN_TIMEOUT_SECONDS дедлайн одного хода DM, 1..3600 (по умолчанию 180)
-//	TOKEN_BUDGET         бюджет токенов сессии (по умолчанию 200000)
+//	TOKEN_BUDGET         порог накопленных токенов сессии (по умолчанию 200000)
+//	DAYCLOSE_BACKFILL_MAX сколько пропущенных дней на старте закрывать полным
+//	                     летописцем: -1 — не догонять, 0 — по умолчанию 3
 //	CAMPAIGN_DB_PATH     путь к SQLite-базе кампаний (по умолчанию data/campaigns.db)
 func Load(getenv func(string) string) (Config, error) {
 	spec, err := llm.Lookup(getenv("LLM_PROVIDER"))
@@ -111,6 +119,17 @@ func Load(getenv func(string) string) (Config, error) {
 		tokenBudget = parsed
 	}
 
+	backfillMax := DefaultDayCloseBackfillMax
+	if raw := strings.TrimSpace(getenv("DAYCLOSE_BACKFILL_MAX")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < -1 || parsed > 1000 {
+			return Config{}, fmt.Errorf("DAYCLOSE_BACKFILL_MAX: ожидается -1..1000, получено %q", raw)
+		}
+		if parsed != 0 {
+			backfillMax = parsed
+		}
+	}
+
 	return Config{
 		LLM: llm.Settings{
 			Provider: spec.Provider,
@@ -123,5 +142,6 @@ func Load(getenv func(string) string) (Config, error) {
 		ContextWindowTokens: contextWindow,
 		TurnTimeoutSeconds:  turnTimeout,
 		TokenBudget:         tokenBudget,
+		DayCloseBackfillMax: backfillMax,
 	}, nil
 }

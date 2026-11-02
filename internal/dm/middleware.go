@@ -40,7 +40,7 @@ type memoryPolicy struct {
 func newMemoryPolicy(st *store.Store, window int, budget int64, total func() int64, log *slog.Logger) *memoryPolicy {
 	policy := &memoryPolicy{store: st, budget: budget, total: total, log: log}
 	if window > 0 {
-		policy.window = policies.NewTokenBudgetPolicy(window)
+		policy.window = newContentBudgetPolicy(window)
 	}
 	return policy
 }
@@ -61,7 +61,7 @@ func (p *memoryPolicy) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event
 		}
 		evs = reduced
 	}
-	block := BuildMemoryBlock(p.store, sessionFrom(cx), historyText(evs))
+	block := BuildMemoryBlock(p.store, sessionFrom(cx), visibleEventIDs(evs))
 	block = p.withBudgetNotice(block)
 	if block != "" {
 		evs = insertBeforeLastRequest(evs, block)
@@ -118,40 +118,39 @@ func insertBeforeLastRequest(evs []events.Event, block string) []events.Event {
 	return out
 }
 
-// historyText собирает уже видимый модели текст: сообщения, ответы и
-// результаты тулов. По нему dayTailSection отсеивает строки транскрипта,
-// которые и так есть в окне истории.
-func historyText(evs []events.Event) string {
-	var builder strings.Builder
+// visibleEventIDs собирает id записей транскрипта, которые уже видны модели
+// в окне истории. Ключ хода берётся из времени запроса (его ставит
+// transcriptMW.OnTurn), поэтому после компакции ключей в окне нет — старые
+// записи снова показываются в блоке памяти.
+func visibleEventIDs(evs []events.Event) map[string]bool {
+	visible := map[string]bool{}
+	current := ""
 	for _, ev := range evs {
 		switch item := events.AsValue(ev).(type) {
 		case events.ModelRequest:
-			writePartText(&builder, item.Parts)
+			current = turnKey(&item)
+			visible[current+":player"] = true
 		case events.DrainedModelRequest:
-			writePartText(&builder, item.Parts)
+			current = turnKey(&item.ModelRequest)
+			visible[current+":player"] = true
 		case events.ModelResponse:
-			if content := item.Content(); content != "" {
-				builder.WriteString(content)
-				builder.WriteString("\n")
+			if current != "" && strings.TrimSpace(item.Content()) != "" {
+				visible[current+":dm"] = true
+			}
+		case events.ToolResultsEvent:
+			if current == "" {
+				continue
+			}
+			for _, result := range item.Results {
+				visible[current+":tool:"+result.ParentID] = true
 			}
 		case events.ToolResultEvent:
-			writePartText(&builder, item.Result.Parts)
-		case events.ToolResultsEvent:
-			for _, result := range item.Results {
-				writePartText(&builder, result.Result.Parts)
+			if current != "" {
+				visible[current+":tool:"+item.ParentID] = true
 			}
 		}
 	}
-	return builder.String()
-}
-
-func writePartText(builder *strings.Builder, parts []events.Input) {
-	for _, part := range parts {
-		if text, ok := events.AsValue(part).(events.TextInput); ok {
-			builder.WriteString(text.Content)
-			builder.WriteString("\n")
-		}
-	}
+	return visible
 }
 
 func sessionFrom(cx *agocontext.Context) *tools.Session {

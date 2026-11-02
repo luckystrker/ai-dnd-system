@@ -61,7 +61,10 @@ func (d Deps) advanceDay(sess *Session, args advanceDayArgs) (any, error) {
 		day = *updated.CurrentDay
 	}
 	if err := d.DB.EnsureDay(updated.Slug, day, args.Note, nil); err != nil {
-		return nil, fromStoreError(err)
+		// День уже сдвинут: возвращать ошибку нельзя, иначе модель повторит
+		// advance_day и сдвинет день ещё раз. Закрытие предыдущего дня всё
+		// равно ставим в очередь ниже; заметка нового дня — не критична.
+		log.Printf("tools: advance_day: EnsureDay failed for campaign %s day %d: %v", updated.ID, day, err)
 	}
 	closed := false
 	queued := false

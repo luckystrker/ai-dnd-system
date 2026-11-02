@@ -27,8 +27,10 @@ var instructions string
 // свой: без лимита модель может крутить дорогие вызовы бесконечно.
 const defaultMaxToolRounds = 12
 
-// Report — итог закрытия дня. Счётчики считаются по изменениям в БД, а не по
-// словам модели.
+// Report — итог закрытия дня. Счётчики считаются по наблюдаемым изменениям в
+// БД до/после прогона, а не по словам модели. Пока летописец работает, DM
+// может писать в те же таблицы (следующий день), поэтому это именно
+// наблюдённые изменения; key events считаются только за закрываемый день.
 type Report struct {
 	DaySummaryWritten   bool   `json:"daySummaryWritten"`
 	KeyEventsWritten    int    `json:"keyEventsWritten"`
@@ -140,7 +142,7 @@ func (c *Chronicler) CloseDay(ctx context.Context, campaign *store.Campaign, day
 		return Report{}, err
 	}
 	prompt := fmt.Sprintf(
-		"Закрой игровой день %d кампании «%s». Прочитай транскрипт дня через read_day (day=%d), "+
+		"Закрой игровой день %d кампании «%s». Прочитай транскрипт дня через read_day (day=%d, last=200), "+
 			"запиши саммари и headline, хронику, ключевые события, обнови NPC/персонажей/квесты/нити/"+
 			"локации/фракции/состояние мира по инструкции.",
 		day, campaign.Title, day,
@@ -191,7 +193,7 @@ func (c *Chronicler) snapshot(campaign *store.Campaign, day int) (memorySnapshot
 	if err != nil {
 		return result, err
 	}
-	result.keyEvents = len(permanent) + len(regular)
+	result.keyEvents = countKeyEventsForDay(append(permanent, regular...), day)
 	characters, err := c.store.ListCharacters(campaign.ID)
 	if err != nil {
 		return result, err
@@ -251,6 +253,19 @@ func changed(before, after map[string]string) int {
 	count := 0
 	for id, value := range after {
 		if before[id] != value {
+			count++
+		}
+	}
+	return count
+}
+
+// countKeyEventsForDay считает только строки закрываемого дня: параллельный
+// ход DM в день N+1 не должен засчитываться летописцу.
+func countKeyEventsForDay(lines []string, day int) int {
+	marker := fmt.Sprintf("**День %d**", day)
+	count := 0
+	for _, line := range lines {
+		if strings.Contains(line, marker) {
 			count++
 		}
 	}

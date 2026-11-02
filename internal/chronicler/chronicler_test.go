@@ -186,3 +186,30 @@ func TestCloseDayRejectsForeignCampaign(t *testing.T) {
 		t.Fatal("ожидался отказ для чужой кампании")
 	}
 }
+
+// Ключевые события чужого дня (параллельный ход DM в N+1) не засчитываются
+// летописцу закрываемого дня.
+func TestCloseDayCountsKeyEventsOnlyForClosedDay(t *testing.T) {
+	t.Parallel()
+
+	st := newStore(t)
+	campaign := newCampaign(t, st, "Дни")
+	if err := st.AppendKeyEvent(campaign.Slug, 2, "Событие следующего дня.", nil, false); err != nil {
+		t.Fatalf("AppendKeyEvent: %v", err)
+	}
+	cfg := agotest.NewTestConfig(
+		call("c1", "append_key_event", `{"event":"Событие закрываемого дня.","day":2}`),
+		reply("Готово."),
+	)
+	agent, err := chronicler.New(chronicler.Config{Model: cfg, Store: st, CampaignID: campaign.ID})
+	if err != nil {
+		t.Fatalf("chronicler: %v", err)
+	}
+	report, err := agent.CloseDay(context.Background(), campaign, 1, "")
+	if err != nil {
+		t.Fatalf("CloseDay: %v", err)
+	}
+	if report.KeyEventsWritten != 0 {
+		t.Fatalf("чужой день засчитан: %+v", report)
+	}
+}

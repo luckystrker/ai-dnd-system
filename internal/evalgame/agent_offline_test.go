@@ -124,6 +124,39 @@ func TestEvalThroughRealDMAgent(t *testing.T) {
 		requireScore(t, cr, "quotes_roll", true)
 	})
 
+	// Негативный контроль: бросок был, но ответ его не цитирует — скорер
+	// должен упасть, иначе гейт не ловит регрессию промпта.
+	t.Run("непроцитированный бросок ловится", func(t *testing.T) {
+		t.Parallel()
+		d := dmEvalAgent(t, []tools.Tool{cannedTool(t, "skill_check", skillCheckResult)},
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "skill_check",
+				Arguments: `{"character_name":"Дэн","skill":"Восприятие","difficulty":12}`,
+			}}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Дэн замечает царапины на полу."}},
+		)
+		cr := runCase(t, suite, "rolls-01-skill-check-public", d.Agent())
+		requireScore(t, cr, "quotes_roll", false)
+	})
+
+	// Негативный контроль: в тихом разговоре группы модель зовёт тул —
+	// tools_not_called должен упасть.
+	t.Run("лишний тул в тихой группе ловится", func(t *testing.T) {
+		t.Parallel()
+		d := dmEvalAgent(t, []tools.Tool{
+			cannedTool(t, "skill_check", skillCheckResult),
+			cannedTool(t, "roll_dice", "Итого: 9"),
+		},
+			&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "skill_check",
+				Arguments: `{"character_name":"Дэн","skill":"Восприятие","difficulty":10}`,
+			}}}},
+			&events.ModelResponse{Message: &events.ModelMessage{Content: "Двор пуст."}},
+		)
+		cr := runCase(t, suite, "group-01-ooc-plan-discussion", d.Agent())
+		requireScore(t, cr, "tools_not_called", false)
+	})
+
 	// Ответ без тулов: нейтральная реакция мира без похвалы выбору игрока.
 	t.Run("нейтральность без тулов", func(t *testing.T) {
 		t.Parallel()
@@ -134,8 +167,9 @@ func TestEvalThroughRealDMAgent(t *testing.T) {
 		requireScore(t, cr, "answer_omits", true)
 	})
 
-	// Запись боевого состояния на ходу обычного игрока: оба тула отработали
-	// без отказа доступа.
+	// Запись боевого состояния на ходу обычного игрока: проверяется форма
+	// траектории (какие тулы и с какими аргументами). Авторизацию настоящего
+	// toolkit проверяет internal/dm.TestDMToolkitDeniesOutsiderMemoryWrite.
 	t.Run("запись памяти на ходу игрока", func(t *testing.T) {
 		t.Parallel()
 		d := dmEvalAgent(t, []tools.Tool{
@@ -154,8 +188,8 @@ func TestEvalThroughRealDMAgent(t *testing.T) {
 		requireScore(t, cr, "tool_ok", true)
 	})
 
-	// Закрытие дня: DM зовёт advance_day, очередь (в этом тесте — без
-	// летописца) не мешает ответу.
+	// Закрытие дня: DM зовёт advance_day; реальную очередь и летописца
+	// проверяют internal/dayclose и internal/dm.
 	t.Run("закрытие дня через advance_day", func(t *testing.T) {
 		t.Parallel()
 		d := dmEvalAgent(t, []tools.Tool{cannedTool(t, "advance_day", "День 3 закрыт, начался день 4.")},

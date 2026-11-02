@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -61,11 +62,19 @@ func run(args []string) error {
 	}
 	defer func() { _ = st.Close() }()
 
+	// Скиллы лежат рядом с БД и перезаписываются при старте: временный
+	// каталог может вычистить система, и load_skill начнёт падать.
+	skillsDir := filepath.Join(filepath.Dir(cfg.DBPath), ".skills")
+	if err := dm.MaterializeSkills(skillsDir); err != nil {
+		return err
+	}
+
 	// Закрытие дня ставится в очередь из advance_day. После рестарта очередь
 	// дочитывает дни без саммари (ScanGaps), а сбой летописца закрывается
 	// fallback-дайджестом.
 	queue, err := dayclose.New(dayclose.Config{
-		Store: st,
+		Store:       st,
+		BackfillMax: cfg.DayCloseBackfillMax,
 		NewArchivist: func(campaign *store.Campaign) (dayclose.Archivist, error) {
 			return chronicler.New(chronicler.Config{
 				Model:         modelCfg,
@@ -89,6 +98,7 @@ func run(args []string) error {
 		ContextWindowTokens: cfg.ContextWindowTokens,
 		TurnTimeout:         time.Duration(cfg.TurnTimeoutSeconds) * time.Second,
 		TokenBudget:         cfg.TokenBudget,
+		SkillsDir:           skillsDir,
 	})
 	if err != nil {
 		return err

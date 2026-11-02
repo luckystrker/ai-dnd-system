@@ -3,6 +3,9 @@ package dm
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +15,7 @@ import (
 	agoconfig "github.com/luckystrker/ago/config"
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
+	"github.com/luckystrker/ago/middleware"
 	"github.com/luckystrker/ago/stream"
 	agotest "github.com/luckystrker/ago/testing"
 	"github.com/luckystrker/ago/tools"
@@ -79,9 +83,10 @@ func toolCall(id, name, args string) *events.ModelResponse {
 
 // promptRecorder записывает системный префикс каждого вызова модели.
 type promptRecorder struct {
-	inner *agotest.TestConfig
-	mu    sync.Mutex
-	seen  [][]string
+	inner   *agotest.TestConfig
+	mu      sync.Mutex
+	seen    [][]string
+	schemas [][]string
 }
 
 func newPromptRecorder(inner *agotest.TestConfig) *promptRecorder {
@@ -105,8 +110,15 @@ func (p *promptRecorder) Call(ctx context.Context, msgs []events.Event, cx *agoc
 	if cx != nil {
 		prompt = append(prompt, cx.PromptLines()...)
 	}
+	names := make([]string, 0, len(opts.Tools))
+	for _, tool := range opts.Tools {
+		if schema, ok := tool.(tools.Schema); ok {
+			names = append(names, schema.Name)
+		}
+	}
 	p.mu.Lock()
 	p.seen = append(p.seen, prompt)
+	p.schemas = append(p.schemas, names)
 	p.mu.Unlock()
 	return p.inner.Call(ctx, msgs, cx, opts)
 }
@@ -115,6 +127,14 @@ func (p *promptRecorder) Prompts() [][]string {
 	defer p.mu.Unlock()
 	out := make([][]string, len(p.seen))
 	copy(out, p.seen)
+	return out
+}
+
+func (p *promptRecorder) Schemas() [][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([][]string, len(p.schemas))
+	copy(out, p.schemas)
 	return out
 }
 
@@ -177,6 +197,13 @@ func TestSystemPromptStableAndMemoryInTail(t *testing.T) {
 		if strings.Contains(strings.Join(prompt, "\n"), "Память кампании") {
 			t.Fatal("блок памяти попал в системный промпт")
 		}
+	}
+	schemas := recorder.Schemas()
+	if len(schemas) != 2 || strings.Join(schemas[0], ",") != strings.Join(schemas[1], ",") {
+		t.Fatalf("схемы тулов меняются между ходами: %v", schemas)
+	}
+	if len(schemas[0]) == 0 {
+		t.Fatal("в вызове модели нет схем тулов")
 	}
 
 	calls := cfg.Calls()
@@ -252,8 +279,9 @@ func TestMaxToolRoundsReturnsNeutralReply(t *testing.T) {
 	tick, err := tools.NewFunctionTool("tick", "Ticks", func(args struct{}) (string, error) {
 		mu.Lock()
 		calls++
+		n := calls
 		mu.Unlock()
-		_ = st.AppendKeyEvent(campaign.Slug, 1, "Тик", nil, false)
+		_ = st.AppendKeyEvent(campaign.Slug, 1, fmt.Sprintf("Тик %d", n), nil, false)
 		return "tock", nil
 	})
 	if err != nil {
@@ -263,6 +291,7 @@ func TestMaxToolRoundsReturnsNeutralReply(t *testing.T) {
 		toolCall("c1", "tick", `{}`),
 		toolCall("c2", "tick", `{}`),
 		toolCall("c3", "tick", `{}`),
+		plain("после сбоя"),
 	)
 	d, err := New(Config{
 		Model: cfg, Store: st, Session: playerSession(campaign),
@@ -290,8 +319,22 @@ func TestMaxToolRoundsReturnsNeutralReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SplitKeyEvents: %v", err)
 	}
-	if len(permanent)+len(regular) != 1 {
-		t.Fatalf("запись тула откатилась: %v / %v", permanent, regular)
+	events := strings.Join(append(permanent, regular...), "\n")
+	if len(permanent)+len(regular) != 2 || !strings.Contains(events, "Тик 1") || !strings.Contains(events, "Тик 2") {
+		t.Fatalf("записи тулов откатились: %v / %v", permanent, regular)
+	}
+
+	// Следующий ход после терминального сбоя должен снова работать:
+	// ago чинит историю (CloseUnanswered), а middleware не ломается.
+	second, err := d.Ask(context.Background(), "продолжаем")
+	if err != nil {
+		t.Fatalf("Ask после сбоя: %v", err)
+	}
+	if second != "после сбоя" {
+		t.Fatalf("ответ после сбоя = %q", second)
+	}
+	if got := len(cfg.Calls()); got != 4 {
+		t.Fatalf("вызовов модели = %d, want 4", got)
 	}
 }
 
@@ -522,6 +565,9 @@ func TestPromptFollowsReviewChecklist(t *testing.T) {
 		"`code`, `retryable` and `remediation`",
 		"load_skill",
 		"Campaign memory",
+		"`access_denied`: explain",
+		"`advantage: true`",
+		"`advantage: \"disadvantage\"`",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(instructions, fragment) {
@@ -669,5 +715,288 @@ func TestTurnCancellationPropagates(t *testing.T) {
 	}
 	if got.reply != "" {
 		t.Fatalf("ответ = %q, want пусто", got.reply)
+	}
+}
+
+func plainWithUsage(text string, total int64) *events.ModelResponse {
+	return &events.ModelResponse{
+		Message: &events.ModelMessage{Content: text},
+		Usage:   events.Usage{TotalTokens: events.I64(total)},
+	}
+}
+
+// Размер истории считается по содержимому: Usage ответа (весь промпт вызова)
+// не должен раздувать окно и запускать компакцию каждый ход.
+func TestCompactionIgnoresReportedUsage(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	cfg := agotest.NewTestConfig(
+		plainWithUsage("Первый", 40000),
+		plainWithUsage("Второй", 40000),
+		plainWithUsage("Третий", 40000),
+	)
+	d, err := New(Config{Model: cfg, Store: st, Session: playerSession(campaign)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	for i := 0; i < 3; i++ {
+		if _, err := d.Ask(context.Background(), "ход"); err != nil {
+			t.Fatalf("Ask %d: %v", i+1, err)
+		}
+	}
+	if calls := len(cfg.Calls()); calls != 3 {
+		t.Fatalf("вызовов модели = %d, want 3: компакция сработала на Usage", calls)
+	}
+}
+
+func TestContentTriggerUsesContentNotUsage(t *testing.T) {
+	t.Parallel()
+
+	small := []events.Event{
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "ответ"}, Usage: events.Usage{TotalTokens: events.I64(40000)}},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: "ответ"}, Usage: events.Usage{TotalTokens: events.I64(40000)}},
+	}
+	if (contentTrigger{budget: 1000}).ShouldTrigger(small, events.Usage{}) {
+		t.Fatal("маленькая история с большим Usage запустила компакцию")
+	}
+	big := []events.Event{&events.ModelResponse{
+		Message: &events.ModelMessage{Content: strings.Repeat("x", 8000)},
+	}}
+	if !(contentTrigger{budget: 1000}).ShouldTrigger(big, events.Usage{}) {
+		t.Fatal("большое содержимое не запустило компакцию")
+	}
+}
+
+func TestContentBudgetPolicyIgnoresUsage(t *testing.T) {
+	t.Parallel()
+
+	evs := make([]events.Event, 0, 12)
+	for i := 0; i < 10; i++ {
+		evs = append(evs, &events.ModelResponse{
+			Message: &events.ModelMessage{Content: "ответ"},
+			Usage:   events.Usage{TotalTokens: events.I64(40000)},
+		})
+	}
+	_, kept, err := newContentBudgetPolicy(1000).Apply(nil, evs, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(kept) != len(evs) {
+		t.Fatalf("окно выкинуло %d событий из-за Usage", len(evs)-len(kept))
+	}
+	evs = append(evs, &events.ModelResponse{
+		Message: &events.ModelMessage{Content: strings.Repeat("y", 8000)},
+	})
+	_, kept, err = newContentBudgetPolicy(1000).Apply(nil, evs, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(kept) >= len(evs) {
+		t.Fatal("большое содержимое не ограничено окном")
+	}
+}
+
+// Короткая реплика не должна выкидываться из хвоста только потому, что она
+// встречается подстрокой в другом слове истории («ок» внутри «окно»).
+func TestMemoryTailKeepsShortLineWhenHistoryHasLongerWord(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	author := "hero"
+	eventID := "turn:old:player"
+	if err := st.AppendTranscriptEntry(campaign.Slug, 1, store.TranscriptEntry{
+		Kind: "player", Author: &author, Text: "ок", EventID: &eventID,
+	}); err != nil {
+		t.Fatalf("AppendTranscriptEntry: %v", err)
+	}
+	cfg := agotest.NewTestConfig(plain("Ты видишь окно."))
+	d, err := New(Config{Model: cfg, Store: st, Session: playerSession(campaign)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "Вижу окно."); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	block := memoryBlocks(cfg.Calls()[0])[0]
+	if !strings.Contains(block, "**Игрок @hero**: ок") {
+		t.Fatalf("короткая реплика потерялась из хвоста: %s", block)
+	}
+}
+
+// Встроенные скиллы можно разложить в постоянный каталог рядом с БД.
+func TestMaterializeSkills(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := MaterializeSkills(dir); err != nil {
+		t.Fatalf("MaterializeSkills: %v", err)
+	}
+	for _, name := range []string{"create-campaign", "create-character"} {
+		path := filepath.Join(dir, name, "SKILL.md")
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) == 0 {
+			t.Fatalf("скилл %s не разложен: %v", name, err)
+		}
+	}
+}
+
+// Настоящий toolkit: combat damage пишет HP в лист SQLite.
+func TestDMToolkitCombatDamageWritesSheet(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	cfg := agotest.NewTestConfig(
+		toolCall("i1", "initiative", `{"combatants":[`+
+			`{"name":"Дэн","side":"party","bonus":0},`+
+			`{"name":"Гоблин","side":"enemy","bonus":0,"hp":7,"ac":13}]}`),
+		toolCall("c1", "combat", `{"action":"damage","target":"Дэн","amount":4}`),
+		plain("Дэн получает 4 урона."),
+	)
+	d, err := New(Config{Model: cfg, Store: st, Session: playerSession(campaign)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "Гоблин бьёт Дэна."); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	sheets, err := st.ListCharacters(campaign.ID)
+	if err != nil || len(sheets) != 1 {
+		t.Fatalf("ListCharacters: %v, %v", sheets, err)
+	}
+	if sheets[0].HP == nil || *sheets[0].HP != 8 {
+		t.Fatalf("HP = %v, want 8 (combat damage пишет лист)", sheets[0].HP)
+	}
+}
+
+// Настоящий toolkit: чужой игрок получает access_denied, лист не меняется,
+// а модель видит типизированную ошибку.
+func TestDMToolkitDeniesOutsiderMemoryWrite(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	outsider := &ttrpg.Session{
+		CampaignID: campaign.ID, CampaignSlug: campaign.Slug,
+		UserID: "outsider", ChatID: "-100", ChatType: "supergroup",
+	}
+	cfg := agotest.NewTestConfig(
+		toolCall("u1", "update_character", `{"character":"Дэн","hp":5}`),
+		plain("Этот персонаж не ваш."),
+	)
+	d, err := New(Config{Model: cfg, Store: st, Session: outsider})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if _, err := d.Ask(context.Background(), "Меняю HP Дэна."); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	sheets, err := st.ListCharacters(campaign.ID)
+	if err != nil || len(sheets) != 1 {
+		t.Fatalf("ListCharacters: %v, %v", sheets, err)
+	}
+	if sheets[0].HP == nil || *sheets[0].HP != 12 {
+		t.Fatalf("чужой игрок изменил HP: %v", sheets[0].HP)
+	}
+	evs, err := d.stream.History().GetEvents()
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if !historyHasToolErrorCode(evs, "access_denied") {
+		t.Fatalf("в истории нет access_denied: %v", evs)
+	}
+}
+
+func historyHasToolErrorCode(evs []events.Event, code string) bool {
+	for _, ev := range evs {
+		switch item := events.AsValue(ev).(type) {
+		case events.ToolErrorEvent:
+			if strings.Contains(item.Error, code) {
+				return true
+			}
+		case events.ToolResultEvent:
+			for _, part := range item.Result.Parts {
+				if text, ok := events.AsValue(part).(events.TextInput); ok && strings.Contains(text.Content, code) {
+					return true
+				}
+			}
+		case events.ToolResultsEvent:
+			for _, result := range item.Results {
+				for _, part := range result.Result.Parts {
+					if text, ok := events.AsValue(part).(events.TextInput); ok && strings.Contains(text.Content, code) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Паника тула не уходит игроку: ago перехватывает её, ход продолжается.
+func TestToolPanicDoesNotReachPlayer(t *testing.T) {
+	t.Parallel()
+
+	st := testStore(t)
+	campaign := testCampaign(t, st)
+	boom, err := tools.NewFunctionTool("boom", "Panics", func(args struct{}) (string, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	cfg := agotest.NewTestConfig(
+		toolCall("b1", "boom", `{}`),
+		plain("Сцена продолжается."),
+	)
+	d, err := New(Config{
+		Model: cfg, Store: st, Session: playerSession(campaign),
+		SkipToolkit: true, ExtraTools: []tools.Tool{boom},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	reply, err := d.Ask(context.Background(), "Пробую.")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if reply != "Сцена продолжается." {
+		t.Fatalf("ответ = %q", reply)
+	}
+	if strings.Contains(reply, "panic") || strings.Contains(reply, "boom") {
+		t.Fatalf("диагностика паники ушла игроку: %q", reply)
+	}
+}
+
+type failingCompaction struct{ middleware.Base }
+
+func (failingCompaction) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
+	if _, err := next(ev, cx); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("compaction boom")
+}
+
+// Сбой компакции после успешного хода не отбрасывает готовый ответ.
+func TestSafeCompactionKeepsTurnResult(t *testing.T) {
+	t.Parallel()
+
+	safe := &safeCompaction{inner: failingCompaction{}, log: slog.Default()}
+	resp, err := safe.OnTurn(func(*events.ModelRequest, *agocontext.Context) (*events.ModelResponse, error) {
+		return plain("готовый ответ"), nil
+	}, &events.ModelRequest{}, nil)
+	if err != nil {
+		t.Fatalf("OnTurn: %v", err)
+	}
+	if resp == nil || resp.Content() != "готовый ответ" {
+		t.Fatalf("ответ потерян: %+v", resp)
 	}
 }

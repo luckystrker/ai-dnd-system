@@ -8,6 +8,9 @@
 //
 // Провал летописца или его «пустой» прогон закрывается детерминированным
 // дайджестом (store.BuildDayDigest) — день никогда не остаётся без саммари.
+// Авто-дайджест сейчас считается окончательным закрытием: ScanGaps его не
+// перезапускает. Нужно ли автоматически повышать дайджест до настоящего
+// саммари — отдельное решение владельца; до него поведение фиксировано.
 // Повторных попыток летописца внутри процесса нет намеренно: сбой обычно
 // детерминированный (ключ, контекст), а платный повтор удваивает стоимость;
 // падение процесса лечится ScanGaps при следующем старте.
@@ -47,16 +50,26 @@ type Config struct {
 	Logger *slog.Logger
 	// DigestSentences — сколько предложений брать в fallback-дайджест.
 	DigestSentences int
+	// BackfillMax — сколько пропущенных дней на старт максимум закрывать
+	// полным летописцем. 0 — DefaultBackfillMax, отрицательное — не
+	// догонять прошлые дни вовсе (только fallback при явной постановке).
+	// Без лимита боевая база TS даёт шторм вызовов на первом старте.
+	BackfillMax int
 }
+
+// DefaultBackfillMax — предохранитель на старт: полный летописец дорогой, а
+// старые дни к тому же могут затирать актуальное состояние мира.
+const DefaultBackfillMax = 3
 
 // Queue — in-process очередь закрытия дней. Поток закрытия один: прогоны
 // летописца не конкурируют за одну кампанию и не множат платные вызовы.
 type Queue struct {
-	store     *store.Store
-	newWorker ArchivistFactory
-	timeout   time.Duration
-	log       *slog.Logger
-	sentences int
+	store       *store.Store
+	newWorker   ArchivistFactory
+	timeout     time.Duration
+	log         *slog.Logger
+	sentences   int
+	backfillMax int
 
 	mu      sync.Mutex
 	pending map[string]job
@@ -91,9 +104,13 @@ func New(cfg Config) (*Queue, error) {
 	if sentences <= 0 {
 		sentences = 5
 	}
+	backfillMax := cfg.BackfillMax
+	if backfillMax == 0 {
+		backfillMax = DefaultBackfillMax
+	}
 	return &Queue{
 		store: cfg.Store, newWorker: cfg.NewArchivist, timeout: timeout,
-		log: logger, sentences: sentences,
+		log: logger, sentences: sentences, backfillMax: backfillMax,
 		pending: map[string]job{}, wake: make(chan struct{}, 1),
 	}, nil
 }
@@ -186,13 +203,27 @@ func (q *Queue) RunPending(ctx context.Context) error {
 // ScanGaps ставит в очередь прошлые дни без саммари. Это и есть durable
 // восстановление: состояние дня уже лежит в SQLite, отдельная таблица не
 // нужна. Дни без записей закрывать нечем — они пропускаются.
+//
+// BackfillMax ограничивает число полных прогонов летописца на старт. Дни
+// выбираются от новых к старым и распределяются по кампаниям по кругу:
+// старый день 3 при текущем дне 20 не должен затирать актуальное состояние
+// мира, а боевая TS-база не должна дать шторм дорогих вызовов.
 func (q *Queue) ScanGaps() {
+	if q.backfillMax < 0 {
+		return
+	}
 	campaigns, err := q.store.ListCampaigns()
 	if err != nil {
 		q.log.Error("dayclose: list campaigns failed", "error", err)
 		return
 	}
-	for _, campaign := range campaigns {
+	type campaignGaps struct {
+		campaign *store.Campaign
+		days     []int // от новых к старым
+	}
+	gaps := make([]campaignGaps, 0, len(campaigns))
+	for index := range campaigns {
+		campaign := &campaigns[index]
 		if campaign.Status != store.StatusActive {
 			continue
 		}
@@ -200,7 +231,8 @@ func (q *Queue) ScanGaps() {
 		if campaign.CurrentDay != nil {
 			current = *campaign.CurrentDay
 		}
-		for day := 1; day < current; day++ {
+		days := make([]int, 0, current-1)
+		for day := current - 1; day >= 1; day-- {
 			record, err := q.store.ReadDay(campaign.Slug, day)
 			if err != nil {
 				q.log.Error("dayclose: read day failed", "campaign", campaign.ID, "day", day, "error", err)
@@ -209,10 +241,31 @@ func (q *Queue) ScanGaps() {
 			if !hasContent(record) || dayClosed(record) {
 				continue
 			}
-			if err := q.Enqueue(campaign.ID, day, ""); err != nil {
-				q.log.Error("dayclose: enqueue gap failed", "campaign", campaign.ID, "day", day, "error", err)
+			days = append(days, day)
+		}
+		if len(days) > 0 {
+			gaps = append(gaps, campaignGaps{campaign: campaign, days: days})
+		}
+	}
+	enqueued := 0
+	for round := 0; enqueued < q.backfillMax; round++ {
+		added := false
+		for _, gap := range gaps {
+			if round >= len(gap.days) {
+				continue
+			}
+			if err := q.Enqueue(gap.campaign.ID, gap.days[round], ""); err != nil {
+				q.log.Error("dayclose: enqueue gap failed", "campaign", gap.campaign.ID, "day", gap.days[round], "error", err)
 				return
 			}
+			enqueued++
+			added = true
+			if enqueued >= q.backfillMax {
+				break
+			}
+		}
+		if !added {
+			return
 		}
 	}
 }
@@ -232,6 +285,13 @@ func hasContent(record *store.DayRecord) bool {
 
 func nonEmpty(value *string) bool {
 	return value != nil && strings.TrimSpace(*value) != ""
+}
+
+func campaignDay(campaign *store.Campaign) int {
+	if campaign == nil || campaign.CurrentDay == nil {
+		return 1
+	}
+	return *campaign.CurrentDay
 }
 
 func (q *Queue) loop(ctx context.Context) {
@@ -287,16 +347,40 @@ func (q *Queue) run(parent context.Context, task job) error {
 	defer cancel()
 
 	if q.newWorker == nil {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
 		q.fallback(campaign, task.day)
 		return nil
 	}
 	worker, err := q.newWorker(campaign)
 	if err != nil {
+		if parent.Err() != nil {
+			return err
+		}
 		q.fallback(campaign, task.day)
 		return err
 	}
-	report, err := worker.CloseDay(ctx, campaign, task.day, task.highlights)
+	highlights := task.highlights
+	if current := campaignDay(campaign); task.day < current-1 {
+		note := fmt.Sprintf("День %d закрывается задним числом: сейчас идёт день %d. "+
+			"Обновляй только память этого дня; не перезаписывай актуальное состояние "+
+			"персонажей, NPC, локаций, квестов и мира более поздними событиями — "+
+			"помечай такие факты как прошлые.", task.day, current)
+		if strings.TrimSpace(highlights) == "" {
+			highlights = note
+		} else {
+			highlights += "\n" + note
+		}
+	}
+	report, err := worker.CloseDay(ctx, campaign, task.day, highlights)
 	if err != nil {
+		// Остановка очереди (деплой/рестарт) — не провал летописца: не пишем
+		// дайджест, иначе ScanGaps посчитает день закрытым навсегда. День
+		// останется без саммари и будет подхвачен при следующем старте.
+		if parent.Err() != nil {
+			return err
+		}
 		q.fallback(campaign, task.day)
 		return err
 	}
@@ -310,6 +394,9 @@ func (q *Queue) run(parent context.Context, task job) error {
 	// равно не должен остаться без саммари.
 	after, readErr := q.store.ReadDay(campaign.Slug, task.day)
 	if readErr == nil && !dayClosed(after) {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
 		q.fallback(campaign, task.day)
 	}
 	return nil

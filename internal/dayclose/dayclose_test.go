@@ -18,13 +18,15 @@ import (
 type fakeArchivist struct {
 	calls       []int
 	campaignIDs []string
+	highlights  []string
 	err         error
 	mutate      func(campaign *store.Campaign, day int) error
 }
 
-func (f *fakeArchivist) CloseDay(_ context.Context, campaign *store.Campaign, day int, _ string) (chronicler.Report, error) {
+func (f *fakeArchivist) CloseDay(_ context.Context, campaign *store.Campaign, day int, highlights string) (chronicler.Report, error) {
 	f.calls = append(f.calls, day)
 	f.campaignIDs = append(f.campaignIDs, campaign.ID)
+	f.highlights = append(f.highlights, highlights)
 	if f.mutate != nil {
 		if err := f.mutate(campaign, day); err != nil {
 			return chronicler.Report{}, err
@@ -320,5 +322,136 @@ func TestQueueRunsRealChronicler(t *testing.T) {
 	}
 	if len(permanent)+len(regular) != 1 {
 		t.Fatalf("ключевые события = %v / %v, want 1", permanent, regular)
+	}
+}
+
+type blockingArchivist struct{ started chan struct{} }
+
+func (b *blockingArchivist) CloseDay(ctx context.Context, _ *store.Campaign, _ int, _ string) (chronicler.Report, error) {
+	close(b.started)
+	<-ctx.Done()
+	return chronicler.Report{}, ctx.Err()
+}
+
+// Остановка очереди посреди работы летописца не пишет авто-дайджест: день
+// остаётся без саммари и закрывается при следующем старте.
+func TestQueueStopDoesNotWriteFallback(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	blocking := &blockingArchivist{started: make(chan struct{})}
+	// Фабрика возвращает блокирующего летописца.
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+			return blocking, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue.Start(parent)
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	<-blocking.started
+	queue.Close()
+
+	record, err := st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record != nil && record.Summary != nil {
+		t.Fatalf("остановка записала дайджест навсегда: %+v", record.Summary)
+	}
+
+	// Следующий запуск подхватывает день и закрывает его настоящим саммари.
+	restart := &fakeArchivist{mutate: func(c *store.Campaign, day int) error {
+		return st.SetDaySummary(c.Slug, day, "настоящее саммари после рестарта")
+	}}
+	next := queueWith(t, st, restart)
+	next.ScanGaps()
+	if err := next.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending после рестарта: %v", err)
+	}
+	record, err = st.ReadDay(campaign.Slug, 1)
+	if err != nil {
+		t.Fatalf("ReadDay: %v", err)
+	}
+	if record == nil || record.Summary == nil || *record.Summary != "настоящее саммари после рестарта" {
+		t.Fatalf("день не закрыт после рестарта: %+v", record)
+	}
+}
+
+// BackfillMax ограничивает число полных прогонов летописца на старт: старые
+// дни обрабатываются от новых к старым.
+func TestQueueScanGapsRespectsBackfillLimit(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	for day := 2; day <= 30; day++ {
+		if err := st.AppendTranscriptEntry(campaign.Slug, day, store.TranscriptEntry{
+			Kind: "dm", Text: "Событие дня.",
+		}); err != nil {
+			t.Fatalf("transcript day %d: %v", day, err)
+		}
+		if _, err := st.AdvanceDay(campaign.ID, "dm-1"); err != nil {
+			t.Fatalf("advance day %d: %v", day, err)
+		}
+	}
+	fake := &fakeArchivist{}
+	queue, err := dayclose.New(dayclose.Config{
+		Store:       st,
+		BackfillMax: 2,
+		NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	queue.ScanGaps()
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("вызовов летописца = %d, want 2", len(fake.calls))
+	}
+	if fake.calls[0] != 30 || fake.calls[1] != 29 {
+		t.Fatalf("закрыты дни %v, want [30 29] (от новых к старым)", fake.calls)
+	}
+}
+
+// День, закрываемый задним числом, получает предупреждение не затирать
+// актуальное состояние мира.
+func TestQueueWarnsOnRetroactiveDay(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	for day := 2; day <= 5; day++ {
+		if err := st.AppendTranscriptEntry(campaign.Slug, day, store.TranscriptEntry{
+			Kind: "dm", Text: "Событие дня.",
+		}); err != nil {
+			t.Fatalf("transcript day %d: %v", day, err)
+		}
+		if _, err := st.AdvanceDay(campaign.ID, "dm-1"); err != nil {
+			t.Fatalf("advance day %d: %v", day, err)
+		}
+	}
+	fake := &fakeArchivist{}
+	queue := queueWith(t, st, fake)
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending: %v", err)
+	}
+	if len(fake.highlights) != 1 || !strings.Contains(fake.highlights[0], "задним числом") {
+		t.Fatalf("нет предупреждения: %v", fake.highlights)
+	}
+	if !strings.Contains(fake.highlights[0], "день 6") {
+		t.Fatalf("в предупреждении нет текущего дня: %q", fake.highlights[0])
 	}
 }

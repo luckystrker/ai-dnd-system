@@ -43,10 +43,10 @@ var timeOfDayLabel = map[store.TimeOfDay]string{
 }
 
 // BuildMemoryBlock собирает блок памяти кампании для хвоста контекста.
-// historyText — уже видимый модели текст истории: строки транскрипта, которые
-// в нём уже есть, повторно не вставляются. Пустая строка (нет сессии,
-// кампании или ошибка чтения) означает «память не добавлять»: игра важнее.
-func BuildMemoryBlock(st *store.Store, sess *tools.Session, historyText string) string {
+// visible — id записей транскрипта, уже видимых модели в окне истории: их
+// повторно не вставляем. Пустая карта (нет сессии, кампании или ошибка
+// чтения) означает «память не добавлять»: игра важнее.
+func BuildMemoryBlock(st *store.Store, sess *tools.Session, visible map[string]bool) string {
 	if st == nil || sess == nil {
 		return ""
 	}
@@ -65,14 +65,14 @@ func BuildMemoryBlock(st *store.Store, sess *tools.Session, historyText string) 
 	if err != nil {
 		return ""
 	}
-	block, err := buildMemoryBlock(st, campaign, sess, characters, historyText)
+	block, err := buildMemoryBlock(st, campaign, sess, characters, visible)
 	if err != nil {
 		return ""
 	}
 	return block
 }
 
-func buildMemoryBlock(st *store.Store, campaign *store.Campaign, sess *tools.Session, characters []store.CharacterSheet, historyText string) (string, error) {
+func buildMemoryBlock(st *store.Store, campaign *store.Campaign, sess *tools.Session, characters []store.CharacterSheet, visible map[string]bool) (string, error) {
 	day := 1
 	if campaign.CurrentDay != nil {
 		day = *campaign.CurrentDay
@@ -176,7 +176,7 @@ func buildMemoryBlock(st *store.Store, campaign *store.Campaign, sess *tools.Ses
 	if err != nil {
 		return "", err
 	}
-	if tail := dayTailSection(record, historyText); tail != "" {
+	if tail := dayTailSection(record, visible); tail != "" {
 		sections = append(sections, tail)
 	}
 
@@ -440,7 +440,7 @@ func memberLabel(campaign *store.Campaign, userID string) string {
 	return ""
 }
 
-func dayTailSection(record *store.DayRecord, historyText string) string {
+func dayTailSection(record *store.DayRecord, visible map[string]bool) string {
 	if record == nil {
 		return ""
 	}
@@ -453,13 +453,10 @@ func dayTailSection(record *store.DayRecord, historyText string) string {
 	}
 	entries := []string{}
 	for _, entry := range record.Entries {
-		core := transcriptCore(entry)
-		if core == "" {
-			continue
-		}
-		// Не дублируем то, что уже видно модели в окне истории: блок памяти
-		// добавляется в хвост, а не заменяет собой транскрипт.
-		if historyText != "" && strings.Contains(normalizeForCompare(historyText), normalizeForCompare(core)) {
+		// Не дублируем запись, если её ход уже виден модели в окне истории.
+		// Сравнение по стабильному id записи, а не по подстроке текста:
+		// короткая реплика («ок») не должна совпадать с «окно».
+		if eventID := transcriptEventID(entry); eventID != "" && visible[eventID] {
 			continue
 		}
 		entries = append(entries, entry)
@@ -474,36 +471,18 @@ func dayTailSection(record *store.DayRecord, historyText string) string {
 	return fmt.Sprintf("### Текущий день %d\n%s", record.Day, strings.Join(parts, "\n"))
 }
 
-// transcriptCore вырезает разметку строки транскрипта, чтобы сравнить её с
-// текстом истории: "- [12:00] **Игрок @u**: текст <!-- evt:... -->" → "текст",
-// "- [12:00] *Бросок костей: текст*" → "текст".
-func transcriptCore(line string) string {
-	line = strings.TrimSpace(line)
-	if index := strings.LastIndex(line, "<!-- evt:"); index >= 0 {
-		line = strings.TrimSpace(line[:index])
+// transcriptEventID вытаскивает id записи из маркера "<!-- evt:... -->".
+func transcriptEventID(line string) string {
+	index := strings.LastIndex(line, "<!-- evt:")
+	if index < 0 {
+		return ""
 	}
-	if strings.HasPrefix(line, "- [") {
-		if index := strings.Index(line, "] "); index >= 0 {
-			line = strings.TrimSpace(line[index+2:])
-		}
+	rest := line[index+len("<!-- evt:"):]
+	end := strings.Index(rest, " -->")
+	if end < 0 {
+		return ""
 	}
-	if index := strings.Index(line, "**: "); index >= 0 {
-		return strings.TrimSpace(line[index+4:])
-	}
-	if strings.HasPrefix(line, "*") && strings.HasSuffix(line, "*") && len(line) >= 2 {
-		line = strings.TrimSpace(line[1 : len(line)-1])
-		if index := strings.Index(line, ": "); index >= 0 {
-			return strings.TrimSpace(line[index+2:])
-		}
-		return line
-	}
-	return strings.TrimSpace(line)
-}
-
-// normalizeForCompare сводит пробелы и переводы строк к одному пробелу:
-// транскрипт схлопывает переводы строк, а история — нет.
-func normalizeForCompare(text string) string {
-	return strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(rest[:end])
 }
 
 func capTail(text string, max int) string {
