@@ -158,7 +158,6 @@ func New(cfg Config) (*DM, error) {
 	}
 
 	memory := newMemoryPolicy(cfg.Store, window, budget, monitor.Total, logger)
-	transcript := &transcriptMW{store: cfg.Store, log: logger}
 
 	agentOpts := []agent.Option{
 		agent.WithConfig(cfg.Model),
@@ -166,7 +165,9 @@ func New(cfg Config) (*DM, error) {
 		agent.WithDependencies(map[string]any{sessionDepKey: session}),
 		agent.WithStreamBase(conversation),
 		agent.WithMiddleware(
-			func() middleware.Middleware { return transcript },
+			func() middleware.Middleware {
+				return &transcriptMW{store: cfg.Store, log: logger}
+			},
 			func() middleware.Middleware { return memory },
 			compactionFactory(client, window),
 		),
