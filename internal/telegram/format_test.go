@@ -131,6 +131,8 @@ func TestSplitMessageText(t *testing.T) {
 	}
 
 	// Абзацный разрыв попадает на стык кусков: первый кусок кончается «\n\n».
+	// Сверено с eve 0.29.5: eve на этом векторе даёт [3000, 2000] и теряет
+	// переводы строк; Go сохраняет исходник без потерь.
 	paragraphText := strings.Repeat("а", 3000) + "\n\n" + strings.Repeat("б", 2000)
 	chunks = SplitMessageText(paragraphText)
 	if len(chunks) != 2 || !strings.HasSuffix(chunks[0], "\n\n") {
