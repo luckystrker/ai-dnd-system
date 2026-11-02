@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	agoconfig "github.com/luckystrker/ago/config"
+	"github.com/luckystrker/ago/config/openai"
 
 	"github.com/luckystriker/ai-dnd-system/internal/llm"
 )
@@ -21,7 +22,7 @@ func TestSpecs(t *testing.T) {
 		keyEnv   string
 	}{
 		{llm.ProviderOpenRouter, "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "OPENROUTER_API_KEY"},
-		{llm.ProviderOpenCodeGo, "https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash", "OPENCODE_API_KEY"},
+		{llm.ProviderOpenCodeGo, "https://opencode.ai/zen/go/v1", "deepseek-v4.1-flash", "OPENCODE_API_KEY"},
 		{llm.ProviderDeepSeek, "https://api.deepseek.com", "deepseek-flash", "DEEPSEEK_API_KEY"},
 	}
 
@@ -137,5 +138,78 @@ func TestModelConfig(t *testing.T) {
 	bad := llm.Settings{Provider: "bogus", APIKey: "k"}
 	if _, _, err := bad.ModelConfig(); err == nil {
 		t.Fatal("неизвестный провайдер должен падать")
+	}
+}
+
+// OpenCode Go без x-opencode-session отвечает HTTP 400 MissingSessionID
+// (проверено живым запросом и рабочей настройкой бота владельца), поэтому
+// заголовок обязателен и у Chat Completions, и у Responses API.
+func TestOpenCodeGoSessionHeader(t *testing.T) {
+	t.Parallel()
+
+	chat, _, err := llm.Settings{Provider: llm.ProviderOpenCodeGo, APIKey: "k"}.ModelConfig()
+	if err != nil {
+		t.Fatalf("ModelConfig: %v", err)
+	}
+	typed, ok := chat.(*openai.OpenAICompletionsConfig)
+	if !ok {
+		t.Fatalf("ожидался *openai.OpenAICompletionsConfig, получено %T", chat)
+	}
+	if got := typed.DefaultHeaders[llm.OpenCodeSessionHeader]; got != llm.DefaultSessionID {
+		t.Fatalf("заголовок %s = %q, want %q", llm.OpenCodeSessionHeader, got, llm.DefaultSessionID)
+	}
+
+	responses, _, err := llm.Settings{
+		Provider: llm.ProviderOpenCodeGo, APIKey: "k", Model: "muse-spark-1.3-contributor",
+		SessionID: "judge-session",
+	}.ResponsesModelConfig()
+	if err != nil {
+		t.Fatalf("ResponsesModelConfig: %v", err)
+	}
+	typedResponses, ok := responses.(*openai.OpenAIResponsesConfig)
+	if !ok {
+		t.Fatalf("ожидался *openai.OpenAIResponsesConfig, получено %T", responses)
+	}
+	if got := typedResponses.DefaultHeaders[llm.OpenCodeSessionHeader]; got != "judge-session" {
+		t.Fatalf("заголовок судьи = %q, want judge-session", got)
+	}
+}
+
+// Остальные провайдеры заголовок OpenCode не получают: он им не нужен и
+// может удивить прокси.
+func TestOtherProvidersHaveNoSessionHeader(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range []string{llm.ProviderOpenRouter, llm.ProviderDeepSeek} {
+		cfg, _, err := llm.Settings{Provider: provider, APIKey: "k"}.ModelConfig()
+		if err != nil {
+			t.Fatalf("%s: %v", provider, err)
+		}
+		typed, ok := cfg.(*openai.OpenAICompletionsConfig)
+		if !ok {
+			t.Fatalf("%s: ожидался *openai.OpenAICompletionsConfig", provider)
+		}
+		if _, exists := typed.DefaultHeaders[llm.OpenCodeSessionHeader]; exists {
+			t.Fatalf("%s не должен слать %s", provider, llm.OpenCodeSessionHeader)
+		}
+	}
+}
+
+func TestChatSessionIDIsStableAndHashed(t *testing.T) {
+	t.Parallel()
+
+	first := llm.ChatSessionID("-1001234567890:42")
+	second := llm.ChatSessionID("-1001234567890:42")
+	if first != second {
+		t.Fatalf("ChatSessionID нестабилен: %q != %q", first, second)
+	}
+	if first == llm.ChatSessionID("-1001234567890:43") {
+		t.Fatal("разные чаты/топики должны давать разные сессии")
+	}
+	if strings.Contains(first, "1001234567890") {
+		t.Fatalf("chat id утёк в id сессии: %q", first)
+	}
+	if llm.ChatSessionID("") != llm.DefaultSessionID {
+		t.Fatalf("пустой ключ должен давать %q", llm.DefaultSessionID)
 	}
 }

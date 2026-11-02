@@ -3,6 +3,8 @@
 package llm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,6 +24,16 @@ const (
 // владельца бот по умолчанию работает через OpenCode Go.
 const DefaultProvider = ProviderOpenCodeGo
 
+// OpenCodeSessionHeader — обязательный заголовок OpenCode Go: без него
+// эндпоинт отвечает HTTP 400 MissingSessionID («cannot be routed
+// efficiently»). Значение — стабильный идентификатор разговора: провайдер
+// использует его для маршрутизации и кэша промптов.
+const OpenCodeSessionHeader = "x-opencode-session"
+
+// DefaultSessionID — сессия по умолчанию, если вызывающий код не задал свою.
+// OpenCode Go не принимает запросы без заголовка, поэтому пустым он не бывает.
+const DefaultSessionID = "ttrpg-bot"
+
 // Spec — провайдер по умолчанию: корень эндпоинта, id модели и переменная
 // окружения с ключом. ago дописывает к BaseURL путь /chat/completions, поэтому
 // BaseURL — это корень вида https://host/v1, а не полный URL запроса.
@@ -40,8 +52,12 @@ type Spec struct {
 //     base URL https://openrouter.ai/api/v1, id модели из каталога
 //     https://openrouter.ai/api/v1/models (deepseek/deepseek-v4.1-flash).
 //   - OpenCode Go: https://opencode.ai/v2/docs/console/go — Chat Completions
-//     на https://opencode.ai/inference/go/openai/v1/chat/completions, id модели
-//     deepseek-v4.1-flash.
+//     на https://opencode.ai/zen/go/v1/chat/completions, id модели
+//     deepseek-v4.1-flash. Каталог моделей тоже живёт на zen/go/v1: на
+//     /inference/go/openai/v1 он отдаёт 404, хотя chat completions там
+//     отвечает. Рабочий бот владельца ходит именно на zen/go/v1.
+//     Любой запрос обязан нести заголовок x-opencode-session (иначе
+//     HTTP 400 MissingSessionID) — его ставит applyHeaders.
 //   - DeepSeek: https://api-docs.deepseek.com/ — base_url
 //     https://api.deepseek.com, публичный id модели deepseek-flash (его
 //     обслуживает DeepSeek-V4.1-Flash-1017; старые id вроде deepseek-v4-flash
@@ -56,7 +72,7 @@ var specs = map[string]Spec{
 	},
 	ProviderOpenCodeGo: {
 		Provider:  ProviderOpenCodeGo,
-		BaseURL:   "https://opencode.ai/inference/go/openai/v1",
+		BaseURL:   "https://opencode.ai/zen/go/v1",
 		Model:     "deepseek-v4.1-flash",
 		APIKeyEnv: "OPENCODE_API_KEY",
 		DocsURL:   "https://opencode.ai/v2/docs/console/go",
@@ -101,6 +117,10 @@ type Settings struct {
 	APIKey   string
 	BaseURL  string
 	Model    string
+	// SessionID — стабильный id разговора для провайдера (в OpenCode Go —
+	// заголовок x-opencode-session). Пусто — DefaultSessionID; у OpenCode Go
+	// заголовок обязателен, у остальных провайдеров не отправляется.
+	SessionID string
 }
 
 // APIKeyFromEnv резолвит ключ: LLM_API_KEY, затем переменная провайдера.
@@ -145,6 +165,7 @@ func (s Settings) ModelConfig() (agoconfig.ModelConfig, Spec, error) {
 	cfg := openai.NewOpenAICompletions(spec.Model)
 	cfg.APIKey = s.APIKey
 	cfg.BaseURL = spec.BaseURL
+	applyHeaders(cfg, spec, s.SessionID)
 	return cfg, spec, nil
 }
 
@@ -162,5 +183,55 @@ func (s Settings) ResponsesModelConfig() (agoconfig.ModelConfig, Spec, error) {
 	cfg := openai.NewOpenAIResponses(spec.Model)
 	cfg.APIKey = s.APIKey
 	cfg.BaseURL = spec.BaseURL
+	applyHeaders(cfg, spec, s.SessionID)
 	return cfg, spec, nil
+}
+
+// applyHeaders выставляет обязательные заголовки провайдера на собранном
+// конфиге. OpenCode Go без x-opencode-session отвечает HTTP 400
+// MissingSessionID, поэтому пустой SessionID заменяется на DefaultSessionID.
+func applyHeaders(cfg agoconfig.ModelConfig, spec Spec, sessionID string) {
+	if spec.Provider != ProviderOpenCodeGo {
+		return
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		sessionID = DefaultSessionID
+	}
+	switch typed := cfg.(type) {
+	case *openai.OpenAICompletionsConfig:
+		if typed.DefaultHeaders == nil {
+			typed.DefaultHeaders = map[string]string{}
+		}
+		typed.DefaultHeaders[OpenCodeSessionHeader] = sessionID
+	case *openai.OpenAIResponsesConfig:
+		if typed.DefaultHeaders == nil {
+			typed.DefaultHeaders = map[string]string{}
+		}
+		typed.DefaultHeaders[OpenCodeSessionHeader] = sessionID
+	}
+}
+
+// SessionConfig возвращает копию настроек с другим id разговора: один процесс
+// обслуживает несколько чатов, и каждому нужен свой x-opencode-session.
+func (s Settings) SessionConfig(sessionID string) Settings {
+	s.SessionID = sessionID
+	return s
+}
+
+// Служебные id разговоров: заголовок уходит провайдеру, поэтому chat id в
+// открытом виде не отправляется — только хеш.
+const (
+	ChroniclerSessionID = "ttrpg-chronicler"
+	ReplSessionID       = "ttrpg-repl"
+	EvalSessionPrefix   = "ttrpg-eval-"
+)
+
+// ChatSessionID — стабильный id разговора для Telegram-чата/топика. Хеш, а не
+// сам chat id: наружу уходит только идентификатор сессии провайдера.
+func ChatSessionID(chatKey string) string {
+	if strings.TrimSpace(chatKey) == "" {
+		return DefaultSessionID
+	}
+	sum := sha256.Sum256([]byte("ttrpg-chat-" + chatKey))
+	return "ttrpg-" + hex.EncodeToString(sum[:8])
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/luckystriker/ai-dnd-system/internal/config"
 	"github.com/luckystriker/ai-dnd-system/internal/dayclose"
 	"github.com/luckystriker/ai-dnd-system/internal/dm"
+	"github.com/luckystriker/ai-dnd-system/internal/llm"
 	"github.com/luckystriker/ai-dnd-system/internal/store"
 	"github.com/luckystriker/ai-dnd-system/internal/telegram"
 	ttrpg "github.com/luckystriker/ai-dnd-system/internal/tools"
@@ -67,12 +68,17 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	modelCfg, spec, err := cfg.LLM.ModelConfig()
+	_, spec, err := cfg.LLM.ModelConfig()
 	if err != nil {
 		return err
 	}
 	if cfg.DBPath == "" {
 		return fmt.Errorf("CAMPAIGN_DB_PATH не должен быть пустым")
+	}
+	// Летописец работает не в чате игроков: у него своя сессия провайдера.
+	chroniclerModel, _, err := cfg.LLM.SessionConfig(llm.ChroniclerSessionID).ModelConfig()
+	if err != nil {
+		return err
 	}
 	selected, err := resolveMode(*mode, cfg.Telegram.Token)
 	if err != nil {
@@ -107,7 +113,7 @@ func run(ctx context.Context, args []string) error {
 		BackfillDays: cfg.DayCloseBackfillDays,
 		NewArchivist: func(campaign *store.Campaign) (dayclose.Archivist, error) {
 			return chronicler.New(chronicler.Config{
-				Model:         modelCfg,
+				Model:         chroniclerModel,
 				Store:         st,
 				CampaignID:    campaign.ID,
 				MaxToolRounds: cfg.MaxToolRounds,
@@ -121,9 +127,13 @@ func run(ctx context.Context, args []string) error {
 	defer queue.Close()
 
 	if selected == modeTelegram {
-		return runTelegram(ctx, cfg, modelCfg, st, queue, skillsDir)
+		return runTelegram(ctx, cfg, st, queue, skillsDir)
 	}
-	bot, err := newDM(cfg, modelCfg, st, queue, skillsDir, nil, nil, nil, nil)
+	replModel, _, err := cfg.LLM.SessionConfig(llm.ReplSessionID).ModelConfig()
+	if err != nil {
+		return err
+	}
+	bot, err := newDM(cfg, replModel, st, queue, skillsDir, nil, nil, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -188,7 +198,6 @@ func newDM(
 func runTelegram(
 	ctx context.Context,
 	cfg config.Config,
-	modelCfg agoconfig.ModelConfig,
 	st *store.Store,
 	queue *dayclose.Queue,
 	skillsDir string,
@@ -204,8 +213,14 @@ func runTelegram(
 	sender := telegram.NewSender(api)
 	typing := telegram.NewTypingNotifier(api)
 
-	factory := func(_ string, conversation stream.Stream, session func() *ttrpg.Session) (*dm.DM, error) {
-		agent, err := newDM(cfg, modelCfg, st, queue, skillsDir, conversation, session, sender, typing.Activity(session))
+	factory := func(chatKey string, conversation stream.Stream, session func() *ttrpg.Session) (*dm.DM, error) {
+		// У каждого чата своя сессия провайдера (OpenCode Go требует
+		// x-opencode-session, и по нему же считается кэш промптов).
+		chatModel, _, err := cfg.LLM.SessionConfig(llm.ChatSessionID(chatKey)).ModelConfig()
+		if err != nil {
+			return nil, err
+		}
+		agent, err := newDM(cfg, chatModel, st, queue, skillsDir, conversation, session, sender, typing.Activity(session))
 		if err != nil {
 			return nil, err
 		}
