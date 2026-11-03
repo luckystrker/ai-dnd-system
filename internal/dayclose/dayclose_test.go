@@ -5,7 +5,9 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/luckystrker/ago/events"
 	agotest "github.com/luckystrker/ago/testing"
@@ -382,6 +384,83 @@ func TestQueueStopDoesNotWriteFallback(t *testing.T) {
 	}
 	if record == nil || record.Summary == nil || *record.Summary != "настоящее саммари после рестарта" {
 		t.Fatalf("день не закрыт после рестарта: %+v", record)
+	}
+}
+
+// slowArchivist блокирует первый вызов, чтобы тест успел поставить тот же
+// день в очередь во время закрытия.
+type slowArchivist struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (s *slowArchivist) CloseDay(context.Context, *store.Campaign, int, string) (chronicler.Report, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		close(s.started)
+		<-s.release
+	}
+	return chronicler.Report{}, nil
+}
+
+func (s *slowArchivist) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// Пока день закрывается, повторный Enqueue того же дня не запускает второй
+// летописец (регрессия: pop удалял ключ до выполнения, и дубль проходил).
+func TestQueueDeduplicatesDayInFlight(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	slow := &slowArchivist{started: make(chan struct{}), release: make(chan struct{})}
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+			return slow, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue.Start(ctx) // ScanGaps ставит день 1
+	select {
+	case <-slow.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("летописец не запустился")
+	}
+	if err := queue.Enqueue(campaign.ID, 1, ""); err != nil {
+		t.Fatalf("Enqueue во время закрытия: %v", err)
+	}
+	close(slow.release)
+
+	// Ждём, пока очередь закончит день и напишет авто-дайджест.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		record, err := st.ReadDay(campaign.Slug, 1)
+		if err != nil {
+			t.Fatalf("ReadDay: %v", err)
+		}
+		if record != nil && record.Summary != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("день не закрыт после снятия блокировки: %+v", record)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	queue.Close()
+	if calls := slow.count(); calls != 1 {
+		t.Fatalf("летописец вызван %d раз, want 1: дубль во время закрытия", calls)
 	}
 }
 

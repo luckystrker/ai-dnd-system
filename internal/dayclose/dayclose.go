@@ -193,6 +193,8 @@ func (q *Queue) Enqueue(campaignID string, day int, highlights string) error {
 		return errors.New("dayclose: queue is closed")
 	}
 	if _, exists := q.pending[key]; !exists {
+		// pending содержит и стоящие в очереди, и уже выполняющиеся задачи:
+		// повторный запрос того же дня во время закрытия схлопывается.
 		q.pending[key] = job{campaignID: campaignID, day: day, highlights: highlights}
 		q.order = append(q.order, key)
 	}
@@ -208,11 +210,13 @@ func (q *Queue) Enqueue(campaignID string, day int, highlights string) error {
 func (q *Queue) RunPending(ctx context.Context) error {
 	var firstErr error
 	for {
-		task, ok := q.pop()
+		task, key, ok := q.pop()
 		if !ok {
 			return firstErr
 		}
-		if err := q.run(ctx, task); err != nil && firstErr == nil {
+		err := q.run(ctx, task)
+		q.finish(key)
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -337,28 +341,39 @@ func (q *Queue) loop(ctx context.Context) {
 		case <-q.wake:
 		}
 		for {
-			task, ok := q.pop()
+			task, key, ok := q.pop()
 			if !ok {
 				break
 			}
-			if err := q.run(ctx, task); err != nil {
+			err := q.run(ctx, task)
+			q.finish(key)
+			if err != nil {
 				q.log.Error("dayclose: close day failed", "campaign", task.campaignID, "day", task.day, "error", err)
 			}
 		}
 	}
 }
 
-func (q *Queue) pop() (job, bool) {
+// pop отдаёт следующую задачу, но оставляет ключ в pending до finish: пока
+// день закрывается, повторный Enqueue того же дня схлопывается, а не запускает
+// второй летописец параллельно (раньше ключ удалялся здесь и дубль проходил).
+func (q *Queue) pop() (job, string, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.order) == 0 {
-		return job{}, false
+		return job{}, "", false
 	}
 	key := q.order[0]
 	q.order = q.order[1:]
 	task, ok := q.pending[key]
+	return task, key, ok
+}
+
+// finish снимает ключ задачи после выполнения (успеха или ошибки).
+func (q *Queue) finish(key string) {
+	q.mu.Lock()
 	delete(q.pending, key)
-	return task, ok
+	q.mu.Unlock()
 }
 
 func (q *Queue) run(parent context.Context, task job) error {
