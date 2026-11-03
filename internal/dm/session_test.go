@@ -205,6 +205,16 @@ func TestSessionMarkerNotRepeatedOnNextTurn(t *testing.T) {
 	}
 }
 
+// Пауза в маркере округляется: 20 ч 59 мин — «пауза 21 ч».
+func TestSessionMarkerRoundsPause(t *testing.T) {
+	t.Parallel()
+
+	marker := sessionStartMarker(20*time.Hour + 59*time.Minute)
+	if !strings.Contains(marker, "пауза 21 ч") {
+		t.Fatalf("пауза не округлена:\n%s", marker)
+	}
+}
+
 // Промпт опирается на маркер, а не на текст сообщения игрока: правило recap
 // не должно срабатывать по фразе «прошло время».
 func TestPromptRecapOnlyByMarker(t *testing.T) {

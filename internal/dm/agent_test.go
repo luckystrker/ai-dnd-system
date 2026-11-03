@@ -647,6 +647,8 @@ func TestPromptFollowsReviewChecklist(t *testing.T) {
 		"`access_denied`: explain",
 		"`advantage: true`",
 		"`advantage: \"disadvantage\"`",
+		"Take a player's word",
+		"Plan-discussion replies are the exception",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(instructions, fragment) {

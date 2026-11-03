@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -87,6 +88,79 @@ func TestTouchChatActivityReturnsPrevious(t *testing.T) {
 	last, ok, err := st.ChatActivity("campaign-1")
 	if err != nil || !ok || !last.Equal(second) {
 		t.Fatalf("ChatActivity = %v (ok=%v, err=%v), want %v", last, ok, err, second)
+	}
+}
+
+// Два подключения (rolling restart: старый и новый процесс) не должны видеть
+// одно и то же прошлое время: чтение+запись идут транзакцией BEGIN IMMEDIATE.
+func TestTouchChatActivitySerializesAcrossStores(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "campaigns.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	const touches = 40
+	base := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	previous := make([]time.Time, touches)
+	found := make([]bool, touches)
+	errs := make([]error, touches)
+	var wg sync.WaitGroup
+	for index := 0; index < touches; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			st := first
+			if index%2 == 1 {
+				st = second
+			}
+			previous[index], found[index], errs[index] =
+				st.TouchChatActivity("campaign-1", base.Add(time.Duration(index+1)*time.Minute))
+		}(index)
+	}
+	wg.Wait()
+
+	seen := map[time.Time]bool{}
+	missing := 0
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("касание %d: %v", index, err)
+		}
+		if !found[index] {
+			missing++
+			continue
+		}
+		if seen[previous[index]] {
+			t.Fatalf("два касания увидели одно прошлое время %v", previous[index])
+		}
+		seen[previous[index]] = true
+	}
+	if missing != 1 {
+		t.Fatalf("касаний без прошлого времени = %d, want 1", missing)
+	}
+	last, ok, err := first.ChatActivity("campaign-1")
+	if err != nil || !ok {
+		t.Fatalf("итоговое время = %v (ok=%v, err=%v)", last, ok, err)
+	}
+	// Последним записано время одного из касаний: порядок завершения
+	// горутин не определён, поэтому проверяем принадлежность набору.
+	written := false
+	for index := 1; index <= touches; index++ {
+		if last.Equal(base.Add(time.Duration(index) * time.Minute)) {
+			written = true
+			break
+		}
+	}
+	if !written {
+		t.Fatalf("итоговое время %v не из записанных", last)
 	}
 }
 

@@ -206,7 +206,12 @@ const toolHint = "Полный транскрипт дня — через read_d
 func sessionStartMarker(gap time.Duration) string {
 	pause := "первый ход в этом чате"
 	if gap > 0 {
-		pause = fmt.Sprintf("пауза %d ч", int(gap.Hours()))
+		// Округляем, а не усекаем: 20 ч 59 мин — это «пауза 21 ч», а не 20.
+		hours := int(gap.Round(time.Hour) / time.Hour)
+		if hours < 1 {
+			hours = 1
+		}
+		pause = fmt.Sprintf("пауза %d ч", hours)
 	}
 	return "### Начало новой сессии (" + pause + ")\n" +
 		"Первым делом вызови get_game_context. Первый абзац ответа — пересказ в 2–3 предложения: " +

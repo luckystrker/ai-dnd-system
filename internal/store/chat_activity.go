@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -56,11 +57,32 @@ func (s *Store) SetChatActivity(chatKey string, at time.Time) error {
 // возвращает, сколько прошло с прошлого сообщения к моменту now. Так текущее
 // сообщение не обнуляет измеряемую паузу — иначе граница сессии никогда бы не
 // срабатывала.
+//
+// Чтение и запись идут одной транзакцией `BEGIN IMMEDIATE`: блокировка на
+// запись берётся до SELECT, поэтому перекрытие двух процессов (rolling
+// restart: старый и новый канал одновременно) не даёт обоим прочитать одно и
+// то же прошлое время и выдать два маркера начала сессии.
 func (s *Store) TouchChatActivity(chatKey string, now time.Time) (time.Time, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: соединение для активности чата: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return time.Time{}, false, fmt.Errorf("store: транзакция активности чата: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
 	var raw string
-	err := s.db.QueryRow(
+	err = conn.QueryRowContext(ctx,
 		"SELECT last_message_at FROM chat_activity WHERE chat_key = ?", chatKey,
 	).Scan(&raw)
 	previous, found := time.Time{}, false
@@ -73,12 +95,16 @@ func (s *Store) TouchChatActivity(chatKey string, now time.Time) (time.Time, boo
 	} else if err != sql.ErrNoRows {
 		return time.Time{}, false, fmt.Errorf("store: чтение активности чата: %w", err)
 	}
-	if _, err := s.db.Exec(
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO chat_activity (chat_key, last_message_at) VALUES (?, ?)
          ON CONFLICT(chat_key) DO UPDATE SET last_message_at = excluded.last_message_at`,
 		chatKey, now.UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		return time.Time{}, false, fmt.Errorf("store: запись активности чата: %w", err)
 	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return time.Time{}, false, fmt.Errorf("store: коммит активности чата: %w", err)
+	}
+	committed = true
 	return previous, found, nil
 }
