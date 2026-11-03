@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/luckystriker/ai-dnd-system/internal/store"
 	"github.com/luckystriker/ai-dnd-system/internal/tools"
@@ -198,6 +199,21 @@ const toolHint = "Полный транскрипт дня — через read_d
 	"Изменения состояния фиксируй через update_character / upsert_npc; новый день — advance_day; " +
 	"время суток — advance_time; погода — set_weather; " +
 	"перемещение партии — move_party; фракции — upsert_faction / adjust_standing."
+
+// sessionStartMarker — явный маркер начала сессии в хвосте блока памяти.
+// Правило recap в промпте срабатывает только по нему: модель не угадывает
+// паузу по тексту сообщения игрока.
+func sessionStartMarker(gap time.Duration) string {
+	pause := "первый ход в этом чате"
+	if gap > 0 {
+		pause = fmt.Sprintf("пауза %d ч", int(gap.Hours()))
+	}
+	return "### Начало новой сессии (" + pause + ")\n" +
+		"Первым делом вызови get_game_context. Первый абзац ответа — пересказ в 2–3 предложения: " +
+		"где партия, чем занималась и какая цель активна (если цели нет — опиши текущее занятие, " +
+		"не выдумывай её). Не начинай с погоды, дороги или описания места; после пересказа — " +
+		"не больше двух коротких знаков, что мир изменился, и продолжай сцену."
+}
 
 func activeQuestsSection(quests []store.Quest) string {
 	lines := []string{}

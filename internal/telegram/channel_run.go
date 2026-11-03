@@ -476,6 +476,11 @@ func (c *Channel) recordTranscript(item Incoming) {
 	if err := c.store.AppendTranscriptEntry(campaign.Slug, day, entry); err != nil {
 		c.log.Warn("telegram: transcript write failed", "campaign", campaign.ID, "error", err)
 	}
+	// Активность чата для границы сессии (PLAN 39): сообщение без хода LLM —
+	// тоже сообщение. Ход DM обновляет то же время сам.
+	if _, _, err := c.store.TouchChatActivity(campaign.ID, c.clock()); err != nil {
+		c.log.Warn("telegram: chat activity write failed", "campaign", campaign.ID, "error", err)
+	}
 }
 
 // handleBatch — один склеенный ход чата: гейт, сессия, вызов DM, ответ.

@@ -233,6 +233,13 @@ var schema = []string{
   created_at TEXT NOT NULL,
   PRIMARY KEY (stream_id, seq)
 )`,
+	// Активность чата — граница игровой сессии (PLAN 39). Отдельная таблица,
+	// а не время транскрипта: transcript_entries времени не хранит, а
+	// telegram_updates есть только у Telegram. Ключ — кампания (= чат+топик).
+	`CREATE TABLE IF NOT EXISTS chat_activity (
+  chat_key TEXT PRIMARY KEY,
+  last_message_at TEXT NOT NULL
+)`,
 }
 
 // Store — соединение с базой кампаний и все операции памяти.

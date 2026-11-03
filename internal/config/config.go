@@ -64,6 +64,17 @@ const (
 	// игрока считается ответом на реплику DM (гейт follow-up). Калибровка —
 	// слайс 7; значение вынесено в env, чтобы менять без пересборки.
 	DefaultTelegramFollowUpMinutes = 10
+
+	// DefaultSessionGapHours — пауза в чате, после которой начинается новая
+	// игровая сессия (PLAN 39): 20 часов отделяют вечернюю игру от следующей.
+	DefaultSessionGapHours = 20
+)
+
+// SessionGapHoursMin / Max — допустимые значения SESSION_GAP_HOURS: от часа
+// до 30 дней. Верхняя граница ловит опечатку (лишний ноль), а не смысл.
+const (
+	SessionGapHoursMin = 1
+	SessionGapHoursMax = 720
 )
 
 // Telegram — настройки канала (слайс 6). Пустой Token — режим repl.
@@ -90,7 +101,10 @@ type Config struct {
 	TokenBudget          int64
 	DayCloseBackfillMax  int
 	DayCloseBackfillDays int
-	Telegram             Telegram
+	// SessionGapHours — пауза в чате, после которой начинается новая сессия
+	// (маркер в блоке памяти, recap в промпте).
+	SessionGapHours int
+	Telegram        Telegram
 }
 
 // Load читает переменные окружения через getenv (подменяется в тестах).
@@ -111,6 +125,8 @@ type Config struct {
 //	                     летописцем: -1 — не догонять, 0 — по умолчанию 2
 //	DAYCLOSE_BACKFILL_DAYS окно последних закрытых дней для летописца
 //	                     (1..30, по умолчанию 2); старше — только дайджест
+//	SESSION_GAP_HOURS    пауза в чате, после которой начинается новая сессия
+//	                     (1..720, по умолчанию 20)
 //	CAMPAIGN_DB_PATH     путь к SQLite-базе кампаний (по умолчанию data/campaigns.db)
 //	TELEGRAM_BOT_TOKEN   токен бота; без него запускается локальный repl
 //	TELEGRAM_BOT_USERNAME username бота без @ (для @упоминаний и команд)
@@ -193,6 +209,16 @@ func Load(getenv func(string) string) (Config, error) {
 		backfillDays = parsed
 	}
 
+	sessionGapHours := DefaultSessionGapHours
+	if raw := strings.TrimSpace(getenv("SESSION_GAP_HOURS")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < SessionGapHoursMin || parsed > SessionGapHoursMax {
+			return Config{}, fmt.Errorf("SESSION_GAP_HOURS: ожидается целое %d..%d, получено %q",
+				SessionGapHoursMin, SessionGapHoursMax, raw)
+		}
+		sessionGapHours = parsed
+	}
+
 	telegram, err := loadTelegram(getenv)
 	if err != nil {
 		return Config{}, err
@@ -212,6 +238,7 @@ func Load(getenv func(string) string) (Config, error) {
 		TokenBudget:          tokenBudget,
 		DayCloseBackfillMax:  backfillMax,
 		DayCloseBackfillDays: backfillDays,
+		SessionGapHours:      sessionGapHours,
 		Telegram:             telegram,
 	}, nil
 }

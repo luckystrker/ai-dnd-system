@@ -36,6 +36,11 @@ type RepeatReport struct {
 	Postconditions []PostconditionResult `json:"postconditions,omitempty"`
 	DurationMS     int64                 `json:"duration_ms"`
 	Tokens         int64                 `json:"tokens"`
+	// QuoteAppends / QuoteParts — срабатывания гарантии публичных бросков
+	// (PLAN 40): сколько раз код дописал цитату и какие компоненты добавил.
+	// Пусто — модель процитировала бросок сама (или бросков не было).
+	QuoteAppends int      `json:"quote_appends,omitempty"`
+	QuoteParts   []string `json:"quote_parts,omitempty"`
 }
 
 // CaseReport — кейс, сведённый по всем повторам.
@@ -48,6 +53,10 @@ type CaseReport struct {
 	PassPowK   bool           `json:"pass_pow_k"`
 	Runs       []RepeatReport `json:"runs"`
 	Regression bool           `json:"regression,omitempty"`
+	// QuoteAppends / QuoteParts — сумма срабатываний гарантии цитат по
+	// повторам кейса (PLAN 40).
+	QuoteAppends int      `json:"quote_appends,omitempty"`
+	QuoteParts   []string `json:"quote_parts,omitempty"`
 }
 
 // CategorySummary — pass rate категории.
@@ -67,6 +76,11 @@ type Report struct {
 	Cases      []CaseReport               `json:"cases"`
 	Categories map[string]CategorySummary `json:"categories"`
 	PassRate   float64                    `json:"pass_rate"`
+	// Гарантия цитат бросков (PLAN 40): сколько раз код дописал цитату за
+	// прогон, в скольких кейсах это было и какие компоненты добавлялись.
+	QuoteAppends int      `json:"quote_appends,omitempty"`
+	QuoteCases   int      `json:"quote_cases,omitempty"`
+	QuoteParts   []string `json:"quote_parts,omitempty"`
 	// Run — первое исполнение каждого кейса в формате ago: с ним работает
 	// eval.Diff и регрессионный гейт.
 	Run *eval.RunResult `json:"run"`
@@ -139,6 +153,8 @@ func BuildReport(plans []Plan, results []RepeatReport, slice, repeats int, metaF
 			if run.Passed {
 				cr.Passes++
 			}
+			cr.QuoteAppends += run.QuoteAppends
+			cr.QuoteParts = mergeParts(cr.QuoteParts, run.QuoteParts)
 			if repeat == 0 {
 				report.Run.Cases = append(report.Run.Cases, eval.CaseResult{
 					Name: plan.Name, Output: run.Output,
@@ -159,6 +175,11 @@ func BuildReport(plans []Plan, results []RepeatReport, slice, repeats int, metaF
 			summary.Passed++
 		}
 		report.Categories[cr.Category] = summary
+		report.QuoteAppends += cr.QuoteAppends
+		if cr.QuoteAppends > 0 {
+			report.QuoteCases++
+		}
+		report.QuoteParts = mergeParts(report.QuoteParts, cr.QuoteParts)
 	}
 	// Run.PassRate — первый повтор (с ним работает eval.Diff); PassRate
 	// отчёта — кейс целиком: он прошёл, только если прошли все повторы.
@@ -190,6 +211,23 @@ func BuildReport(plans []Plan, results []RepeatReport, slice, repeats int, metaF
 	}
 	report.FinishedAt = time.Now()
 	return report
+}
+
+// mergeParts дополняет dst уникальными компонентами из src, сохраняя порядок:
+// в отчёте компоненты гарантии цитат идут в том порядке, в каком их дописали.
+func mergeParts(dst, src []string) []string {
+	seen := make(map[string]bool, len(dst)+len(src))
+	for _, part := range dst {
+		seen[part] = true
+	}
+	for _, part := range src {
+		if seen[part] {
+			continue
+		}
+		seen[part] = true
+		dst = append(dst, part)
+	}
+	return dst
 }
 
 // SaveReport пишет отчёт в JSON (родительские каталоги создаются).

@@ -2,6 +2,7 @@ package dm
 
 import (
 	"encoding/json"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -10,6 +11,15 @@ import (
 	"github.com/luckystrker/ago/events"
 	"github.com/luckystrker/ago/middleware"
 )
+
+// QuoteAppend — одно срабатывание гарантии публичных бросков: какой тул и
+// какие компоненты цитаты дописаны в ответ. Счётчик — продуктовая метрика
+// (PLAN 40): по нему видно, как часто модель пропускает цитату сама, хотя
+// игроки всё равно видят результат.
+type QuoteAppend struct {
+	Tool  string   `json:"tool"`
+	Parts []string `json:"parts"`
+}
 
 // rollQuoteMW гарантирует публичность бросков и боевых эффектов: если модель
 // вызвала skill_check или roll_dice, но не назвала d20/итог/DC, в конец
@@ -21,10 +31,19 @@ import (
 // в них нет d20/КД, а порядок ходов модель пересказывает сама.
 type rollQuoteMW struct {
 	middleware.Base
-	mu      sync.Mutex
-	results []string
-	combats []string
-	dodges  []string
+	mu       sync.Mutex
+	results  []rollResult
+	combats  []string
+	dodges   []string
+	log      *slog.Logger
+	onAppend func(QuoteAppend)
+}
+
+// rollResult — результат броскового тула вместе с его именем: счётчику
+// срабатываний нужен исходный тул, а не только текст.
+type rollResult struct {
+	tool string
+	text string
 }
 
 func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, cx *agocontext.Context) (*events.ModelResponse, error) {
@@ -39,7 +58,7 @@ func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, 
 		return response, err
 	}
 	m.mu.Lock()
-	results := append([]string(nil), m.results...)
+	results := append([]rollResult(nil), m.results...)
 	combats := append([]string(nil), m.combats...)
 	dodges := append([]string(nil), m.dodges...)
 	m.mu.Unlock()
@@ -49,18 +68,22 @@ func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, 
 
 	body := response.Message.Content
 	suffixes := make([]string, 0, len(results)+1)
+	appends := make([]QuoteAppend, 0, len(results)+1)
 	for _, result := range results {
-		if parts := missingRollParts(body, result); len(parts) > 0 {
+		if parts := missingRollParts(body, result.text); len(parts) > 0 {
 			suffixes = append(suffixes, "("+strings.Join(parts, ", ")+")")
+			appends = append(appends, QuoteAppend{Tool: result.tool, Parts: parts})
 		}
 	}
 	for _, result := range combats {
 		if parts := missingCombatParts(body, result); len(parts) > 0 {
 			suffixes = append(suffixes, "("+strings.Join(parts, ", ")+")")
+			appends = append(appends, QuoteAppend{Tool: "combat", Parts: parts})
 		}
 	}
 	if len(dodges) > 0 && !dodgeQuoted(body) {
 		suffixes = append(suffixes, dodgeSuffix)
+		appends = append(appends, QuoteAppend{Tool: "combat", Parts: []string{"помеха"}})
 	}
 	if len(suffixes) == 0 {
 		return response, nil
@@ -69,7 +92,43 @@ func (m *rollQuoteMW) OnTurn(next middleware.TurnFunc, ev *events.ModelRequest, 
 		body = strings.TrimRight(body, "\n") + " "
 	}
 	response.Message.Content = body + strings.Join(suffixes, " ")
+	m.report(appends, cx)
 	return response, nil
+}
+
+// report фиксирует срабатывания гарантии: строка в лог хода и колбэк для
+// eval (PLAN 40). Лог не содержит текста ответа — только счётчик и компоненты.
+func (m *rollQuoteMW) report(appends []QuoteAppend, cx *agocontext.Context) {
+	if len(appends) == 0 {
+		return
+	}
+	tools := map[string]int{}
+	seen := map[string]bool{}
+	parts := make([]string, 0, len(appends))
+	for _, item := range appends {
+		tools[item.Tool]++
+		for _, part := range item.Parts {
+			if !seen[part] {
+				seen[part] = true
+				parts = append(parts, part)
+			}
+		}
+	}
+	if m.log != nil {
+		fields := []any{"appends", len(appends), "parts", parts}
+		for tool, count := range tools {
+			fields = append(fields, "tool_"+tool, count)
+		}
+		if session := sessionFrom(cx); session != nil && session.ChatID != "" {
+			fields = append(fields, "chat", session.ChatID)
+		}
+		m.log.Info("dm: roll quote appended", fields...)
+	}
+	if m.onAppend != nil {
+		for _, item := range appends {
+			m.onAppend(item)
+		}
+	}
 }
 
 func (m *rollQuoteMW) OnToolExecution(next middleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
@@ -97,7 +156,7 @@ func (m *rollQuoteMW) OnToolExecution(next middleware.ToolExecFunc, ev *events.T
 		}
 		return result, nil
 	}
-	m.results = append(m.results, text)
+	m.results = append(m.results, rollResult{tool: ev.Name, text: text})
 	return result, nil
 }
 

@@ -202,6 +202,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 	if plan.Random != nil {
 		random = plan.Random
 	}
+	quotes := &quoteLog{}
 	agent, err := dm.New(dm.Config{
 		Model:               modelCfg,
 		Store:               st,
@@ -211,6 +212,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 		TurnTimeout:         r.cfg.Timeout,
 		ContextWindowTokens: dm.DefaultContextWindowTokens,
 		MaxToolRounds:       dm.DefaultMaxToolRounds,
+		OnRollQuote:         quotes.add,
 		ToolDeps: ttrpg.Deps{
 			DB:          st,
 			Random:      random,
@@ -254,6 +256,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 	}
 	report.Tokens = tokenTotal(trace)
 	report.ToolCalls = trace.ToolCalls
+	report.QuoteAppends, report.QuoteParts = quotes.summary()
 
 	for _, scorer := range plan.Case.Scorers {
 		report.Scores = append(report.Scores, eval.ScoreWith(ctx, scorer, trace))
@@ -262,6 +265,40 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 	report.Passed = passed(report)
 	report.DurationMS = time.Since(started).Milliseconds()
 	return report
+}
+
+// quoteLog собирает срабатывания гарантии публичных бросков за прогон кейса:
+// сколько раз код дописал цитату и какие компоненты (PLAN 40).
+type quoteLog struct {
+	mu      sync.Mutex
+	appends int
+	parts   []string
+}
+
+func (q *quoteLog) add(item dm.QuoteAppend) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.appends++
+	seen := make(map[string]bool, len(q.parts))
+	for _, part := range q.parts {
+		seen[part] = true
+	}
+	for _, part := range item.Parts {
+		if seen[part] {
+			continue
+		}
+		seen[part] = true
+		q.parts = append(q.parts, part)
+	}
+}
+
+func (q *quoteLog) summary() (int, []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.appends == 0 {
+		return 0, nil
+	}
+	return q.appends, append([]string(nil), q.parts...)
 }
 
 // tokenTotal — сумма prompt+completion из Usage-событий трассы.
@@ -421,6 +458,13 @@ func buildFixture(st *store.Store, caseName string, meta evalgame.CaseMeta) (fix
 	if _, err := st.BindAndActivate(campaign.ID, fixtureDM.ID, store.BoundChat{ChatID: EvalChatID}); err != nil {
 		return fixture{}, fmt.Errorf("evalrun: привязка: %w", err)
 	}
+	// Граница сессии считается по durable-времени последнего сообщения в чате,
+	// а не по тексту входа (PLAN 39). Кейс открытия сессии получает паузу в
+	// неделю в данных фикстуры; остальные — свежую активность: иначе свежая
+	// база выглядела бы первым ходом чата и recap шёл бы во всех кейсах.
+	if err := st.SetChatActivity(campaign.ID, time.Now().Add(-sessionGapFor(caseName))); err != nil {
+		return fixture{}, fmt.Errorf("evalrun: активность чата: %w", err)
+	}
 	for _, player := range []fixtureUser{fixtureDen, fixtureLiza} {
 		name, username := player.Name, player.Username
 		if _, err := st.AddMember(campaign.ID, fixtureDM.ID, store.NewMemberInput{
@@ -505,6 +549,17 @@ func combatCurrent(caseName string) int {
 		return 2 // гоблин-1
 	}
 	return 0
+}
+
+// sessionGapFor — пауза в чате, заложенная в данные фикстуры. Кейс открытия
+// сессии моделирует возвращение через неделю: без паузы в данных маркер
+// начала сессии не появится, и кейс проверял бы только текст входа.
+// Остальные кейсы идут посреди сцены — активность свежая.
+func sessionGapFor(caseName string) time.Duration {
+	if caseName == "day-04-session-opener" {
+		return 7 * 24 * time.Hour
+	}
+	return 10 * time.Minute
 }
 
 // seedCombatTranscript пишет в день 1 начало боя так, как его записал бы

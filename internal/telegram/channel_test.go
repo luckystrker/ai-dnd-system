@@ -880,6 +880,39 @@ func TestChannelGateWritesTranscriptWithoutLLM(t *testing.T) {
 	}
 }
 
+// Сообщение, которое не будит LLM (гейт, rate-limit), всё равно двигает
+// активность чата: пауза сессии считается от последнего сообщения, а не от
+// последнего хода модели.
+func TestChannelGateWritesChatActivity(t *testing.T) {
+	t.Parallel()
+
+	st := testStorePath(t)
+	campaign := testCampaign(t, st, "-100")
+	if err := st.SetChatActivity(campaign.ID, time.Now().Add(-21*time.Hour)); err != nil {
+		t.Fatalf("SetChatActivity: %v", err)
+	}
+	api := newFakeBotAPI()
+	model := agotest.NewTestConfig()
+	channel := newTestChannel(t, api, st, modelFactory(st, model), nil)
+	if err := channel.ingest(rawUpdate(t, 1, groupMessage(-100, 100, "Давай сначала осмотрим двор."))); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		pending, _ := st.PendingTelegramUpdates()
+		return len(pending) == 0
+	})
+	if calls := len(model.Calls()); calls != 0 {
+		t.Fatalf("переписка игроков разбудила LLM: %d вызовов", calls)
+	}
+	last, ok, err := st.ChatActivity(campaign.ID)
+	if err != nil || !ok {
+		t.Fatalf("активность чата не записана: %v (ok=%v, err=%v)", last, ok, err)
+	}
+	if time.Since(last) > time.Minute {
+		t.Fatalf("активность не сдвинулась: %v", last)
+	}
+}
+
 // Превышение rate-limit пишется в транскрипт, но LLM не будится: в TS
 // сообщение молча терялось.
 func TestChannelRateLimitWritesTranscript(t *testing.T) {

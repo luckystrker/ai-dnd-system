@@ -188,6 +188,7 @@ func newDM(
 		ContextWindowTokens: cfg.ContextWindowTokens,
 		TurnTimeout:         time.Duration(cfg.TurnTimeoutSeconds) * time.Second,
 		TokenBudget:         cfg.TokenBudget,
+		SessionGap:          time.Duration(cfg.SessionGapHours) * time.Hour,
 		SkillsDir:           skillsDir,
 		Stream:              conversation,
 		SessionFunc:         session,

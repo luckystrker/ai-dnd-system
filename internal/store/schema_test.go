@@ -138,11 +138,13 @@ func TestSchemaMatchesTSGoldenDDL(t *testing.T) {
 	goStore.Close()
 }
 
-// channelTables — таблицы слайса 6 поверх той же базы (схема TS не тронута).
+// channelTables — таблицы Go-версии поверх той же базы (схема TS не тронута):
+// durable-канал слайса 6 и активность чата для границы сессии (PLAN 39).
 var channelTables = map[string]bool{
 	"telegram_updates":    true,
 	"telegram_poll_state": true,
 	"event_streams":       true,
+	"chat_activity":       true,
 }
 
 func isChannelSchemaObject(object schemaObject) bool {

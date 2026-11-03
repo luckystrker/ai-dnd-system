@@ -96,6 +96,7 @@ Eval-судья по умолчанию — `muse-spark-1.3-contributor` чер�
 | `TOKEN_BUDGET` | `200000` | бюджет токенов одного хода |
 | `DAYCLOSE_BACKFILL_MAX` | `2` | сколько пропущенных дней закрывать летописцем на старте; `-1` — не догонять |
 | `DAYCLOSE_BACKFILL_DAYS` | `2` (1..30) | окно последних дней для летописца; старше — дайджест |
+| `SESSION_GAP_HOURS` | `20` (1..720) | пауза в чате, после которой начинается новая сессия |
 | `TELEGRAM_BOT_TOKEN` | — | без него запускается repl |
 | `TELEGRAM_BOT_USERNAME` | — | username без `@`, для команд и упоминаний |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | корень Bot API |

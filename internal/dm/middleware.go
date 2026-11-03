@@ -104,6 +104,15 @@ func (p *memoryPolicy) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event
 		evs = reduced
 	}
 	block := BuildMemoryBlock(p.store, sessionFrom(cx), visibleEventIDs(evs))
+	// Маркер начала сессии — из контекста хода: он держится на всех раундах
+	// тулов этого хода и не повторяется на следующем (PLAN 39).
+	if marker := sessionStartFrom(cx); marker != "" {
+		if block == "" {
+			block = marker
+		} else {
+			block += "\n\n" + marker
+		}
+	}
 	block = p.withBudgetNotice(block)
 	if block != "" {
 		evs = insertBeforeLastRequest(evs, block)

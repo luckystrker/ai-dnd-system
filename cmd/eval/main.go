@@ -271,6 +271,7 @@ func printReport(report *evalgame.Report, elapsed time.Duration) {
 		fmt.Fprintf(os.Stderr, "  %-11s %3d/%3d  %5.0f%%\n",
 			category, summary.Passed, summary.Cases, summary.PassRate*100)
 	}
+	printQuoteGuarantee(report)
 	var failed []evalgame.CaseReport
 	for _, item := range report.Cases {
 		if !item.PassPowK {
@@ -296,6 +297,28 @@ func printReport(report *evalgame.Report, elapsed time.Duration) {
 			extra = fmt.Sprintf(" [%d/%d повторов]", item.Passes, item.Repeats)
 		}
 		fmt.Fprintf(os.Stderr, "  ✗ %s%s: %s\n", item.Name, extra, reason)
+	}
+}
+
+// printQuoteGuarantee печатает счётчик гарантии публичных бросков (PLAN 40):
+// сколько раз код дописал цитату, в каких кейсах и какие компоненты. Это
+// видимость того, что модель пропускает цитату сама, — не метрика скорера.
+func printQuoteGuarantee(report *evalgame.Report) {
+	fmt.Fprintf(os.Stderr, "\n=== гарантия цитат бросков: %d дописок в %d из %d кейсов ===\n",
+		report.QuoteAppends, report.QuoteCases, len(report.Cases))
+	if report.QuoteAppends == 0 {
+		fmt.Fprintln(os.Stderr, "  модель цитировала броски сама")
+		return
+	}
+	for _, item := range report.Cases {
+		if item.QuoteAppends == 0 {
+			continue
+		}
+		parts := strings.Join(item.QuoteParts, ", ")
+		if parts == "" {
+			parts = "—"
+		}
+		fmt.Fprintf(os.Stderr, "  %-48s %2d (%s)\n", item.Name, item.QuoteAppends, parts)
 	}
 }
 

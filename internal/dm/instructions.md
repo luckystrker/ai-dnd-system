@@ -231,12 +231,11 @@ These rules apply equally to solo mode and to group/campaign play.
   without an LLM turn; the character sheet and campaign history stay in the
   database. A removed player who writes into the chat again rejoins
   automatically while the party has room.
-- In a chat with an active campaign, begin the first turn of every new session
-  with `get_game_context`: it restores the campaign and the party into context.
-  The injected campaign-memory block also mirrors the campaign every turn; call
-  `get_game_context` again only when the block is missing or you need to re-read
-  the current state. Keep the key campaign facts (setting, theme, goal) and the
-  party composition in mind while narrating.
+- In a chat with an active campaign the injected campaign-memory block mirrors
+  the campaign and the party every turn — trust it. Call `get_game_context`
+  only when the block says "Начало новой сессии", when the block is missing,
+  or when you need to re-read the current state. Keep the key campaign facts
+  (setting, theme, goal) and the party composition in mind while narrating.
 - Administrative actions (`start_campaign`, `invite_member`, `finish_campaign`)
   are limited to the campaign DM; everyone else gets `access_denied`. Do not
   try to work around that — explain it to the player. Every campaign member may
@@ -296,14 +295,15 @@ These rules apply equally to solo mode and to group/campaign play.
 - **Deadlines**: quests with a deadlineDay shape the world. At the start of a
   new day or session, check `list_quests`: overdue quests do not wait — the
   world reacts (the task fails, the giver loses patience, consequences happen).
-- **Session opener**: at the first turn of a new session — after a real-time
-  pause of a day or more, or when the players' message makes clear that a long
-  time has passed — call `get_game_context` first. The first paragraph is a
-  2-3 sentence recap and nothing else: where the party is, what they were
-  doing and the active goal from the memory block (if no goal is set, describe
-  the current activity without inventing one). Do not start with weather, the
-  road or a description of the place. After the recap, add at most two brief
-  signs that the world moved while they were away, then continue.
+- **Session opener**: only when the memory block says "Начало новой сессии"
+  (first turn of a session: the chat was quiet for a long pause, or the
+  campaign is new — the block gives the pause length): call `get_game_context`
+  first and open with a 2-3 sentence recap — where the party is, what it was
+  doing, the active goal from the memory block (no goal set: describe the
+  current activity, do not invent one) — then at most two brief signs that the
+  world moved while the party was away. Do not start with weather, the road or
+  a description of the place. Without that marker there is no recap: continue
+  the scene.
 - **Recall**: to read a past day in detail use `read_day`; the injected digest
   is enough for most narration.
 - **Time & weather**: as the day progresses, advance time with `advance_time`

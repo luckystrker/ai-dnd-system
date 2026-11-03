@@ -47,6 +47,25 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DayCloseBackfillDays != config.DefaultDayCloseBackfillDays {
 		t.Errorf("DayCloseBackfillDays = %d, want %d", cfg.DayCloseBackfillDays, config.DefaultDayCloseBackfillDays)
 	}
+	if cfg.SessionGapHours != config.DefaultSessionGapHours {
+		t.Errorf("SessionGapHours = %d, want %d", cfg.SessionGapHours, config.DefaultSessionGapHours)
+	}
+}
+
+// Порог границы сессии задаётся env: пауза в чате, после которой начинается
+// новая сессия (PLAN 39).
+func TestLoadSessionGapOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{
+		"LLM_API_KEY": "sk-test", "SESSION_GAP_HOURS": "36",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SessionGapHours != 36 {
+		t.Errorf("SessionGapHours = %d, want 36", cfg.SessionGapHours)
+	}
 }
 
 func TestLoadContextLimits(t *testing.T) {
@@ -176,6 +195,21 @@ func TestLoadErrors(t *testing.T) {
 			name:   "битое окно backfill",
 			env:    map[string]string{"LLM_API_KEY": "k", "DAYCLOSE_BACKFILL_DAYS": "0"},
 			substr: "DAYCLOSE_BACKFILL_DAYS",
+		},
+		{
+			name:   "нулевая пауза сессии",
+			env:    map[string]string{"LLM_API_KEY": "k", "SESSION_GAP_HOURS": "0"},
+			substr: "SESSION_GAP_HOURS",
+		},
+		{
+			name:   "слишком большая пауза сессии",
+			env:    map[string]string{"LLM_API_KEY": "k", "SESSION_GAP_HOURS": "721"},
+			substr: "SESSION_GAP_HOURS",
+		},
+		{
+			name:   "битая пауза сессии",
+			env:    map[string]string{"LLM_API_KEY": "k", "SESSION_GAP_HOURS": "сутки"},
+			substr: "SESSION_GAP_HOURS",
 		},
 	}
 

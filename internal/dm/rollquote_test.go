@@ -17,7 +17,11 @@ func runRollQuote(t *testing.T, toolName, result, answer string) string {
 
 func runToolQuote(t *testing.T, toolName, arguments, result, answer string) string {
 	t.Helper()
-	mw := &rollQuoteMW{}
+	return runToolQuoteMW(t, &rollQuoteMW{}, toolName, arguments, result, answer)
+}
+
+func runToolQuoteMW(t *testing.T, mw *rollQuoteMW, toolName, arguments, result, answer string) string {
+	t.Helper()
 	call := events.ToolCallEvent{ID: "call-1", Name: toolName, Arguments: arguments}
 	execNext := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
 		return events.FromResultCall(call, events.NewToolResult(false, result)), nil
@@ -145,5 +149,52 @@ func TestRollQuoteIgnoresNonRollTools(t *testing.T) {
 	reply := runRollQuote(t, "tick", "tock", answer)
 	if reply != answer {
 		t.Fatalf("ответ изменился на небросковом туле: %q", reply)
+	}
+}
+
+// Гарантия считает свои срабатывания и компоненты: по этому счётчику в логе и
+// отчёте eval видно, как часто модель пропускает цитату броска сама
+// (PLAN 40). Уже процитированный бросок не считается.
+func TestRollQuoteReportsAppendedParts(t *testing.T) {
+	t.Parallel()
+
+	var got []QuoteAppend
+	mw := &rollQuoteMW{onAppend: func(item QuoteAppend) { got = append(got, item) }}
+	result := "🎲 Дэн — проверка «Восприятие» (МДР): d20 = 11 +0 = 11 vs DC 12 -> ПРОВАЛ"
+	runToolQuoteMW(t, mw, "skill_check", "{}", result, "Ты ничего не замечаешь.")
+	if len(got) != 1 {
+		t.Fatalf("срабатываний = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Tool != "skill_check" {
+		t.Fatalf("тул = %q, want skill_check", got[0].Tool)
+	}
+	joined := strings.Join(got[0].Parts, ",")
+	for _, want := range []string{"«Восприятие»", "d20 = 11", "мод +0", "итого 11", "DC 12", "провал"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("компоненты не содержат %q: %v", want, got[0].Parts)
+		}
+	}
+
+	got = nil
+	quoted := "Провал: «Восприятие», d20 = 11, мод +0, итог 11 против DC 12."
+	runToolQuoteMW(t, mw, "skill_check", "{}", result, quoted)
+	if len(got) != 0 {
+		t.Fatalf("полная цитата засчитана как дописка: %+v", got)
+	}
+}
+
+// Уклонение считается отдельным компонентом «помеха».
+func TestRollQuoteReportsDodge(t *testing.T) {
+	t.Parallel()
+
+	var got []QuoteAppend
+	mw := &rollQuoteMW{onAppend: func(item QuoteAppend) { got = append(got, item) }}
+	result := "Дэн уклоняется (Dodge): до его следующего хода атаки по нему идут с помехой. Следующий ход: Лиса (lisa)."
+	runToolQuoteMW(t, mw, "combat", `{"action":"dodge","attacker":"Дэн"}`, result, "Дэн пригибается и ждёт.")
+	if len(got) != 1 || got[0].Tool != "combat" {
+		t.Fatalf("срабатывания = %+v, want одно combat", got)
+	}
+	if len(got[0].Parts) != 1 || got[0].Parts[0] != "помеха" {
+		t.Fatalf("компоненты = %v, want [помеха]", got[0].Parts)
 	}
 }

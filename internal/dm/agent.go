@@ -76,6 +76,9 @@ type Config struct {
 	ContextWindowTokens int
 	TurnTimeout         time.Duration
 	TokenBudget         int64
+	// SessionGap — пауза в чате, после которой начинается новая сессия
+	// (маркер в блоке памяти). 0 — DefaultSessionGap (20 ч).
+	SessionGap time.Duration
 	// SkillsDir переопределяет каталог скиллов (тесты). Пусто — встроенные
 	// skills/ материализуются во временный каталог.
 	SkillsDir string
@@ -84,6 +87,10 @@ type Config struct {
 	// ExtraMiddleware добавляются после встроенных: eval подменяет результат
 	// тула ошибкой (fault) на N-м вызове, не трогая сам тул.
 	ExtraMiddleware []middleware.Factory
+	// OnRollQuote вызывается, когда гарантия публичных бросков дописала
+	// недостающие компоненты цитаты. По нему eval считает, как часто модель
+	// пропускает цитату сама (PLAN 40); в бою счётчик уходит в лог хода.
+	OnRollQuote func(QuoteAppend)
 	// SkipToolkit собирает агента только из ExtraTools: eval на скриптованных
 	// траекториях проверяет промпт, память и лимиты без живой БД-кампании.
 	SkipToolkit bool
@@ -125,6 +132,10 @@ func New(cfg Config) (*DM, error) {
 	maxToolRounds := cfg.MaxToolRounds
 	if maxToolRounds <= 0 {
 		maxToolRounds = DefaultMaxToolRounds
+	}
+	sessionGap := cfg.SessionGap
+	if sessionGap <= 0 {
+		sessionGap = DefaultSessionGap
 	}
 	session := cfg.Session
 	if session == nil {
@@ -191,6 +202,11 @@ func New(cfg Config) (*DM, error) {
 		// Сессия (говорящий/кампания) обновляется в начале каждого хода:
 		// один DM обслуживает весь чат, а автор сообщения меняется.
 		func() middleware.Middleware { return sessionMiddleware{sessionFn: sessionFn} },
+		// Граница сессии по времени последнего сообщения в чате (SQLite):
+		// маркер начала сессии попадает в блок памяти этого хода.
+		func() middleware.Middleware {
+			return &sessionBoundaryMW{store: cfg.Store, gap: sessionGap, now: time.Now, log: logger}
+		},
 		// Индикатор «печатает…» на старте хода и перед вызовами тулов.
 		func() middleware.Middleware { return activityMiddleware{fn: cfg.OnToolActivity} },
 		// Бюджет токенов — на ход: сбрасываем счётчик до первого вызова
@@ -209,8 +225,11 @@ func New(cfg Config) (*DM, error) {
 		// Броски публичны: недостающие компоненты цитаты дописываем сами.
 		// В скриптованных офлайн-тестах (SkipToolkit) гарантия выключена,
 		// чтобы скореры видели сырой ответ модели. Живой eval и бой идут с
-		// гарантией: это продуктовое правило, а не метрика модели.
-		factories = append(factories, func() middleware.Middleware { return &rollQuoteMW{} })
+		// гарантией: это продуктовое правило (PLAN 40), а не метрика модели;
+		// счётчик срабатываний уходит в лог и отчёт eval.
+		factories = append(factories, func() middleware.Middleware {
+			return &rollQuoteMW{log: logger, onAppend: cfg.OnRollQuote}
+		})
 	}
 	factories = append(factories, cfg.ExtraMiddleware...)
 

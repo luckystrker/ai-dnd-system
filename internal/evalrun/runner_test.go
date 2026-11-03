@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agoconfig "github.com/luckystrker/ago/config"
 	agocontext "github.com/luckystrker/ago/context"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/luckystriker/ai-dnd-system/internal/chronicler"
 	"github.com/luckystriker/ai-dnd-system/internal/dayclose"
+	"github.com/luckystriker/ai-dnd-system/internal/dm"
 	"github.com/luckystriker/ai-dnd-system/internal/evalgame"
 	"github.com/luckystriker/ai-dnd-system/internal/store"
 )
@@ -68,6 +70,36 @@ func TestRunnerRealToolkitWritesMemoryOnPlayerTurn(t *testing.T) {
 		t.Fatalf("кейс должен пройти на настоящих тулах, провал: %+v", report.Cases[0].Runs)
 	}
 	requireReportScore(t, report, "memory-01-damage-on-player-turn", "tool_ok", true)
+}
+
+// Живой путь eval идёт с включённой гарантией цитат: если модель не назвала
+// бросок, код дописывает компоненты, и это видно в счётчике отчёта (PLAN 40).
+func TestRunnerCountsQuoteGuarantee(t *testing.T) {
+	t.Parallel()
+
+	suite := suiteWithMechanical(t)
+	runner, err := NewRunner(suite, scriptedFactory(func(string) []*events.ModelResponse {
+		return []*events.ModelResponse{
+			{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "skill_check",
+				Arguments: `{"character_name":"Дэн","skill":"Восприятие","difficulty":12}`,
+			}}}},
+			{Message: &events.ModelMessage{Content: "Ты ничего не замечаешь."}},
+		}
+	}), RunnerConfig{Repeats: 1, Concurrency: 1, TempRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	report, err := runner.Run(context.Background(), RunOptions{Cases: []string{"rolls-01-skill-check-public"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.QuoteAppends == 0 || report.QuoteCases != 1 {
+		t.Fatalf("гарантия не засчитана: %d дописок в %d кейсах", report.QuoteAppends, report.QuoteCases)
+	}
+	if len(report.QuoteParts) == 0 {
+		t.Fatal("не записаны компоненты гарантии")
+	}
 }
 
 func TestRunnerExecutesDaySummaryPostcondition(t *testing.T) {
@@ -266,6 +298,53 @@ func TestFixtureCampaignHasGoal(t *testing.T) {
 	}
 	if campaign.Goal == nil || strings.TrimSpace(*campaign.Goal) == "" {
 		t.Fatalf("у кампании фикстуры нет цели: %+v", campaign.Goal)
+	}
+}
+
+// Пауза кейса открытия сессии живёт в данных, а не в тексте входа: маркер
+// начала сессии считается по времени последнего сообщения в SQLite.
+func TestFixtureSeedsSessionPauseThroughData(t *testing.T) {
+	t.Parallel()
+
+	activityFor := func(caseName string, meta evalgame.CaseMeta) (time.Duration, bool) {
+		t.Helper()
+		st, err := store.Open(filepath.Join(t.TempDir(), "campaigns.db"))
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		fixture, err := buildFixture(st, caseName, meta)
+		if err != nil {
+			t.Fatalf("buildFixture %s: %v", caseName, err)
+		}
+		last, ok, err := st.ChatActivity(fixture.campaignID)
+		if err != nil {
+			t.Fatalf("ChatActivity %s: %v", caseName, err)
+		}
+		if !ok {
+			return 0, false
+		}
+		return time.Since(last), true
+	}
+
+	pause, ok := activityFor("day-04-session-opener", evalgame.CaseMeta{
+		Category: "day", Speaker: "Дэн", Role: "player",
+	})
+	if !ok {
+		t.Fatal("у day-04 нет активности чата в фикстуре")
+	}
+	if pause < dm.DefaultSessionGap {
+		t.Fatalf("пауза day-04 = %v, want ≥ %v", pause, dm.DefaultSessionGap)
+	}
+
+	pause, ok = activityFor("memory-01-damage-on-player-turn", evalgame.CaseMeta{
+		Category: "memory", Speaker: "Дэн", Role: "player",
+	})
+	if !ok {
+		t.Fatal("у обычного кейса нет активности чата в фикстуре")
+	}
+	if pause >= dm.DefaultSessionGap {
+		t.Fatalf("обычный кейс идёт с паузой %v: recap включится везде", pause)
 	}
 }
 
