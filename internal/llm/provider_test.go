@@ -173,6 +173,12 @@ func TestOpenCodeGoSessionHeader(t *testing.T) {
 	if got := typedResponses.DefaultHeaders[llm.OpenCodeSessionHeader]; got != "judge-session" {
 		t.Fatalf("заголовок судьи = %q, want judge-session", got)
 	}
+	// OpenCode Go не хранит ответы Responses API: с дефолтным store=true
+	// /responses отвечает 400 ("OpenCode doesn't store responses; omit store
+	// or set it to false"). Поэтому store выключается для этого провайдера.
+	if typedResponses.Store == nil || *typedResponses.Store {
+		t.Fatalf("судья шлёт store=true, OpenCode Go это отклоняет: %+v", typedResponses.Store)
+	}
 }
 
 // Остальные провайдеры заголовок OpenCode не получают: он им не нужен и

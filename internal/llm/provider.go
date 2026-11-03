@@ -183,6 +183,14 @@ func (s Settings) ResponsesModelConfig() (agoconfig.ModelConfig, Spec, error) {
 	cfg := openai.NewOpenAIResponses(spec.Model)
 	cfg.APIKey = s.APIKey
 	cfg.BaseURL = spec.BaseURL
+	// OpenCode Go не хранит ответы Responses API: с дефолтным store=true
+	// /responses отвечает HTTP 400 «OpenCode doesn't store responses; omit
+	// store or set it to false». Store=false — требование провайдера, а не
+	// наша настройка.
+	if spec.Provider == ProviderOpenCodeGo {
+		storeResponses := false
+		cfg.Store = &storeResponses
+	}
 	applyHeaders(cfg, spec, s.SessionID)
 	return cfg, spec, nil
 }
