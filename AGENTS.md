@@ -1,16 +1,14 @@
 # TTRPG Telegram bot
 
-Бот ведёт D&D 5e-подобную игру в Telegram (соло или группа до 6). Миграция с
-eve (TypeScript) на **Go + ago** идёт веткой `ago-port`: слайсы 0–7 — Go,
-слайс 8 — удаление TS и мерж в `main`. Ниже явно помечено, что относится к
-Go-версии (боевая), а что — к уходящему TS.
+Бот ведёт D&D 5e-подобную игру в Telegram (соло или группа до 6). Реализация —
+**Go + ago**, единственная боевая версия. До миграции бот был на eve
+(TypeScript); слайс 8 удалил TS из репозитория, старый код доступен только в
+истории git (`git log` до коммита «удалить TS и eve», ветка `ago-port`).
 
 Реплики бота, комментарии в коде, `README.md` и коммиты — **по-русски**.
 Строки для LLM (описания тулов, `outputSchema`) — по-английски.
 
 ## Команды
-
-### Go (боевая версия)
 
 ```bash
 export PATH=$HOME/.local/go/bin:$PATH   # в этой песочнице Go 1.27
@@ -41,18 +39,14 @@ go run ./cmd/e2e -live             # то же с живой моделью
 go run ./cmd/dump-sessions [username|chat_id]
 ```
 
-CI (`.github/workflows/ci.yml`, job `go`): `gofmt -l`, `go vet`, `go test`,
-`go test -race`, `go build`, сборка бинаря, офлайн-eval, `cmd/eval -check-only`,
-`cmd/eval -telegram`. Живой eval в CI не запускается.
+CI (`.github/workflows/ci.yml`, единственный job `go`): `gofmt -l`, `go vet`,
+`go test`, `go test -race`, `go build`, сборка бинаря, офлайн-eval,
+`cmd/eval -check-only`, `cmd/eval -telegram`. Живой eval в CI не запускается.
 
-### TS (уходящая версия, до слайса 8)
+Гейт качества абсолютный (`internal/evalgame/gate.go`), а не «Go ≥ baseline на
+eve»: TS-бот локально не собирался, baseline снять было нельзя (PLAN 30).
 
-`npm run dev -- --no-ui`, `npm run poll`, `npm run typecheck`, `npm test`,
-`npm run build`, `npm run smoke`. Локально TS-бот не собирается
-(`better-sqlite3`, нет `make`); baseline на eve снять нельзя — поэтому гейт
-качества абсолютный (`internal/evalgame/gate.go`), а не «Go ≥ baseline».
-
-## Архитектура Go
+## Архитектура
 
 - `cmd/bot` — точка входа: `config.Load`, провайдер, `store.Open`, очередь
   закрытия дня, режимы `telegram` / `repl`. По SIGTERM канал перестаёт
@@ -83,7 +77,7 @@ CI (`.github/workflows/ci.yml`, job `go`): `gofmt -l`, `go vet`, `go test`,
 - `internal/evalgame` — кейсы, механические скореры, судья, калибровка, гейт
   и отчёт. `internal/evalrun` исполняет кейс настоящим DM на временной SQLite.
 
-## Соглашения и gotchas (Go)
+## Соглашения и gotchas
 
 - `LLM_BASE_URL` — корень эндпоинта (`https://host/v1`), **не**
   `/chat/completions`: ago дописывает путь сам и явно отклоняет такой URL.
@@ -110,7 +104,8 @@ CI (`.github/workflows/ci.yml`, job `go`): `gofmt -l`, `go vet`, `go test`,
   Счётчик — `prompt_appends` / `prompt_characters` в отчёте `cmd/eval`
   (PLAN 41). Без вызова тула код не вмешивается.
 - Право на запись в память даёт привязка сессии к чату кампании, а не роль
-  автора сообщения. Баг TS «в группе HP/лут не сохраняются» не переносить.
+  автора сообщения. Баг TS-версии «в группе HP/лут не сохраняются» не
+  переносить.
 - В группе склейка 2.5 с, follow-up 10 мин, лимиты 20/10 в минуту. Калибровка:
   `go run ./cmd/eval -telegram`; значения не менять без решения владельца.
 - Durable-история чата ограничена 600 событиями; память кампании — в SQLite,
@@ -118,20 +113,9 @@ CI (`.github/workflows/ci.yml`, job `go`): `gofmt -l`, `go vet`, `go test`,
   последнего чистого `ModelResponse`.
 - SQLite в WAL: бэкап только `sqlite3 .backup` / `VACUUM INTO`, не копией
   файла. `data/` — единственный writable путь systemd-юнита.
-- `.eve/`, `.output/`, `node_modules/` — остатки TS, не трогать до слайса 8.
-
-## TS (уходящее, до слайса 8)
-
-- `agent/agent.ts` — eve-агент, `agent/instructions.md` — промпт,
-  `agent/tools/` — 42 тула, `agent/subagents/chronicler/` — летописец.
-- `agent/lib/engine/dnd5e.ts` — правила; `agent/lib/campaigns/` — SQLite.
-- `scripts/e2e-*.ts`, `scripts/dump-sessions.ts`, `scripts/smoke-campaigns.ts` —
-  заменены Go-командами (`cmd/e2e`, `cmd/dump-sessions`) и `go test`.
-- `deploy/systemd/ai-dnd-ts.service`, `deploy/start-polling-ts.sh`,
-  `deploy/caddy/` — старый путь деплоя, помечен устаревшим. Удаление — слайс 8.
-- TS-код в слайсе 7 не меняется.
-
-## eve framework (TS, историческое)
-
-Если всё же правится TS: читать `node_modules/eve/docs/`; интеграции —
-`eve registry search/list/view/add`. Для Go-версии это неактуально.
+- `internal/store/testdata/schema_ts.sql` — эталон схемы TS-версии для
+  golden-теста (`schema_test.go`): доказывает, что Go открывает прод-базу без
+  миграции. Файл нужен Go-тестам, хотя и назван по историческому источнику.
+- `plan/` и `docs/` — история проекта (в том числе TS-эпохи). Актуальные
+  документы — `README.md`, `AGENTS.md`, `deploy/README.md`, `eval/README.md`,
+  `plan/ago-migration/PLAN.md`.

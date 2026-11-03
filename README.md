@@ -3,7 +3,8 @@
 Бот ведёт настольную ролевую игру в Telegram: соло-партия в личном чате или
 группа до 6 игроков. Переписан с eve (TypeScript) на Go поверх
 [ago](https://github.com/luckystrker/ago); схема SQLite та же, миграция данных
-не нужна.
+не нужна. TS-версия удалена в слайсе 8 — её код виден только в истории git
+(коммиты до «удалить TS и eve» в ветке `ago-port`).
 
 - **Long-poll**: отдельный webhook, Caddy и Node не нужны. Один Go-бинарь под
   systemd.
@@ -114,8 +115,9 @@ Eval-судья по умолчанию — `muse-spark-1.3-contributor` чер�
 | `EVAL_JUDGE_PROVIDER` | `opencode-go` | провайдер судьи eval |
 | `EVAL_JUDGE_MODEL` | `muse-spark-1.3-contributor` | модель судьи eval |
 
-Устаревшие переменные TS/eve (`TELEGRAM_WEBHOOK_SECRET_TOKEN`, `PORT`, `HOST`,
-`NITRO_*`) Go-боту не нужны и игнорируются до слайса 8.
+Устаревших переменных TS/eve (`TELEGRAM_WEBHOOK_SECRET_TOKEN`, `PORT`, `HOST`,
+`NITRO_*`) в Go-версии нет и в шаблоне они не нужны: long-poll не использует
+webhook, HTTP-порт не слушается.
 
 ## Команды бота
 
@@ -218,8 +220,8 @@ sudo crontab -e                          # 0 3 * * * /opt/ai-dnd-system/deploy/b
 копий. Юнит: `KillSignal=SIGTERM`, `TimeoutStopSec=25` (graceful shutdown 15 с
 + запас), `ProtectSystem=strict` и запись только в `data/`.
 
-Caddy/webhook и `ai-dnd-ts.service` — устаревший TS-путь, сохранён для отката
-до слайса 8.
+Caddy, webhook и TS-юнит `ai-dnd-ts.service` удалены вместе с TS-версией:
+деплой — только Go-бинарь под systemd с long-poll.
 
 ## Диагностика
 
