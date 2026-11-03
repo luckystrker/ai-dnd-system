@@ -5,15 +5,22 @@ on:
   pull_request:
 
 jobs:
-  test:
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-go@v5
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+          go-version-file: go.mod
+          cache: true
+      - run: gofmt -l cmd internal | tee /tmp/gofmt.txt && test ! -s /tmp/gofmt.txt
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go build ./...
+      # Бинарь бота: -trimpath и версия из git.
+      - run: go build -trimpath -ldflags "-s -w -X main.version=${{ github.sha }} -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/ai-dnd ./cmd/bot
+      # Офлайн-eval: скриптованные траектории и валидация набора, без ключей.
+      - run: go test ./internal/evalgame/ ./internal/evalrun/ ./internal/calibrate/ -count=1 -v
+      - run: go run ./cmd/eval -check-only
+      - run: go run ./cmd/eval -telegram

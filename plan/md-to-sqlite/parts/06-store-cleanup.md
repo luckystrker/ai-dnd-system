@@ -1,5 +1,10 @@
 # Часть 06 — удаление MD-стора из `store.ts`
 
+> **Исторический документ (TS/eve).** Часть плана, выполненного до миграции на
+> Go (слайс 8): пути `agent/...ts`, `scripts/...ts`, `test/...ts` и команды
+> `npm ...` относятся к удалённой TS-версии и видны только в истории git.
+> Реализация живёт в `internal/`; актуальный план — `plan/ago-migration/PLAN.md`.
+
 **Цель**: убрать `MarkdownCampaignStore`, выбор стора по `CAMPAIGN_STORE` и
 всю MD-инфраструктуру из `agent/lib/campaigns/store.ts` и `frontmatter.ts`.
 После этой части чтение MD в `agent/` отсутствует полностью.

@@ -1,0 +1,164 @@
+package tools
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/luckystriker/ai-dnd-system/internal/store"
+)
+
+type fakeDayCloser struct {
+	called     bool
+	campaignID string
+	closedDay  int
+	ctx        context.Context
+}
+
+func (f *fakeDayCloser) CloseDay(ctx context.Context, campaign *store.Campaign, closedDay int) error {
+	f.called = true
+	f.campaignID = campaign.ID
+	f.closedDay = closedDay
+	f.ctx = ctx
+	return nil
+}
+
+type dayCtxKey struct{}
+
+func TestAdvanceDayAndDayCloser(t *testing.T) {
+	env := newTestEnv(t)
+	closer := &fakeDayCloser{}
+	env.deps.DayCloser = closer
+
+	turnCtx := context.WithValue(context.Background(), dayCtxKey{}, "turn-token")
+	result, err := env.deps.advanceDay(turnCtx, env.player, advanceDayArgs{Note: ptr("ночёвка")})
+	if err != nil {
+		t.Fatalf("advanceDay: %v", err)
+	}
+	if !closer.called || closer.closedDay != 1 || closer.campaignID != env.campaign.ID {
+		t.Fatalf("closer = %+v", closer)
+	}
+	if closer.ctx == nil || closer.ctx.Value(dayCtxKey{}) != "turn-token" {
+		t.Fatalf("DayCloser не получил контекст хода: %v", closer.ctx)
+	}
+	payload := result.(map[string]any)
+	if payload["previousDay"] != 1 || payload["day"] != 2 {
+		t.Fatalf("result = %+v", payload)
+	}
+	if payload["closed"] != false || payload["queued"] != true {
+		t.Fatalf("result = %+v", payload)
+	}
+	if !strings.Contains(payload["note"].(string), "поставлено в очередь") {
+		t.Fatalf("note = %v", payload["note"])
+	}
+	updated, _ := env.store.GetCampaign(env.campaign.ID)
+	if updated.CurrentDay == nil || *updated.CurrentDay != 2 || updated.TimeOfDay == nil || *updated.TimeOfDay != store.TimeMorning {
+		t.Fatalf("campaign = %+v", updated)
+	}
+	day, _ := env.store.ReadDay(env.campaign.Slug, 2)
+	if day == nil || day.Note == nil || *day.Note != "ночёвка" {
+		t.Fatalf("day = %+v", day)
+	}
+}
+
+// Без closer тул не просит модель вызывать летописца вручную.
+func TestAdvanceDayWithoutCloserDoesNotMentionChronicler(t *testing.T) {
+	env := newTestEnv(t)
+	result, err := env.deps.advanceDay(context.Background(), env.player, advanceDayArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := result.(map[string]any)["note"].(string)
+	if strings.Contains(note, "chronicler") {
+		t.Fatalf("note = %q", note)
+	}
+	if result.(map[string]any)["queued"] != false {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+type failingDayCloser struct{ calls int }
+
+func (f *failingDayCloser) CloseDay(context.Context, *store.Campaign, int) error {
+	f.calls++
+	return context.DeadlineExceeded
+}
+
+func TestAdvanceDayCloserFailureDoesNotAskRetry(t *testing.T) {
+	env := newTestEnv(t)
+	closer := &failingDayCloser{}
+	env.deps.DayCloser = closer
+	result, err := env.deps.advanceDay(context.Background(), env.player, advanceDayArgs{})
+	if err != nil {
+		t.Fatalf("advanceDay не должен падать после сдвига дня: %v", err)
+	}
+	payload := result.(map[string]any)
+	if payload["closed"] != false || !strings.Contains(payload["note"].(string), "повторный вызов advance_day не нужен") {
+		t.Fatalf("result = %+v", payload)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("closer calls = %d", closer.calls)
+	}
+	updated, _ := env.store.GetCampaign(env.campaign.ID)
+	if updated.CurrentDay == nil || *updated.CurrentDay != 2 {
+		t.Fatalf("день сдвинут неправильно: %+v", updated.CurrentDay)
+	}
+}
+
+func TestAdvanceDayForbiddenForOutsider(t *testing.T) {
+	env := newTestEnv(t)
+	_, err := env.deps.advanceDay(context.Background(), env.outsider, advanceDayArgs{})
+	wantToolCode(t, err, CodeAccessDenied)
+}
+
+func TestAdvanceTimeAndWeather(t *testing.T) {
+	env := newTestEnv(t)
+
+	first, err := env.deps.advanceTime(env.player, advanceTimeArgs{})
+	if err != nil {
+		t.Fatalf("advanceTime: %v", err)
+	}
+	if first.(map[string]any)["timeOfDay"] != "day" {
+		t.Fatalf("first = %+v", first)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := env.deps.advanceTime(env.player, advanceTimeArgs{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrapped, err := env.deps.advanceTime(env.player, advanceTimeArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrapped.(map[string]any)["timeOfDay"] != "morning" || !strings.Contains(wrapped.(map[string]any)["note"].(string), "advance_day") {
+		t.Fatalf("wrapped = %+v", wrapped)
+	}
+	if _, err := env.deps.advanceTime(env.player, advanceTimeArgs{TimeOfDay: ptr("noon")}); err == nil {
+		t.Fatal("noon должен отклоняться")
+	}
+
+	if _, err := env.deps.setWeather(env.player, setWeatherArgs{Weather: "туман"}); err != nil {
+		t.Fatalf("setWeather: %v", err)
+	}
+	updated, _ := env.store.GetCampaign(env.campaign.ID)
+	if updated.Weather == nil || *updated.Weather != "туман" {
+		t.Fatalf("weather = %+v", updated.Weather)
+	}
+}
+
+func TestGetGameContextForMember(t *testing.T) {
+	env := newTestEnv(t)
+	result, err := env.deps.getGameContext(env.player)
+	if err != nil {
+		t.Fatalf("getGameContext: %v", err)
+	}
+	payload := result.(map[string]any)
+	campaign := payload["campaign"].(map[string]any)
+	if campaign["slug"] != env.campaign.Slug {
+		t.Fatalf("campaign = %+v", campaign)
+	}
+	characters := payload["characters"].([]map[string]any)
+	if len(characters) != 1 || characters[0]["name"] != "Ария" {
+		t.Fatalf("characters = %+v", characters)
+	}
+}

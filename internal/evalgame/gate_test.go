@@ -1,0 +1,312 @@
+package evalgame
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/luckystrker/ago/eval"
+)
+
+// Пороги утверждены владельцем (PLAN, решение 30). Тест фиксирует решение,
+// чтобы утверждённые числа нельзя было тихо поменять.
+func TestDefaultGateApprovedThresholds(t *testing.T) {
+	t.Parallel()
+
+	gate := DefaultGate()
+	if gate.MinPassRate != 0.75 {
+		t.Fatalf("общий порог %.2f, want 0.75", gate.MinPassRate)
+	}
+	want := map[string]float64{
+		"agency": 0.70, "rolls": 0.80, "checks": 0.60, "combat": 0.60,
+		"memory": 0.80, "day": 0.80, "neutrality": 0.60, "group": 0.60,
+	}
+	for name, value := range want {
+		if gate.Categories[name] != value {
+			t.Errorf("порог %q = %.2f, want %.2f", name, gate.Categories[name], value)
+		}
+	}
+	wantRequired := []string{
+		"agency-03-group-help-wait", "memory-01-damage-on-player-turn",
+		"day-01-overnight-rest", "rolls-01-skill-check-public",
+	}
+	if strings.Join(gate.Required, ",") != strings.Join(wantRequired, ",") {
+		t.Fatalf("обязательные кейсы %v, want %v", gate.Required, wantRequired)
+	}
+}
+
+func TestParseCategoryThresholds(t *testing.T) {
+	t.Parallel()
+
+	parsed, err := ParseCategoryThresholds("agency=0.7, memory=0.8")
+	if err != nil {
+		t.Fatalf("ParseCategoryThresholds: %v", err)
+	}
+	if parsed["agency"] != 0.7 || parsed["memory"] != 0.8 {
+		t.Fatalf("пороги разобраны неверно: %v", parsed)
+	}
+	for _, bad := range []string{"agency", "agency=2", "agency=x"} {
+		if _, err := ParseCategoryThresholds(bad); err == nil {
+			t.Fatalf("%q должен отклоняться", bad)
+		}
+	}
+}
+
+func TestGateViolations(t *testing.T) {
+	t.Parallel()
+
+	report := &Report{
+		PassRate: 0.5,
+		Categories: map[string]CategorySummary{
+			"memory": {Cases: 2, Passed: 2, PassRate: 1},
+			"day":    {Cases: 1, Passed: 0, PassRate: 0},
+		},
+		Cases: []CaseReport{
+			{Name: "memory-01-damage-on-player-turn", Passes: 1, Repeats: 1, PassPowK: true},
+			{Name: "day-01-overnight-rest", Passes: 0, Repeats: 1},
+		},
+		Run: &eval.RunResult{},
+	}
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "memory-01-damage-on-player-turn", Passes: 2, Repeats: 3, PassAtK: true},
+		{Name: "day-01-overnight-rest", Passes: 0, Repeats: 3},
+	}}
+	gate := Gate{
+		MinPassRate: 0.8,
+		Categories:  map[string]float64{"memory": 0.8, "day": 0.5, "agency": 0.5},
+		Required:    []string{"memory-01-damage-on-player-turn", "day-01-overnight-rest", "rolls-01-skill-check-public"},
+	}
+	violations := gate.Violations(report, repeats)
+	if len(violations) != 5 {
+		t.Fatalf("ожидалось 5 нарушений, получено %d: %v", len(violations), violations)
+	}
+	joined := ""
+	for _, item := range violations {
+		joined += item + "\n"
+	}
+	for _, want := range []string{"общий pass rate", "категория \"day\"", "категория \"agency\"", "day-01-overnight-rest", "rolls-01-skill-check-public"} {
+		if !containsText(joined, want) {
+			t.Fatalf("нет нарушения %q в %s", want, joined)
+		}
+	}
+}
+
+// Решение 46: обязательный кейс проходит при 2 из 3 повторов, даже если в
+// полном прогоне -n 1 он провалился.
+func TestGateRequiredTwoOfThree(t *testing.T) {
+	t.Parallel()
+
+	full := passingReport()
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 2, Repeats: 3, PassAtK: true},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 2, Repeats: 3, PassAtK: true},
+	}}
+	gate := DefaultGate()
+	violations := gate.Violations(full, repeats)
+	if len(violations) > 0 {
+		t.Fatalf("2/3 должны проходить, нарушения: %v", violations)
+	}
+}
+
+// 1 из 3 — не проходит.
+func TestGateRequiredOneOfThree(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 1, Repeats: 3},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "agency-03-group-help-wait") {
+		t.Fatalf("1/3 должен проваливать гейт, нарушения: %v", violations)
+	}
+}
+
+// Обязательного кейса нет в отчёте повторов — провал с явным сообщением.
+func TestGateRequiredMissingInRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "нет в отчёте повторов") {
+		t.Fatalf("отсутствующий кейс должен проваливать гейт, нарушения: %v", violations)
+	}
+}
+
+// Отчёт повторов не передан — явная ошибка, а не возврат к старому правилу.
+func TestGateRequiredReportMissing(t *testing.T) {
+	t.Parallel()
+
+	violations := DefaultGate().Violations(passingReport(), nil)
+	if len(violations) != 1 || !containsText(violations[0], "не передан отчёт повторов") {
+		t.Fatalf("нужно явное нарушение про отсутствующий отчёт повторов, получено: %v", violations)
+	}
+}
+
+// Отчёт повторов с недостаточным числом прогонов тоже проваливает: правило
+// «2 из 3» требует трёх повторов.
+func TestGateRequiredNeedsThreeRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 1, Repeats: 1, PassPowK: true},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "нужно не меньше 3") {
+		t.Fatalf("один повтор не должен считаться 2 из 3: %v", violations)
+	}
+}
+
+// Сообщение о провале считает требуемый минимум под фактическое число
+// повторов: при 5 повторах нужно 4, а не «2 из 3».
+func TestGateRequiredMessageUsesActualRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 3, Repeats: 5},
+		{Name: "memory-01-damage-on-player-turn", Passes: 5, Repeats: 5, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 5, Repeats: 5, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 5, Repeats: 5, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 {
+		t.Fatalf("ожидалось одно нарушение, получено: %v", violations)
+	}
+	if !containsText(violations[0], "3/5") || !containsText(violations[0], "≥4") {
+		t.Fatalf("сообщение не называет фактический минимум: %s", violations[0])
+	}
+	if containsText(violations[0], "из 3") {
+		t.Fatalf("сообщение по-прежнему говорит «2 из 3»: %s", violations[0])
+	}
+}
+
+// passingReport — полный прогон -n 1, проходящий все пороги и без обязательных
+// кейсов в проверке (обязательные проверяются по отчёту повторов).
+func passingReport() *Report {
+	categories := map[string]CategorySummary{}
+	for name := range DefaultGate().Categories {
+		categories[name] = CategorySummary{Cases: 1, Passed: 1, PassRate: 1}
+	}
+	return &Report{PassRate: 1, Categories: categories, Run: &eval.RunResult{}}
+}
+
+// Голый eval.RunResult (старый/чужой файл) не содержит категорий; гейт должен
+// явно сказать об этом, а не рапортовать «категория X: нет кейсов».
+func TestGateRejectsBareRunResult(t *testing.T) {
+	t.Parallel()
+
+	report := &Report{Run: &eval.RunResult{Cases: []eval.CaseResult{{Name: "rolls-01", Passed: true}}}}
+	violations := Gate{Categories: map[string]float64{"rolls": 0.5}}.Violations(report, nil)
+	if len(violations) == 0 || !containsText(violations[0], "без категорий") {
+		t.Fatalf("ожидалось явное нарушение про отчёт без категорий, получено: %v", violations)
+	}
+}
+
+func TestRegressionViolations(t *testing.T) {
+	t.Parallel()
+
+	baseline := &eval.RunResult{Cases: []eval.CaseResult{
+		{Name: "rolls-01", Passed: true},
+		{Name: "day-01", Passed: true},
+	}}
+	current := &eval.RunResult{Cases: []eval.CaseResult{
+		{Name: "rolls-01", Passed: false},
+		{Name: "day-01", Passed: true},
+		{Name: "checks-05", Passed: true},
+	}}
+	violations := RegressionViolations(current, baseline)
+	if len(violations) != 1 || !containsText(violations[0], "rolls-01") {
+		t.Fatalf("ожидалась одна регрессия rolls-01, получено: %v", violations)
+	}
+}
+
+// Калибровка судьи: обвязка различает good/bad по вердикту скорера. Живой
+// прогон проверяет то же самое настоящим судьёй (cmd/eval -judge-calibration).
+func TestCalibrateSeparatesGoodAndBad(t *testing.T) {
+	t.Parallel()
+
+	cases := []CalibrationCase{
+		{ID: "good-1", Label: "good", Rubric: "agency", Answer: "мир ждёт"},
+		{ID: "good-2", Label: "good", Rubric: "agency", Answer: "тоже ждёт"},
+		{ID: "bad-1", Label: "bad", Rubric: "agency", Answer: "Дэн кивает"},
+		{ID: "bad-2", Label: "bad", Rubric: "agency", Answer: "Дэн смеётся"},
+	}
+	report := Calibrate(context.Background(), cases, func(rubric string) eval.Scorer {
+		return fakeJudge{fail: "Дэн", rubric: rubric}
+	})
+	if !report.Passed {
+		t.Fatalf("калибровка должна пройти: %+v", report)
+	}
+	if report.GoodPassed != 2 || report.BadFailed != 2 || report.Accuracy != 1 {
+		t.Fatalf("неверная сводка: %+v", report)
+	}
+}
+
+func TestCalibrateFailsWhenJudgeAcceptsBadAnswer(t *testing.T) {
+	t.Parallel()
+
+	cases := []CalibrationCase{
+		{ID: "good-1", Label: "good", Rubric: "agency", Answer: "мир ждёт"},
+		{ID: "bad-1", Label: "bad", Rubric: "agency", Answer: "Дэн кивает"},
+	}
+	report := Calibrate(context.Background(), cases, func(rubric string) eval.Scorer {
+		return fakeJudge{fail: "ничего", rubric: rubric}
+	})
+	if report.Passed {
+		t.Fatal("судья, который всё принимает, не должен проходить калибровку")
+	}
+}
+
+func TestLoadCalibration(t *testing.T) {
+	t.Parallel()
+
+	items, err := LoadCalibration(filepath.Join("..", "..", "eval", "judge", "calibration.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadCalibration: %v", err)
+	}
+	if len(items) < 6 {
+		t.Fatalf("нужно минимум 3 good и 3 bad, получено %d", len(items))
+	}
+	good, bad := 0, 0
+	for _, item := range items {
+		switch item.Label {
+		case "good":
+			good++
+		case "bad":
+			bad++
+		}
+	}
+	if good < 3 || bad < 3 {
+		t.Fatalf("good=%d bad=%d, нужно по 3+", good, bad)
+	}
+}
+
+type fakeJudge struct {
+	fail   string
+	rubric string
+}
+
+func (f fakeJudge) Name() string { return "judge" }
+
+func (f fakeJudge) Score(_ context.Context, trace *eval.Trace) (eval.Score, error) {
+	passed := !containsText(trace.FinalResponse, f.fail)
+	value := 0.0
+	if passed {
+		value = 1
+	}
+	return eval.Score{Name: f.Name(), Value: value, Passed: passed, Details: map[string]any{"rubric": f.rubric}}, nil
+}
+
+func containsText(haystack, needle string) bool { return strings.Contains(haystack, needle) }

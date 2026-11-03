@@ -1,34 +1,33 @@
 # deploy/ — ops-референс и инфраструктура VPS
 
-Стек: **bare metal + systemd + Caddy**. Ручной деплой, ночные бэкапы по cron.
-Подробное пошаговое руководство — в корневом `README.md` (раздел «Деплой на VPS»).
-Здесь — справочник для эксплуатации и диагностики.
+Стек: **bare metal + systemd, long-poll**. Один Go-бинарь, без Caddy, webhook и
+Node. До миграции (слайс 8, PLAN) бот работал на eve/TypeScript с Nitro и
+Caddy — этот путь удалён из репозитория и живёт только в истории git.
 
 ## Что где лежит
 
 | Файл | Назначение |
 |------|------------|
-| `setup.sh` | Первичная установка на свежем VPS (run-once). Ставит Node 24 + Caddy, клонирует репо, собирает билд, ставит systemd-юнит и Caddyfile. |
-| `backup.sh` | Бэкап `data/campaigns.db` (SQLite `.backup` + WAL-чекпоинт), ротация 14 копий. Готов к cron. |
-| `../deploy.sh` | Обновление бота (в корне репо): `git pull → npm ci → build → restart + health-check`. |
-| `caddy/Caddyfile` | Reverse proxy + авто-TLS (Let's Encrypt). Проксирует на `127.0.0.1:3000`. |
-| `systemd/ai-dnd.service` | Supervisor-юнит. `User=ai-dnd`, `EnvironmentFile=.env`, `Restart=on-failure`. |
+| `setup.sh` | Первичная установка на свежем VPS (run-once): Go, пользователь, клон, сборка `bin/ai-dnd`, systemd-юнит. |
+| `backup.sh` | Бэкап `data/campaigns.db` через `sqlite3 .backup` (целостный снимок на живой WAL-базе), проверка `integrity_check`, ротация 14 копий. Готов к cron. |
+| `../deploy.sh` | Обновление: `git pull → go build → restart + проверка`. |
+| `systemd/ai-dnd.service` | Боевой Go-юнит: `EnvironmentFile=.env`, `Restart=on-failure`, graceful shutdown 15 с + запас, харденинг. |
+| `start-polling.sh` | Ручной запуск Go-бинаря (long-poll встроен): замена двум tmux-сессиям TS-версии. |
 
-## Топология
+## Топология (Go)
 
 ```
-Telegram ──HTTPS──▶ Caddy (:80, :443, авто-TLS)
-                      │  reverse_proxy
-                      ▼
-                 eve-сервер (Nitro) ──▶ 127.0.0.1:3000  [systemd: ai-dnd.service]
-                      │
-                      ├── /opt/ai-dnd-system/.output/   (билд)
-                      ├── /opt/ai-dnd-system/data/      (SQLite — ПЕРСИСТЕНТНО)
-                      └── /opt/ai-dnd-system/.env       (секреты, читает systemd)
+Telegram ──long-poll getUpdates──▶ ai-dnd (Go) [systemd: ai-dnd.service]
+                                     │
+                                     ├── /opt/ai-dnd-system/bin/ai-dnd  (бинарь)
+                                     ├── /opt/ai-dnd-system/data/       (SQLite — ПЕРСИСТЕНТНО)
+                                     │     ├── campaigns.db (+ -wal, -shm)
+                                     │     └── .skills/                 (материализуются при старте)
+                                     └── /opt/ai-dnd-system/.env        (секреты, читает systemd)
 ```
 
-Один процесс, горизонтальное масштабирование не предусмотрено (SQLite + in-memory
-rate-limiter). Этого достаточно для одного бота на одном VPS.
+Один процесс, SQLite и in-memory rate-limiter. Горизонтальное масштабирование
+не предусмотрено: один бот на одном VPS.
 
 ## Типовые операции
 
@@ -40,15 +39,15 @@ cd /opt/ai-dnd-system
 ./deploy.sh --skip-backup   # быстро, без бэкапа
 ```
 
-Скрипт делает health-check (`/eve/v1/health`) после рестарта. Если сервис не
-поднялся за 60с — деплой считается провалившимся, в stderr выводятся последние
-40 строк лога.
+Скрипт пересобирает `bin/ai-dnd`, перезапускает юнит и ждёт, пока процесс
+стабильно живёт после рестарта. У Go-бота нет HTTP-порта: health-check — это
+`systemctl is-active` + отсутствие немедленного падения. Логи — journald.
 
 ### Откатить версию
 
 ```bash
 cd /opt/ai-dnd-system
-sudo -u ai-dnd git log --oneline -10          # найти предыдущий коммит
+sudo -u ai-dnd git log --oneline -10
 sudo -u ai-dnd git checkout <commit-sha>
 ./deploy.sh --skip-backup
 ```
@@ -57,58 +56,59 @@ sudo -u ai-dnd git checkout <commit-sha>
 
 ```bash
 sudo systemctl stop ai-dnd
-# Бэкап лежит в /opt/ai-dnd-system/data/backups/<timestamp>/
 BACKUP=/opt/ai-dnd-system/data/backups/20260101T030000Z
 
-# 1. SQLite (вся память кампаний — журнал, NPC, локации, world-state и т.п.)
+# SQLite (вся память кампаний — журнал, NPC, локации, world-state и т.п.)
+sqlite3 "$BACKUP/campaigns.db" "PRAGMA integrity_check;"
 cp "$BACKUP/campaigns.db" /opt/ai-dnd-system/data/campaigns.db
+rm -f /opt/ai-dnd-system/data/campaigns.db-wal /opt/ai-dnd-system/data/campaigns.db-shm
 
 sudo -u ai-dnd chown -R ai-dnd:ai-dnd /opt/ai-dnd-system/data
 sudo systemctl start ai-dnd
-curl -s http://127.0.0.1:3000/eve/v1/health
 ```
 
-### Изменить секрет webhook'а или токен
+### Откат на TS невозможен
 
-```bash
-sudo -u ai-dnd nano /opt/ai-dnd-system/.env   # правим TELEGRAM_*
-sudo systemctl restart ai-dnd
-# Перерегистрируем webhook с новым секретом:
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://ВАШ-ДОМЕН/eve/v1/telegram",
-       "secret_token":"'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
-       "allowed_updates":["message","callback_query"]}'
-```
+`ai-dnd-ts.service`, `start-polling-ts.sh` и `caddy/` удалены в слайсе 8: с
+этого момента деплой — только Go-бинарь. Если понадобится старый код, его
+можно посмотреть в истории git (`git log` до коммита слайса 8), но
+рабочего пути деплоя для него в репозитории больше нет.
 
 ## Типовые проблемы
 
 | Симптом | Что проверить |
 |---------|---------------|
-| Бот не отвечает на сообщения | `curl "https://api.telegram.org/bot$TOKEN/getWebhookInfo"` — поле `last_error_message`. Частые причины: неверный `secret_token`, протухший TLS, 5xx от сервера. |
-| Сервис не стартует | `journalctl -u ai-dnd -n 50 --no-pager`. Проверь `.env` (особенно `LLM_API_KEY`, `TELEGRAM_BOT_TOKEN`), что `npm run build` отработал, что Node 24. |
-| Caddy не получает сертификат | `journalctl -u caddy -n 50`. Убедись, что A-запись домена указывает на IP сервера, порты 80/443 открыты в файрволе, домен в Caddyfile указан верно. |
-| 502 Bad Gateway | eve-сервер не поднялся или слушает не тот порт. `systemctl status ai-dnd`, `curl 127.0.0.1:3000/eve/v1/health`. |
-| База занята / `SQLITE_BUSY` | Один процесс писателя; при 502+ очередях проверь, что не запущен второй экземпляр (`ps aux \| grep node`). |
-| `better-sqlite3` не грузится | Сборка проходила не под тем пользователем/arch. Пересобери: `sudo -u ai-dnd npm ci` из `/opt/ai-dnd-system`. |
-| В group-чате бот видит не все сообщения | Включён privacy mode. BotFather → `/setprivacy` → Disable, либо сделать бота админом группы. |
+| Бот не отвечает на сообщения | `journalctl -u ai-dnd -n 100`. Частые причины: неверный `TELEGRAM_BOT_TOKEN`, `LLM_API_KEY`, 401/400 от провайдера. |
+| `HTTP 400 MissingSessionID` от OpenCode Go | Бот должен слать `x-opencode-session`; в Go это делает `internal/llm` (реегрессия — тест `TestOpenCodeGoSessionHeader`). |
+| Сервис не стартует | `journalctl -u ai-dnd -n 50`. `bin/ai-dnd -check` проверяет env без сети. |
+| `SQLITE_BUSY` | Один процесс-писатель. Проверь, не запущен ли второй экземпляр: `ps aux \| grep ai-dnd`. |
+| Нет сообщений в group-чате | Включён privacy mode. BotFather → `/setprivacy` → Disable, либо сделать бота админом группы. |
+| Старые дни без саммари | Очередь летописца закрывает последние `DAYCLOSE_BACKFILL_DAYS` дней; более старые — детерминированный дайджест. Смотри `dayclose:` в логе. |
+| Бэкап не создаётся | `sqlite3` в PATH и права `ai-dnd` на `data/`. Скрипт падает, если снимок не прошёл `integrity_check`. |
 
 ## Что персистентно, что эфемерно
 
 | Путь | Статус | Содержит |
 |------|--------|----------|
-| `data/campaigns.db` (+`-wal`, `-shm`) | **БЭКАПИТЬ** | кампании, участники, персонажи, квесты, треды, транскрипты дней, саммари, NPC/локации/фракции, лут-леджер, world-state, снимок боя |
+| `data/campaigns.db` (+`-wal`, `-shm`) | **БЭКАПИТЬ** | кампании, участники, персонажи, квесты, треды, транскрипты дней, саммари, NPC/локации/фракции, лут-леджер, world-state, снимок боя, durable-inbox и `event_streams` |
+| `data/.skills` | эфемерно | встроенные скиллы, перезаписываются при старте |
 | `.env` | **ХРАНИТЬ** (вне репо) | секреты |
-| `.eve/` | эфемерно | трейсы, локи, билды, sandbox-кэш — пересоздаётся |
-| `.output/` | эфемерно | билд-артефакт — пересобирается `deploy.sh` |
+| `bin/ai-dnd` | пересобирается | Go-бинарь с версией из git |
 | `data/backups/` | ротация | сами бэкапы (14 последних) |
 
 ## Важно
 
-- **`eve start` не читает `.env`** — переменные инжектирует systemd через
-  `EnvironmentFile`. Поэтому `.env` обязателен в `/opt/ai-dnd-system/`.
-- **better-sqlite3 — native addon**, держится external в билде. На типичном
-  Linux x64/arm64 берётся prebuilt-бинарник, компилятор не нужен. При смене arch
-  (например, x86→arm) — пересобери `npm ci` под целевую платформу.
+- **`EnvironmentFile=.env`**: Go-бот не читает `.env` сам в systemd-режиме —
+  переменные инжектирует systemd. Для ручного запуска `start-polling.sh`
+  подгружает `.env`.
+- **Graceful shutdown**: `KillSignal=SIGTERM`, `TimeoutStopSec=25`. Ходы
+  дожидаются до 15 с, затем отменяются; очередь летописца и база закрываются.
+  Не уменьшайте таймаут: SIGKILL посреди записи в SQLite оставит WAL-хвост
+  (база восстановится, но может потерять последний ход).
+- **Харденинг**: `ProtectSystem=strict` + `ReadWritePaths=data`. Если перенести
+  базу из `data/`, добавьте её каталог в `ReadWritePaths`, иначе Get/Set
+  упадут с `read-only file system`. `CAMPAIGN_DB_PATH` обязан указывать внутрь
+  `data/` (вместе с `.skills` и бэкапами): нестандартный абсолютный путь вне
+  `data/` без правки юнита не заработает.
 - **rate-limiter in-memory** — один процесс. Для нескольких инстансов нужен
-  общий стор (Redis и т.п.), но для одиночного бота это неактуально.
+  общий стор (Redis и т.п.), для одиночного бота неактуально.

@@ -1,14 +1,15 @@
-# systemd-юнит для TTRPG-бота (eve, Nitro node-server).
-# Установка: см. deploy/setup.sh (символическая ссылка в /etc/systemd/system/).
+# systemd-юнит для TTRPG-бота на Go (ago, long-poll).
+# Установка: deploy/setup.sh кладёт символическую ссылку в /etc/systemd/system/.
 #
 # Управление:
 #   sudo systemctl start ai-dnd
 #   sudo systemctl restart ai-dnd
-#   sudo systemctl status ai-dnd
-#   journalctl -u ai-dnd -f         # логи в реальном времени
+#   systemctl status ai-dnd
+#   journalctl -u ai-dnd -f
+#
 
 [Unit]
-Description=AI D&D Telegram Bot (eve agent)
+Description=AI D&D Telegram Bot (Go, ago)
 Documentation=https://github.com/luckystrker/ai-dnd-system
 After=network-online.target
 Wants=network-online.target
@@ -19,32 +20,45 @@ User=ai-dnd
 Group=ai-dnd
 WorkingDirectory=/opt/ai-dnd-system
 
-# ВАЖНО: eve start НЕ читает .env автоматически. Переменные инжектируем отсюда.
-# .env должен содержать LLM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME,
-# TELEGRAM_WEBHOOK_SECRET_TOKEN и (опционально) CAMPAIGN_*, RATE_LIMIT_*.
+# Go-бот сам читает переменные из окружения процесса: systemd отдаёт .env.
+# В .env: LLM_PROVIDER/LLM_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME,
+# опционально CAMPAIGN_DB_PATH и лимиты хода.
 EnvironmentFile=/opt/ai-dnd-system/.env
 
-# eve start → node .output/server/index.mjs (порт из $PORT/$NITRO_PORT, по умолч. 3000).
-ExecStart=/usr/bin/npm start
+# Long-poll встроен в бинарь: отдельный poll-процесс/webhook/Caddy не нужен.
+ExecStart=/opt/ai-dnd-system/bin/ai-dnd -mode telegram
 
-# Корректный drain по SIGTERM (eve ставит обработчик → закрывает сокет).
+# Graceful shutdown: канал перестаёт опрашивать Telegram, дожидается идущих
+# ходов до 15 с (shutdownTimeout в cmd/bot), закрывает очередь летописца и
+# базу. TimeoutStopSec с запасом +10 с, иначе systemd убьёт процесс на
+# середине записи в SQLite.
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=25
 
 Restart=on-failure
 RestartSec=5s
 
-# Безопасность: ограничиваем права. better-sqlite3 нужен доступ к data/.
+# Харденинг. ProtectSystem=strict делает /opt только для чтения; запись
+# разрешена лишь в data/ (SQLite, WAL, .skills, backups).
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/ai-dnd-system/data /opt/ai-dnd-system/.eve
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/opt/ai-dnd-system/data
+UMask=0027
 
 # Ограничения ресурсов (можно убрать при необходимости).
 MemoryMax=1G
 
-# Логи идут в journald (stdout/stderr перехватываются автоматически).
+# Логи идут в journald.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ai-dnd

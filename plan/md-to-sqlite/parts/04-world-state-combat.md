@@ -1,5 +1,10 @@
 # Часть 04 — состояние мира и снимок боя на SQLite
 
+> **Исторический документ (TS/eve).** Часть плана, выполненного до миграции на
+> Go (слайс 8): пути `agent/...ts`, `scripts/...ts`, `test/...ts` и команды
+> `npm ...` относятся к удалённой TS-версии и видны только в истории git.
+> Реализация живёт в `internal/`; актуальный план — `plan/ago-migration/PLAN.md`.
+
 **Цель**: переписать `agent/lib/campaigns/world-state.ts` и
 `agent/lib/campaigns/combat-store.ts` на SQLite, сохранив публичные функции.
 

@@ -4,6 +4,9 @@
 #
 # Что бэкапим:
 #   - SQLite-БД:     data/campaigns.db  (через sqlite3 .backup — согласованно с активным WAL)
+#                     Копировать campaigns.db напрямую нельзя: в WAL часть данных
+#                     лежит в -wal, и файл получится несогласованным. .backup
+#                     (или VACUUM INTO) снимает целостный снимок на живой базе.
 #                     вся память кампаний — кампании, журнал, NPC, локации, фракции,
 #                     лут-леджер, world-state, combat — в одной базе
 #
@@ -47,7 +50,9 @@ if [[ -f "$DB_PATH" ]]; then
   # Чекпоинт WAL перед копией, чтобы файлы -wal/-shm не остались непустыми.
   sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
   sqlite3 "$DB_PATH" ".backup '$dest/$(basename "$DB_PATH")'"
-  echo "    ✓ $(basename "$DB_PATH")"
+  check="$(sqlite3 "$dest/$(basename "$DB_PATH")" "PRAGMA integrity_check;" 2>/dev/null || true)"
+  [[ "$check" == "ok" ]] || die "бэкап $dest/$(basename "$DB_PATH") не прошёл integrity_check: $check"
+  echo "    ✓ $(basename "$DB_PATH") (integrity_check ok)"
 else
   echo "  • БД $DB_PATH не найдена — пропускаю (бот ещё не запускался?)."
 fi

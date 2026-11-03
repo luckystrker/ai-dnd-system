@@ -1,5 +1,11 @@
 # Scene Illustrations via Runware
 
+> **Исторический документ (TS/eve).** Спецификация написана до миграции на Go
+> (слайс 8); пути `agent/...`, `scripts/...` относятся к удалённой TS-версии и
+> видны только в истории git. Реализация перенесена в Go
+> (`internal/tools/illustrate_tool.go`, `runware.go`); актуальная
+> документация — `README.md`, `AGENTS.md`.
+
 Дата: 2026-08-05
 Статус: approved
 
