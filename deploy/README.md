@@ -1,8 +1,8 @@
 # deploy/ — ops-референс и инфраструктура VPS
 
 Стек: **bare metal + systemd, long-poll**. Один Go-бинарь, без Caddy, webhook и
-Node. Старый TS-путь (eve + Nitro + Caddy) сохранён до слайса 8 — см. раздел
-«Откат на TS».
+Node. До миграции (слайс 8, PLAN) бот работал на eve/TypeScript с Nitro и
+Caddy — этот путь удалён из репозитория и живёт только в истории git.
 
 ## Что где лежит
 
@@ -10,12 +10,9 @@ Node. Старый TS-путь (eve + Nitro + Caddy) сохранён до сл�
 |------|------------|
 | `setup.sh` | Первичная установка на свежем VPS (run-once): Go, пользователь, клон, сборка `bin/ai-dnd`, systemd-юнит. |
 | `backup.sh` | Бэкап `data/campaigns.db` через `sqlite3 .backup` (целостный снимок на живой WAL-базе), проверка `integrity_check`, ротация 14 копий. Готов к cron. |
-| `../deploy.sh` | Обновление: `git pull → go build → restart + проверка`. `--ts` — старый npm-путь. |
+| `../deploy.sh` | Обновление: `git pull → go build → restart + проверка`. |
 | `systemd/ai-dnd.service` | Боевой Go-юнит: `EnvironmentFile=.env`, `Restart=on-failure`, graceful shutdown 15 с + запас, харденинг. |
-| `systemd/ai-dnd-ts.service` | **Устаревает.** Старый TS/eve-юнит для отката до слайса 8. |
-| `start-polling.sh` | Ручной запуск Go-бинаря (long-poll встроен): замена двум tmux-сессиям. |
-| `start-polling-ts.sh` | **Устаревает.** TS long-poll через tmux (до слайса 8). |
-| `caddy/Caddyfile` | **Устаревает.** Reverse proxy + авто-TLS для webhook. Go-боту не нужен; удаление — слайс 8. |
+| `start-polling.sh` | Ручной запуск Go-бинаря (long-poll встроен): замена двум tmux-сессиям TS-версии. |
 
 ## Топология (Go)
 
@@ -70,23 +67,12 @@ sudo -u ai-dnd chown -R ai-dnd:ai-dnd /opt/ai-dnd-system/data
 sudo systemctl start ai-dnd
 ```
 
-### Откат на TS (до слайса 8)
+### Откат на TS невозможен
 
-```bash
-cd /opt/ai-dnd-system
-sudo -u ai-dnd git checkout <ts-commit>
-sudo -u ai-dnd npm ci && sudo -u ai-dnd npm run build
-
-# Старый юнит (webhook + Caddy) и Caddyfile
-sudo ln -sfn /opt/ai-dnd-system/deploy/systemd/ai-dnd-ts.service /etc/systemd/system/ai-dnd-ts.service
-sudo systemctl daemon-reload
-sudo systemctl disable --now ai-dnd
-sudo systemctl enable --now ai-dnd-ts
-# и вернуть Caddy: cp deploy/caddy/Caddyfile /etc/caddy/Caddyfile && restart caddy
-```
-
-Домен/Caddy нужны только TS-пути. После слайса 8 файлы `ai-dnd-ts.service`,
-`start-polling-ts.sh` и `caddy/` удаляются.
+`ai-dnd-ts.service`, `start-polling-ts.sh` и `caddy/` удалены в слайсе 8: с
+этого момента деплой — только Go-бинарь. Если понадобится старый код, его
+можно посмотреть в истории git (`git log` до коммита слайса 8), но
+рабочего пути деплоя для него в репозитории больше нет.
 
 ## Типовые проблемы
 
@@ -95,7 +81,7 @@ sudo systemctl enable --now ai-dnd-ts
 | Бот не отвечает на сообщения | `journalctl -u ai-dnd -n 100`. Частые причины: неверный `TELEGRAM_BOT_TOKEN`, `LLM_API_KEY`, 401/400 от провайдера. |
 | `HTTP 400 MissingSessionID` от OpenCode Go | Бот должен слать `x-opencode-session`; в Go это делает `internal/llm` (реегрессия — тест `TestOpenCodeGoSessionHeader`). |
 | Сервис не стартует | `journalctl -u ai-dnd -n 50`. `bin/ai-dnd -check` проверяет env без сети. |
-| `SQLITE_BUSY` | Один процесс-писатель. Проверь, не запущен ли второй экземпляр или старый TS-бот на той же базе: `ps aux \| grep ai-dnd`. |
+| `SQLITE_BUSY` | Один процесс-писатель. Проверь, не запущен ли второй экземпляр: `ps aux \| grep ai-dnd`. |
 | Нет сообщений в group-чате | Включён privacy mode. BotFather → `/setprivacy` → Disable, либо сделать бота админом группы. |
 | Старые дни без саммари | Очередь летописца закрывает последние `DAYCLOSE_BACKFILL_DAYS` дней; более старые — детерминированный дайджест. Смотри `dayclose:` в логе. |
 | Бэкап не создаётся | `sqlite3` в PATH и права `ai-dnd` на `data/`. Скрипт падает, если снимок не прошёл `integrity_check`. |
@@ -109,7 +95,6 @@ sudo systemctl enable --now ai-dnd-ts
 | `.env` | **ХРАНИТЬ** (вне репо) | секреты |
 | `bin/ai-dnd` | пересобирается | Go-бинарь с версией из git |
 | `data/backups/` | ротация | сами бэкапы (14 последних) |
-| `.eve/`, `.output/` | эфемерно | остатки TS-версии; удаление — слайс 8 |
 
 ## Важно
 

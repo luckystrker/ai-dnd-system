@@ -5,10 +5,10 @@ import (
 	"strings"
 )
 
-// Format-функции повторяют 1:1 строки, которые TS-тулы показывают игрокам
-// (agent/tools/{skill_check,roll_dice,initiative}.ts): на эти форматы
-// опираются регексы eval-скорера quotes_roll. Слайс 4 обязан использовать
-// именно их, а не собирать текст заново.
+// Format-функции повторяют 1:1 строки, которые TS-тулы показывали игрокам (до
+// слайса 8 — `agent/tools/{skill_check,roll_dice,initiative}.ts`): на эти
+// форматы опираются регексы eval-скорера quotes_roll. Слайс 4 обязан
+// использовать именно их, а не собирать текст заново.
 
 // RollAdvantage — ярлык преимущества для roll_dice (как аргумент advantage).
 type RollAdvantage string
@@ -19,7 +19,7 @@ const (
 	AdvantageNo     RollAdvantage = "disadvantage"
 )
 
-// diceGroupLine — строка одной группы в формате roll_dice.ts.
+// diceGroupLine — строка одной группы в формате TS-версии roll_dice.
 func diceGroupLine(group DiceGroupResult) string {
 	if len(group.Pairs) > 0 {
 		pairs := make([]string, 0, len(group.Pairs))

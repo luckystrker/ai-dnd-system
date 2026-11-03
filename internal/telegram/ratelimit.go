@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// SlidingWindowLimiter — in-memory rate limiter (порт agent/lib/rate-limit.ts).
+// SlidingWindowLimiter — in-memory rate limiter (порт TS-версии; до слайса 8 —
+// `agent/lib/rate-limit.ts`).
 // Один экземпляр на процесс: бот работает одиночным инстансом.
 type SlidingWindowLimiter struct {
 	mu      sync.Mutex

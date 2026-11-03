@@ -10,7 +10,8 @@ import (
 	"github.com/luckystriker/ai-dnd-system/internal/tools"
 )
 
-// Капы памяти кампании — 1:1 с agent/instructions/campaign-context.ts.
+// Капы памяти кампании — 1:1 с TS-блоком памяти (до слайса 8 —
+// `agent/instructions/campaign-context.ts`).
 const (
 	summaryCap        = 2000
 	keyEventsCap      = 2000

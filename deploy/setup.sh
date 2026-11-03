@@ -9,7 +9,6 @@
 #   4. Ставит systemd-юнит ai-dnd (long-poll, без Caddy и webhook).
 #
 # НЕ запускает сервис — после скрипта нужно заполнить .env (см. deploy/README.md).
-# Старый TS-путь сохранён как deploy/systemd/ai-dnd-ts.service до слайса 8.
 
 set -euo pipefail
 

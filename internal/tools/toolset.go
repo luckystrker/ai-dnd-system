@@ -7,8 +7,9 @@ import (
 	agotools "github.com/luckystrker/ago/tools"
 )
 
-// ChroniclerTools — подмножество тулов летописца (как 25 файлов в
-// agent/subagents/chronicler/tools). Одна реализация с DM, без копий.
+// ChroniclerTools — подмножество тулов летописца (до слайса 8 — 25 отдельных
+// файлов в `agent/subagents/chronicler/tools`). Одна реализация с DM, без
+// копий.
 var ChroniclerTools = []string{
 	"adjust_standing",
 	"advance_time",

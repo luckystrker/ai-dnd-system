@@ -7,7 +7,6 @@
 #   systemctl status ai-dnd
 #   journalctl -u ai-dnd -f
 #
-# Старый TS-путь (eve + Caddy) сохранён как ai-dnd-ts.service до слайса 8.
 
 [Unit]
 Description=AI D&D Telegram Bot (Go, ago)

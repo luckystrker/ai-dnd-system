@@ -1,40 +1,51 @@
 ---
 name: view-sessions
-description: Dump and inspect user conversations with the TTRPG Telegram bot from local eve traces. Use when asked to show what a user/friend wrote to the bot, read bot replies, debug a conversation, or find who talked to the bot — e.g. "что писал dmkamensky", "покажи переписку", "посмотреть сессии". Triggers on scripts/dump-sessions.ts and .eve/traces.
+description: Dump and inspect player conversations with the TTRPG Telegram bot from the local SQLite database (event_streams + campaign transcripts). Use when asked to show what a user/friend wrote to the bot, read bot replies, debug a conversation, or find who talked to the bot — e.g. "что писал dmkamensky", "покажи переписку", "посмотреть сессии". Triggers on cmd/dump-sessions.
 ---
 
 # view-sessions
 
-Просмотр переписок пользователей с ботом по локальным OTLP-трейсам eve
-(`agent-service/.eve/traces/v1`). Каждая сессия (чат) — отдельный трейс с
-полной историей промптов, включая `username`, `user_id` и `chat_id`.
+Переписки пользователей с ботом читаются из SQLite-базы бота: durable-потоки
+`event_streams` (полные ходы агента, включая модель и тулы) плюс транскрипт
+кампаний (`transcript_entries`). Трейсов прежнего TS/eve-рантайма больше нет —
+этот же способ работает и для истории, записанной до миграции, потому что база
+одна и та же (`data/campaigns.db`).
 
-Скрипт: `agent-service/scripts/dump-sessions.ts` (запускать из
-`agent-service/`).
+Команда: `cmd/dump-sessions` (Go), запускать из корня репозитория.
 
 ## Запуск
 
 ```bash
-node scripts/dump-sessions.ts                 # все личные чаты (DM)
-node scripts/dump-sessions.ts <фильтр>        # username / user_id / chat_id
-node scripts/dump-sessions.ts --all           # все чаты, включая группы
+export PATH=$HOME/.local/go/bin:$PATH
+
+go run ./cmd/dump-sessions                    # все чаты
+go run ./cmd/dump-sessions <фильтр>           # username / имя / user id / chat id
+go run ./cmd/dump-sessions --all              # совместимость: и так все чаты
+go run ./cmd/dump-sessions -db /opt/ai-dnd-system/data/campaigns.db   # другая база
 ```
+
+Путь к базе берётся из `-db`, иначе из `CAMPAIGN_DB_PATH`, иначе
+`data/campaigns.db`.
 
 ## Как отвечать пользователю
 
-1. Выполните скрипт без аргументов или с фильтром, который назвал пользователь.
-2. Покажите результат компактно: для каждой сессии заголовок
-   `==== <username> | chat_id <id> | private ====`, затем переписку.
-3. Если сообщений нет или чат не найден — скрипт сам подскажет типы найденных
-   чатов; попробуйте `--all` или уточните username у пользователя.
+1. Выполните команду без аргументов или с фильтром, который назвал
+   пользователь.
+2. Покажите результат компактно: заголовок
+   `==== кампания «Название» (slug) | chat_id <id> | <status> ====`, затем
+   участники и переписку.
+3. Если ничего не найдено — команда сама подскажет типы фильтров; попробуйте
+   `--all` или уточните username у пользователя. Потоки без кампании (чат до
+   создания кампании) выводятся отдельным блоком.
 
 ## Примечания
 
-- Видны только сессии, записанные локально при `eve dev`. Если переписка
-  шла, когда бот работал на деплое, локально её нет.
-- Трейсы держатся ограниченно (~7 дней или `EVE_TRACES_MAX_AGE_MS`), старые
-  сессии могут быть вычищены.
-- В одном чате может быть несколько блоков — это разные сессии (окна трейсов)
-  одного диалога; у них одинаковый chat_id, разные session id.
-- Если кириллица в консоли кракозябрами: `chcp 65001` перед запуском.
-- При фильтре по `--all` блоки групп помечены `supergroup` в заголовке.
+- Видны только чаты, которые бот реально видел: личка, группы и топики, где
+  приходили сообщения. В группе с включённым privacy mode сообщения игроков
+  боту не доходят и в историю не попадают.
+- Durable-история чата ограничена ~600 событиями на поток (компакция), поэтому
+  очень старые ходы могли быть свёрнуты; транскрипт кампании при этом остаётся.
+- База в WAL: читать можно на работающем боте, но для точного снимка лучше
+  `sqlite3 .backup` / `VACUUM INTO`, а не копирование файла.
+- Если кириллица в консоли кракозябрами: `chcp 65001` (Windows) или
+  `LANG=ru_RU.UTF-8`.

@@ -1,16 +1,12 @@
-node_modules
 .env*
 !.env.example
-.eve
 data
-.vercel
-.next
-.output
-.nitro
-dist
 .DS_Store
-*.tsbuildinfo
 .zcode
 bin/
 eval-results/
 /bot
+# Остатки TS-версии (до слайса 8): страховка от коммита старых локальных копий.
+# Сами каталоги в репозитории больше не существуют.
+.eve
+node_modules

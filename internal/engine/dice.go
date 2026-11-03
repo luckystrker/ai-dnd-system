@@ -1,6 +1,7 @@
-// Package engine — чистая механика D&D 5e без eve-рантайма, SQLite и тулов:
+// Package engine — чистая механика D&D 5e без рантайма агента, SQLite и тулов:
 // броски и нотации, проверки навыков, окружение, порядок ходов в бою и
-// таблицы наград. Порт agent/lib/engine/{dnd5e,combat}.ts и agent/lib/rewards.ts.
+// таблицы наград. Порт TS-движка (до слайса 8 — `agent/lib/engine/*.ts` и
+// `agent/lib/rewards.ts`).
 //
 // Источник случайности инжектируется (RandomSource), поэтому тесты
 // детерминированы. «Добрый» d20 (MakeLuckyRandom) — решение владельца:

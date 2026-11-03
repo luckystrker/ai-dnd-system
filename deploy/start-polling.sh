@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Запуск Go-бота вручную (без systemd): long-poll встроен в бинарь.
 #
-# Это замена двум tmux-сессиям TS-версии (eve dev + npm run poll). Для
-# боевого сервера используйте systemd: old TS-режим — deploy/start-polling-ts.sh.
+# Для боевого сервера используйте systemd (deploy/setup.sh + ai-dnd.service).
 #
 # Использование:
 #   ./deploy/start-polling.sh          # из корня репозитория

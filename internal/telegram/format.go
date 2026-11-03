@@ -47,7 +47,7 @@ var (
 // экранируется, непарные маркеры остаются текстом, теги не оборачивают код
 // (Telegram запрещает вложенные сущности).
 //
-// Порт agent/lib/telegram-format.ts 1:1.
+// Порт TS-версии 1:1 (до слайса 8 — `agent/lib/telegram-format.ts`).
 func MarkdownToTelegramHTML(text string) string {
 	placeholders := make([]string, 0, 4)
 	stash := func(html string) string {
