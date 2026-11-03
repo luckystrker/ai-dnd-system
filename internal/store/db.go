@@ -387,7 +387,8 @@ func (s *Store) addColumn(table, column string) error {
 }
 
 // repairKeyEventDedup бэкфиллит event_id для старых строк key_events и удаляет
-// точные дубли — как migrateKeyEventDedup в journal.ts.
+// точные дубли — как migrateKeyEventDedup в TS-версии (до слайса 8 —
+// `agent/lib/campaigns/journal.ts`).
 func (s *Store) repairKeyEventDedup() error {
 	rows, err := s.db.Query(
 		"SELECT id, campaign_id, day, line, permanent FROM key_events WHERE event_id IS NULL ORDER BY id",
@@ -487,7 +488,8 @@ func cleanKeyEventLine(line string) string {
 }
 
 // repairNpcDoubleDayMarkers чинит старые строки памяти NPC с двойным маркером
-// дня («- [День 1] [День 1] …») — как repairMemoryDoubleDayMarkers в npc.ts.
+// дня («- [День 1] [День 1] …») — как repairMemoryDoubleDayMarkers в TS-версии
+// (до слайса 8 — `agent/lib/campaigns/npc.ts`).
 func (s *Store) repairNpcDoubleDayMarkers() error {
 	rows, err := s.db.Query("SELECT id, memory FROM npcs WHERE memory != ''")
 	if err != nil {

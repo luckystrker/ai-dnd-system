@@ -23,7 +23,8 @@ var (
 	slugPattern   = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 )
 
-// Slugify — порт slugify из store.ts: транслитерация кириллицы, нижний
+// Slugify — порт slugify из TS-версии (до слайса 8 —
+// `agent/lib/campaigns/store.ts`): транслитерация кириллицы, нижний
 // регистр, только [a-z0-9-], максимум 60 символов, fallback «untitled».
 func Slugify(text string) string {
 	var transliterated strings.Builder

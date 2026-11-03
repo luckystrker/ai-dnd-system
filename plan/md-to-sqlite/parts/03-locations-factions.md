@@ -1,5 +1,10 @@
 # Часть 03 — локации и фракции на SQLite
 
+> **Исторический документ (TS/eve).** Часть плана, выполненного до миграции на
+> Go (слайс 8): пути `agent/...ts`, `scripts/...ts`, `test/...ts` и команды
+> `npm ...` относятся к удалённой TS-версии и видны только в истории git.
+> Реализация живёт в `internal/`; актуальный план — `plan/ago-migration/PLAN.md`.
+
 **Цель**: переписать `agent/lib/campaigns/locations.ts` и
 `agent/lib/campaigns/factions.ts` на SQLite, сохранив публичные API и
 синглтоны `locationStore`/`factionStore`.

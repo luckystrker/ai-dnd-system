@@ -66,7 +66,8 @@ func IdentityFromMessage(message *Message) Identity {
 
 // FindCampaignForIdentity находит кампанию по привязанному чату/топику.
 // Для реплаев вне форум-топика и сообщений без топика — откат на кампанию,
-// привязанную к чату без топика (порт findCampaignForIdentity из access.ts).
+// привязанную к чату без топика (порт findCampaignForIdentity из TS-версии; до
+// слайса 8 — `agent/lib/campaigns/access.ts`).
 func FindCampaignForIdentity(st *store.Store, identity Identity) (*store.Campaign, error) {
 	if st == nil || identity.ChatID == "" {
 		return nil, nil
