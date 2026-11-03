@@ -74,6 +74,9 @@ func (m *playerPromptMW) OnToolExecution(next middleware.ToolExecFunc, ev *event
 	if character == "" {
 		return result, nil
 	}
+	// Несколько ask_player за ход: побеждает последний вызов — вопрос
+	// адресуется тому, кого модель назвала последним. На практике тул зовут
+	// один раз; перечисление вопросов всем подряд игрокам было бы хуже.
 	m.mu.Lock()
 	m.character = character
 	m.mu.Unlock()
@@ -96,14 +99,17 @@ func (m *playerPromptMW) report(character string, cx *agocontext.Context) {
 
 // endsWithQuestion — последняя значимая фраза ответа заканчивается вопросом.
 // Хвостовые кавычки, скобки и markdown-выделение не мешают; «!» не считается
-// точкой конца фразы, «.» считается.
+// точкой конца фразы, «.» считается. Полноширинные «？», «．» и «。» (мобильные
+// клавиатуры) приравнены к ASCII-аналогам.
 func endsWithQuestion(text string) bool {
-	trimmed := strings.TrimRight(strings.TrimSpace(text), " \t\n\r\"'»”’)])}*_`")
-	for index := len(trimmed) - 1; index >= 0; index-- {
-		switch trimmed[index] {
-		case '?':
+	trimmed := strings.TrimRight(strings.TrimSpace(text),
+		" \t\n\r\"'»”’)]}*_`」』）】")
+	runes := []rune(trimmed)
+	for index := len(runes) - 1; index >= 0; index-- {
+		switch runes[index] {
+		case '?', '？':
 			return true
-		case '.':
+		case '.', '．', '。':
 			return false
 		}
 	}

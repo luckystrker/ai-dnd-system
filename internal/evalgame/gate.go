@@ -148,10 +148,12 @@ func (g Gate) Violations(report, repeats *Report) []string {
 			continue
 		}
 		// Пропорционально правилу «2 из 3»: на трёх повторах это ровно
-		// два, на большем числе — не меньше двух третей.
-		if item.Passes*RequiredRepeats < RequiredPasses*item.Repeats {
-			out = append(out, fmt.Sprintf("обязательный кейс %q прошёл %d/%d повторов, нужно ≥%d из %d",
-				name, item.Passes, item.Repeats, RequiredPasses, RequiredRepeats))
+		// два, на большем числе — не меньше двух третей. Требуемый минимум
+		// считаем под фактическое число повторов, чтобы сообщение не врало.
+		need := (RequiredPasses*item.Repeats + RequiredRepeats - 1) / RequiredRepeats
+		if item.Passes < need {
+			out = append(out, fmt.Sprintf("обязательный кейс %q прошёл %d/%d повторов, нужно ≥%d",
+				name, item.Passes, item.Repeats, need))
 		}
 	}
 	return out

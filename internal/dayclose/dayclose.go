@@ -182,6 +182,9 @@ func (q *Queue) CloseDay(_ context.Context, campaign *store.Campaign, closedDay 
 }
 
 // Enqueue добавляет задачу; повторная постановка того же дня схлопывается.
+// Если день уже выполняется, побеждает первый вызов: новые highlights не
+// дописываются к текущей задаче (advance_day ставит её без highlights, так что
+// на практике терять нечего).
 func (q *Queue) Enqueue(campaignID string, day int, highlights string) error {
 	if campaignID == "" || day <= 0 {
 		return errors.New("dayclose: campaign and day are required")
@@ -214,12 +217,17 @@ func (q *Queue) RunPending(ctx context.Context) error {
 		if !ok {
 			return firstErr
 		}
-		err := q.run(ctx, task)
-		q.finish(key)
-		if err != nil && firstErr == nil {
+		if err := q.runPendingTask(ctx, key, task); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+}
+
+// runPendingTask снимает ключ через defer: паника воркера уходит вызывающему,
+// но день не остаётся навсегда в pending.
+func (q *Queue) runPendingTask(ctx context.Context, key string, task job) error {
+	defer q.finish(key)
+	return q.run(ctx, task)
 }
 
 // ScanGaps досматривает прошлые дни при старте.
@@ -345,12 +353,24 @@ func (q *Queue) loop(ctx context.Context) {
 			if !ok {
 				break
 			}
-			err := q.run(ctx, task)
-			q.finish(key)
-			if err != nil {
-				q.log.Error("dayclose: close day failed", "campaign", task.campaignID, "day", task.day, "error", err)
-			}
+			q.process(ctx, key, task)
 		}
+	}
+}
+
+// process выполняет задачу и гарантированно снимает ключ из pending, даже если
+// воркер паникует: иначе день залипает и повторный Enqueue тихо схлопывается
+// до рестарта. Паника одного дня не роняет фоновый цикл очереди.
+func (q *Queue) process(ctx context.Context, key string, task job) {
+	defer q.finish(key)
+	defer func() {
+		if rec := recover(); rec != nil {
+			q.log.Error("dayclose: close day panicked",
+				"campaign", task.campaignID, "day", task.day, "panic", rec)
+		}
+	}()
+	if err := q.run(ctx, task); err != nil {
+		q.log.Error("dayclose: close day failed", "campaign", task.campaignID, "day", task.day, "error", err)
 	}
 }
 

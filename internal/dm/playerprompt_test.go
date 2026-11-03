@@ -133,6 +133,42 @@ func TestPlayerPromptSkipsIntermediateResponse(t *testing.T) {
 	}
 }
 
+// Несколько ask_player за ход: вопрос адресуется последнему названному
+// персонажу, счётчик фиксирует одно срабатывание.
+func TestPlayerPromptKeepsLastHandoff(t *testing.T) {
+	t.Parallel()
+
+	var got []PlayerPromptAppend
+	mw := &playerPromptMW{onAppend: func(item PlayerPromptAppend) { got = append(got, item) }}
+	calls := []events.ToolCallEvent{
+		{ID: "c1", Name: "ask_player", Arguments: `{"character":"Дэн"}`},
+		{ID: "c2", Name: "ask_player", Arguments: `{"character":"Лиса"}`},
+	}
+	response := &events.ModelResponse{Message: &events.ModelMessage{Content: "Дэн замирает у алтаря."}}
+	turnNext := func(*events.ModelRequest, *agocontext.Context) (*events.ModelResponse, error) {
+		for index := range calls {
+			call := calls[index]
+			execNext := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+				return events.FromResultCall(call, events.NewToolResult(false, `{"ok":true}`)), nil
+			}
+			if _, err := mw.OnToolExecution(execNext, &call, nil); err != nil {
+				return nil, err
+			}
+		}
+		return response, nil
+	}
+	reply, err := mw.OnTurn(turnNext, nil, nil)
+	if err != nil {
+		t.Fatalf("OnTurn: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(reply.Content()), "Лиса, что делаешь?") {
+		t.Fatalf("вопрос не последнему персонажу:\n%s", reply.Content())
+	}
+	if len(got) != 1 || got[0].Character != "Лиса" {
+		t.Fatalf("счётчик = %+v, want одно срабатывание для Лисы", got)
+	}
+}
+
 func TestEndsWithQuestion(t *testing.T) {
 	t.Parallel()
 
@@ -147,6 +183,8 @@ func TestEndsWithQuestion(t *testing.T) {
 		{"**Лиса, что делаешь?**", true},
 		{"«Лиса, что делаешь?»", true},
 		{"Лиса, что делаешь?\n", true},
+		{"Лиса, что делаешь？", true},
+		{"Готово。", false},
 		{"Что делаешь? Потом уходим.", false},
 		{"Готово!", false},
 	}

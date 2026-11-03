@@ -464,6 +464,77 @@ func TestQueueDeduplicatesDayInFlight(t *testing.T) {
 	}
 }
 
+// panicOnceArchivist паникует на первом вызове: проверяет, что ключ дня
+// снимается и паника не залипает в очереди.
+type panicOnceArchivist struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *panicOnceArchivist) CloseDay(context.Context, *store.Campaign, int, string) (chronicler.Report, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+	if call == 1 {
+		panic("archivist boom")
+	}
+	return chronicler.Report{}, nil
+}
+
+func (p *panicOnceArchivist) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// Паника воркера в RunPending уходит вызывающему, но ключ дня снимается:
+// повторная постановка того же дня снова выполняется, а не схлопывается.
+func TestQueueReleasesDayAfterPanic(t *testing.T) {
+	t.Parallel()
+
+	st, campaign := newCampaignAtDayTwo(t)
+	flaky := &panicOnceArchivist{}
+	queue := queueWithPanic(t, st, flaky)
+	if err := queue.CloseDay(context.Background(), campaign, 1); err != nil {
+		t.Fatalf("CloseDay: %v", err)
+	}
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("ожидалась паника воркера")
+			}
+		}()
+		_ = queue.RunPending(context.Background())
+	}()
+	if flaky.count() != 1 {
+		t.Fatalf("вызовов летописца = %d, want 1", flaky.count())
+	}
+	if err := queue.CloseDay(context.Background(), campaign, 1); err != nil {
+		t.Fatalf("повторный CloseDay: %v", err)
+	}
+	if err := queue.RunPending(context.Background()); err != nil {
+		t.Fatalf("RunPending после паники: %v", err)
+	}
+	if flaky.count() != 2 {
+		t.Fatalf("повторный прогон не выполнился: вызовов = %d, want 2", flaky.count())
+	}
+}
+
+func queueWithPanic(t *testing.T, st *store.Store, archivist *panicOnceArchivist) *dayclose.Queue {
+	t.Helper()
+	queue, err := dayclose.New(dayclose.Config{
+		Store: st,
+		NewArchivist: func(*store.Campaign) (dayclose.Archivist, error) {
+			return archivist, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	return queue
+}
+
 // BackfillMax ограничивает число полных прогонов летописца на старт: старые
 // дни обрабатываются от новых к старым.
 func TestQueueScanGapsRespectsBackfillLimit(t *testing.T) {

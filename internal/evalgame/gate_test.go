@@ -169,6 +169,29 @@ func TestGateRequiredNeedsThreeRepeats(t *testing.T) {
 	}
 }
 
+// Сообщение о провале считает требуемый минимум под фактическое число
+// повторов: при 5 повторах нужно 4, а не «2 из 3».
+func TestGateRequiredMessageUsesActualRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 3, Repeats: 5},
+		{Name: "memory-01-damage-on-player-turn", Passes: 5, Repeats: 5, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 5, Repeats: 5, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 5, Repeats: 5, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 {
+		t.Fatalf("ожидалось одно нарушение, получено: %v", violations)
+	}
+	if !containsText(violations[0], "3/5") || !containsText(violations[0], "≥4") {
+		t.Fatalf("сообщение не называет фактический минимум: %s", violations[0])
+	}
+	if containsText(violations[0], "из 3") {
+		t.Fatalf("сообщение по-прежнему говорит «2 из 3»: %s", violations[0])
+	}
+}
+
 // passingReport — полный прогон -n 1, проходящий все пороги и без обязательных
 // кейсов в проверке (обязательные проверяются по отчёту повторов).
 func passingReport() *Report {
