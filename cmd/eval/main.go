@@ -136,9 +136,10 @@ func run(ctx context.Context, args []string) error {
 		NewArchivist: func(st *store.Store) dayclose.ArchivistFactory {
 			return func(campaign *store.Campaign) (dayclose.Archivist, error) {
 				return chronicler.New(chronicler.Config{
-					Model:      chroniclerModel,
-					Store:      st,
-					CampaignID: campaign.ID,
+					Model:         chroniclerModel,
+					Store:         st,
+					CampaignID:    campaign.ID,
+					MaxToolRounds: cfg.ChroniclerMaxToolRounds,
 				})
 			}
 		},

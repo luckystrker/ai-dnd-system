@@ -122,7 +122,7 @@ func run(ctx context.Context, args []string) error {
 				Model:         chroniclerModel,
 				Store:         st,
 				CampaignID:    campaign.ID,
-				MaxToolRounds: cfg.MaxToolRounds,
+				MaxToolRounds: cfg.ChroniclerMaxToolRounds,
 			})
 		},
 	})

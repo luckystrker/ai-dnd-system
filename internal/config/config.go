@@ -14,6 +14,11 @@ const (
 	// Без него ago крутит тулы до тех пор, пока модель сама не остановится.
 	DefaultMaxToolRounds = 12
 
+	// DefaultChroniclerMaxToolRounds — свой лимит раундов у летописца: на
+	// закрытии дня он проходит по транскрипту и памяти и legitimately делает
+	// больше вызовов, чем DM в одном ходу (PLAN 44).
+	DefaultChroniclerMaxToolRounds = 24
+
 	// DefaultDBPath — та же база кампаний, что у TS-версии; Go-бот открывает
 	// её без миграции данных.
 	DefaultDBPath = "data/campaigns.db"
@@ -93,14 +98,15 @@ type Telegram struct {
 
 // Config — вся конфигурация процесса бота.
 type Config struct {
-	LLM                  llm.Settings
-	MaxToolRounds        int
-	DBPath               string
-	ContextWindowTokens  int
-	TurnTimeoutSeconds   int
-	TokenBudget          int64
-	DayCloseBackfillMax  int
-	DayCloseBackfillDays int
+	LLM                     llm.Settings
+	MaxToolRounds           int
+	ChroniclerMaxToolRounds int
+	DBPath                  string
+	ContextWindowTokens     int
+	TurnTimeoutSeconds      int
+	TokenBudget             int64
+	DayCloseBackfillMax     int
+	DayCloseBackfillDays    int
 	// SessionGapHours — пауза в чате, после которой начинается новая сессия
 	// (маркер в блоке памяти, recap в промпте).
 	SessionGapHours int
@@ -117,6 +123,7 @@ type Config struct {
 //	LLM_BASE_URL     переопределить корень эндпоинта провайдера
 //	LLM_MODEL        переопределить id модели
 //	MAX_TOOL_ROUNDS      лимит раундов тулов в одном ходу (по умолчанию 12)
+//	CHRONICLER_MAX_TOOL_ROUNDS лимит раундов тулов летописца (по умолчанию 24)
 //	CONTEXT_WINDOW_TOKENS фиксированное окно контекста, 16000..512000
 //	                     (по умолчанию 96000); компакция на 75%
 //	TURN_TIMEOUT_SECONDS дедлайн одного хода DM, 1..3600 (по умолчанию 180)
@@ -156,6 +163,15 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("MAX_TOOL_ROUNDS: ожидается положительное целое, получено %q", raw)
 		}
 		maxRounds = parsed
+	}
+
+	chroniclerRounds := DefaultChroniclerMaxToolRounds
+	if raw := strings.TrimSpace(getenv("CHRONICLER_MAX_TOOL_ROUNDS")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("CHRONICLER_MAX_TOOL_ROUNDS: ожидается положительное целое, получено %q", raw)
+		}
+		chroniclerRounds = parsed
 	}
 
 	dbPath := strings.TrimSpace(getenv("CAMPAIGN_DB_PATH"))
@@ -231,15 +247,16 @@ func Load(getenv func(string) string) (Config, error) {
 			BaseURL:  strings.TrimSpace(getenv("LLM_BASE_URL")),
 			Model:    strings.TrimSpace(getenv("LLM_MODEL")),
 		},
-		MaxToolRounds:        maxRounds,
-		DBPath:               dbPath,
-		ContextWindowTokens:  contextWindow,
-		TurnTimeoutSeconds:   turnTimeout,
-		TokenBudget:          tokenBudget,
-		DayCloseBackfillMax:  backfillMax,
-		DayCloseBackfillDays: backfillDays,
-		SessionGapHours:      sessionGapHours,
-		Telegram:             telegram,
+		MaxToolRounds:           maxRounds,
+		ChroniclerMaxToolRounds: chroniclerRounds,
+		DBPath:                  dbPath,
+		ContextWindowTokens:     contextWindow,
+		TurnTimeoutSeconds:      turnTimeout,
+		TokenBudget:             tokenBudget,
+		DayCloseBackfillMax:     backfillMax,
+		DayCloseBackfillDays:    backfillDays,
+		SessionGapHours:         sessionGapHours,
+		Telegram:                telegram,
 	}, nil
 }
 

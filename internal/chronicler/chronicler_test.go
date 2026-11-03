@@ -2,10 +2,13 @@ package chronicler_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	agoagent "github.com/luckystrker/ago/agent"
 	"github.com/luckystrker/ago/events"
 	agotest "github.com/luckystrker/ago/testing"
 
@@ -42,6 +45,67 @@ func newCampaign(t *testing.T, st *store.Store, title string) *store.Campaign {
 		t.Fatalf("campaign: %v", err)
 	}
 	return campaign
+}
+
+// readDayRounds собирает скрипт из n раундов read_day и финального ответа:
+// так проверяется именно лимит раундов, без побочных записей в память.
+func readDayRounds(n int) []*events.ModelResponse {
+	script := make([]*events.ModelResponse, 0, n+1)
+	for index := 0; index < n; index++ {
+		script = append(script, call("c"+strconv.Itoa(index), "read_day", `{"day":1}`))
+	}
+	return append(script, reply("Готово."))
+}
+
+// У летописца свой лимит раундов: значение из конфига, а не MAX_TOOL_ROUNDS DM
+// (PLAN 44).
+func TestChroniclerUsesConfiguredToolRoundLimit(t *testing.T) {
+	t.Parallel()
+
+	st := newStore(t)
+	campaign := newCampaign(t, st, "Хроника")
+	cfg := agotest.NewTestConfig(readDayRounds(3)...)
+	agent, err := chronicler.New(chronicler.Config{
+		Model: cfg, Store: st, CampaignID: campaign.ID, MaxToolRounds: 2,
+	})
+	if err != nil {
+		t.Fatalf("chronicler: %v", err)
+	}
+	_, err = agent.CloseDay(context.Background(), campaign, 1, "")
+	if !errors.Is(err, agoagent.ErrMaxToolRounds) {
+		t.Fatalf("ошибка = %v, want ErrMaxToolRounds", err)
+	}
+}
+
+// По умолчанию летописец получает 24 раунда: 24 проходят, 25-й упирается в
+// лимит.
+func TestChroniclerDefaultToolRoundLimit(t *testing.T) {
+	t.Parallel()
+
+	const wantDefault = 24
+	st := newStore(t)
+	campaign := newCampaign(t, st, "Хроника")
+	okAgent, err := chronicler.New(chronicler.Config{
+		Model: agotest.NewTestConfig(readDayRounds(wantDefault)...),
+		Store: st, CampaignID: campaign.ID,
+	})
+	if err != nil {
+		t.Fatalf("chronicler: %v", err)
+	}
+	if _, err := okAgent.CloseDay(context.Background(), campaign, 1, ""); err != nil {
+		t.Fatalf("24 раунда должны проходить: %v", err)
+	}
+
+	overAgent, err := chronicler.New(chronicler.Config{
+		Model: agotest.NewTestConfig(readDayRounds(wantDefault + 1)...),
+		Store: st, CampaignID: campaign.ID,
+	})
+	if err != nil {
+		t.Fatalf("chronicler: %v", err)
+	}
+	if _, err := overAgent.CloseDay(context.Background(), campaign, 1, ""); !errors.Is(err, agoagent.ErrMaxToolRounds) {
+		t.Fatalf("25-й раунд: ошибка = %v, want ErrMaxToolRounds", err)
+	}
 }
 
 // Счётчики отчёта считаются по изменениям в БД, а не по словам модели.

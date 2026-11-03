@@ -90,6 +90,7 @@ Eval-судья по умолчанию — `muse-spark-1.3-contributor` чер�
 | `LLM_BASE_URL` | значение провайдера | корень эндпоинта **без** `/chat/completions` |
 | `LLM_MODEL` | значение провайдера | id модели |
 | `MAX_TOOL_ROUNDS` | `12` | лимит раундов «модель → тулы» в одном ходу |
+| `CHRONICLER_MAX_TOOL_ROUNDS` | `24` | свой лимит раундов у летописца при закрытии дня |
 | `CAMPAIGN_DB_PATH` | `data/campaigns.db` | SQLite-база всей памяти и inbox |
 | `CONTEXT_WINDOW_TOKENS` | `96000` (16000..512000) | фиксированное окно; компакция на 75% |
 | `TURN_TIMEOUT_SECONDS` | `180` (1..3600) | дедлайн одного хода DM |

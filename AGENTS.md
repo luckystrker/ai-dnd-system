@@ -90,6 +90,7 @@ CI (`.github/workflows/ci.yml`, job `go`): `gofmt -l`, `go vet`, `go test`,
   моделей на `/inference/go/openai/v1` отдаёт 404, хотя chat completions там
   работает; дефолт — `zen/go/v1`.
 - `MAX_TOOL_ROUNDS=12`, окно 96k, компакция на 75% — стартовые значения;
+  у летописца свой `CHRONICLER_MAX_TOOL_ROUNDS=24` (PLAN 44);
   `ErrMaxToolRounds` даёт игроку нейтральный ответ, диагностика — в лог,
   записи тулов не откатываются.
 - `advance_day` доступен любому участнику (операция памяти); роль `dm` только

@@ -50,6 +50,29 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SessionGapHours != config.DefaultSessionGapHours {
 		t.Errorf("SessionGapHours = %d, want %d", cfg.SessionGapHours, config.DefaultSessionGapHours)
 	}
+	if cfg.ChroniclerMaxToolRounds != config.DefaultChroniclerMaxToolRounds {
+		t.Errorf("ChroniclerMaxToolRounds = %d, want %d",
+			cfg.ChroniclerMaxToolRounds, config.DefaultChroniclerMaxToolRounds)
+	}
+}
+
+// У летописца свой лимит раундов: CHRONICLER_MAX_TOOL_ROUNDS не меняет
+// MAX_TOOL_ROUNDS DM и наоборот (PLAN 44).
+func TestLoadChroniclerMaxToolRounds(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load(envMap(map[string]string{
+		"LLM_API_KEY": "sk-test", "CHRONICLER_MAX_TOOL_ROUNDS": "30",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ChroniclerMaxToolRounds != 30 {
+		t.Errorf("ChroniclerMaxToolRounds = %d, want 30", cfg.ChroniclerMaxToolRounds)
+	}
+	if cfg.MaxToolRounds != config.DefaultMaxToolRounds {
+		t.Errorf("MaxToolRounds DM = %d, want %d", cfg.MaxToolRounds, config.DefaultMaxToolRounds)
+	}
 }
 
 // Порог границы сессии задаётся env: пауза в чате, после которой начинается
@@ -165,6 +188,16 @@ func TestLoadErrors(t *testing.T) {
 			name:   "битый лимит раундов",
 			env:    map[string]string{"LLM_API_KEY": "k", "MAX_TOOL_ROUNDS": "много"},
 			substr: "MAX_TOOL_ROUNDS",
+		},
+		{
+			name:   "нулевой лимит раундов летописца",
+			env:    map[string]string{"LLM_API_KEY": "k", "CHRONICLER_MAX_TOOL_ROUNDS": "0"},
+			substr: "CHRONICLER_MAX_TOOL_ROUNDS",
+		},
+		{
+			name:   "битый лимит раундов летописца",
+			env:    map[string]string{"LLM_API_KEY": "k", "CHRONICLER_MAX_TOOL_ROUNDS": "много"},
+			substr: "CHRONICLER_MAX_TOOL_ROUNDS",
 		},
 		{
 			name:   "нулевой лимит раундов",
