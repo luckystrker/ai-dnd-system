@@ -649,6 +649,7 @@ func TestPromptFollowsReviewChecklist(t *testing.T) {
 		"`advantage: \"disadvantage\"`",
 		"Take a player's word",
 		"Plan-discussion replies are the exception",
+		"`ask_player`",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(instructions, fragment) {

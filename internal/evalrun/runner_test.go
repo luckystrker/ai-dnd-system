@@ -74,6 +74,40 @@ func TestRunnerRealToolkitWritesMemoryOnPlayerTurn(t *testing.T) {
 
 // Живой путь eval идёт с включённой гарантией цитат: если модель не назвала
 // бросок, код дописывает компоненты, и это видно в счётчике отчёта (PLAN 40).
+// Гарантия вопроса другому игроку: модель объявила передачу решения
+// ask_player, но ответ кончился описанием — код дописал вопрос, и это видно
+// в отчёте (PLAN 41).
+func TestRunnerCountsPlayerPromptGuarantee(t *testing.T) {
+	t.Parallel()
+
+	suite := suiteWithMechanical(t)
+	runner, err := NewRunner(suite, scriptedFactory(func(string) []*events.ModelResponse {
+		return []*events.ModelResponse{
+			{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+				ID: "c1", Name: "ask_player", Arguments: `{"character":"Лиса"}`,
+			}}}},
+			{Message: &events.ModelMessage{Content: "Дэн проходит между колоннами к алтарю."}},
+		}
+	}), RunnerConfig{Repeats: 1, Concurrency: 1, TempRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	report, err := runner.Run(context.Background(), RunOptions{Cases: []string{"agency-03-group-help-wait"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.PromptAppends != 1 || report.PromptCases != 1 {
+		t.Fatalf("гарантия не засчитана: %d дописок в %d кейсах", report.PromptAppends, report.PromptCases)
+	}
+	if len(report.PromptCharacters) != 1 || report.PromptCharacters[0] != "Лиса" {
+		t.Fatalf("персонажи = %v, want [Лиса]", report.PromptCharacters)
+	}
+	output := report.Cases[0].Runs[0].Output
+	if !strings.HasSuffix(strings.TrimSpace(output), "Лиса, что делаешь?") {
+		t.Fatalf("вопрос не дописан в ответ:\n%s", output)
+	}
+}
+
 func TestRunnerCountsQuoteGuarantee(t *testing.T) {
 	t.Parallel()
 

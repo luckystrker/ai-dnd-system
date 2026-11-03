@@ -272,6 +272,7 @@ func printReport(report *evalgame.Report, elapsed time.Duration) {
 			category, summary.Passed, summary.Cases, summary.PassRate*100)
 	}
 	printQuoteGuarantee(report)
+	printPromptGuarantee(report)
 	var failed []evalgame.CaseReport
 	for _, item := range report.Cases {
 		if !item.PassPowK {
@@ -319,6 +320,27 @@ func printQuoteGuarantee(report *evalgame.Report) {
 			parts = "—"
 		}
 		fmt.Fprintf(os.Stderr, "  %-48s %2d (%s)\n", item.Name, item.QuoteAppends, parts)
+	}
+}
+
+// printPromptGuarantee печатает счётчик гарантии вопроса другому игроку
+// (PLAN 41): сколько дописок, в каких кейсах и к кому был вопрос.
+func printPromptGuarantee(report *evalgame.Report) {
+	fmt.Fprintf(os.Stderr, "\n=== гарантия вопроса другому игроку: %d дописок в %d из %d кейсов ===\n",
+		report.PromptAppends, report.PromptCases, len(report.Cases))
+	if report.PromptAppends == 0 {
+		fmt.Fprintln(os.Stderr, "  срабатываний не было")
+		return
+	}
+	for _, item := range report.Cases {
+		if item.PromptAppends == 0 {
+			continue
+		}
+		names := strings.Join(item.PromptCharacters, ", ")
+		if names == "" {
+			names = "—"
+		}
+		fmt.Fprintf(os.Stderr, "  %-48s %2d (%s)\n", item.Name, item.PromptAppends, names)
 	}
 }
 

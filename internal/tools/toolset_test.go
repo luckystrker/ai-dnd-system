@@ -11,8 +11,8 @@ func TestToolkitsAndSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DMToolkit: %v", err)
 	}
-	if got := len(dm.Tools()); got != 42 {
-		t.Fatalf("DM tools = %d, want 42", got)
+	if got := len(dm.Tools()); got != 43 {
+		t.Fatalf("DM tools = %d, want 43", got)
 	}
 	chronicler, err := ChroniclerToolkit(deps)
 	if err != nil {

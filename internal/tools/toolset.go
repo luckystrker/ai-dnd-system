@@ -37,7 +37,7 @@ var ChroniclerTools = []string{
 	"upsert_npc",
 }
 
-// DMToolkit — все 42 тула DM.
+// DMToolkit — все 43 тула DM.
 func DMToolkit(d Deps) (*agotools.Toolkit, error) {
 	return buildToolkit("dm", d, nil)
 }
@@ -87,7 +87,7 @@ func buildToolkit(name string, d Deps, allowed map[string]bool) (*agotools.Toolk
 
 func buildAll(d Deps) (map[string]agotools.Tool, error) {
 	groups := []func(Deps) ([]namedTool, error){
-		campaignTools, memoryTools, environmentTools, diceTools,
+		campaignTools, memoryTools, environmentTools, diceTools, tableTools,
 	}
 	out := map[string]agotools.Tool{}
 	for _, group := range groups {

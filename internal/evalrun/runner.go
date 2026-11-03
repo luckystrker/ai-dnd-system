@@ -203,6 +203,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 		random = plan.Random
 	}
 	quotes := &quoteLog{}
+	prompts := &promptLog{}
 	agent, err := dm.New(dm.Config{
 		Model:               modelCfg,
 		Store:               st,
@@ -213,6 +214,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 		ContextWindowTokens: dm.DefaultContextWindowTokens,
 		MaxToolRounds:       dm.DefaultMaxToolRounds,
 		OnRollQuote:         quotes.add,
+		OnPlayerPrompt:      prompts.add,
 		ToolDeps: ttrpg.Deps{
 			DB:          st,
 			Random:      random,
@@ -257,6 +259,7 @@ func (r *Runner) runRepeat(ctx context.Context, plan evalgame.Plan, repeat int) 
 	report.Tokens = tokenTotal(trace)
 	report.ToolCalls = trace.ToolCalls
 	report.QuoteAppends, report.QuoteParts = quotes.summary()
+	report.PromptAppends, report.PromptCharacters = prompts.summary()
 
 	for _, scorer := range plan.Case.Scorers {
 		report.Scores = append(report.Scores, eval.ScoreWith(ctx, scorer, trace))
@@ -299,6 +302,37 @@ func (q *quoteLog) summary() (int, []string) {
 		return 0, nil
 	}
 	return q.appends, append([]string(nil), q.parts...)
+}
+
+// promptLog собирает срабатывания гарантии вопроса другому игроку за прогон
+// кейса: сколько раз дописан вопрос и к кому (PLAN 41).
+type promptLog struct {
+	mu      sync.Mutex
+	appends int
+	names   []string
+}
+
+func (p *promptLog) add(item dm.PlayerPromptAppend) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appends++
+	for _, name := range p.names {
+		if name == item.Character {
+			return
+		}
+	}
+	if item.Character != "" {
+		p.names = append(p.names, item.Character)
+	}
+}
+
+func (p *promptLog) summary() (int, []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.appends == 0 {
+		return 0, nil
+	}
+	return p.appends, append([]string(nil), p.names...)
 }
 
 // tokenTotal — сумма prompt+completion из Usage-событий трассы.

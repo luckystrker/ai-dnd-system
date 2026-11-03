@@ -46,3 +46,36 @@ func TestBuildReportAggregatesQuoteGuarantee(t *testing.T) {
 		t.Fatalf("итоговые компоненты = %v, want %v", report.QuoteParts, want)
 	}
 }
+
+// Счётчик гарантии вопроса другому игроку (PLAN 41) сводится так же.
+func TestBuildReportAggregatesPlayerPromptGuarantee(t *testing.T) {
+	t.Parallel()
+
+	plans := []Plan{
+		{Base: "agency-03", Name: "agency-03", Case: eval.Case{Name: "agency-03"}},
+		{Base: "group-02", Name: "group-02", Case: eval.Case{Name: "group-02"}},
+	}
+	results := []RepeatReport{
+		{Passed: true, PromptAppends: 1, PromptCharacters: []string{"Лиса"}},
+		{Passed: true, PromptAppends: 1, PromptCharacters: []string{"Лиса"}},
+		{Passed: true},
+	}
+	metaFor := func(string) CaseMeta { return CaseMeta{Category: "agency"} }
+
+	report := BuildReport(plans, results, DefaultSlice, 2, metaFor)
+	if got := report.Cases[0].PromptAppends; got != 2 {
+		t.Fatalf("кейс 1: дописок = %d, want 2", got)
+	}
+	if got := report.Cases[0].PromptCharacters; len(got) != 1 || got[0] != "Лиса" {
+		t.Fatalf("кейс 1: персонажи = %v, want [Лиса]", got)
+	}
+	if report.Cases[1].PromptAppends != 0 {
+		t.Fatalf("кейс 2: дописок = %d, want 0", report.Cases[1].PromptAppends)
+	}
+	if report.PromptAppends != 2 || report.PromptCases != 1 {
+		t.Fatalf("итог = %d дописок в %d кейсах, want 2 в 1", report.PromptAppends, report.PromptCases)
+	}
+	if len(report.PromptCharacters) != 1 || report.PromptCharacters[0] != "Лиса" {
+		t.Fatalf("итоговые персонажи = %v", report.PromptCharacters)
+	}
+}

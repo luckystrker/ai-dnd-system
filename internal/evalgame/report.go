@@ -41,6 +41,11 @@ type RepeatReport struct {
 	// Пусто — модель процитировала бросок сама (или бросков не было).
 	QuoteAppends int      `json:"quote_appends,omitempty"`
 	QuoteParts   []string `json:"quote_parts,omitempty"`
+	// PromptAppends / PromptCharacters — срабатывания гарантии закрывающего
+	// вопроса другому игроку (PLAN 41): модель объявила передачу решения
+	// тулом ask_player, но ответ не кончился вопросом.
+	PromptAppends    int      `json:"prompt_appends,omitempty"`
+	PromptCharacters []string `json:"prompt_characters,omitempty"`
 }
 
 // CaseReport — кейс, сведённый по всем повторам.
@@ -57,6 +62,10 @@ type CaseReport struct {
 	// повторам кейса (PLAN 40).
 	QuoteAppends int      `json:"quote_appends,omitempty"`
 	QuoteParts   []string `json:"quote_parts,omitempty"`
+	// PromptAppends / PromptCharacters — сумма срабатываний гарантии вопроса
+	// другому игроку по повторам кейса (PLAN 41).
+	PromptAppends    int      `json:"prompt_appends,omitempty"`
+	PromptCharacters []string `json:"prompt_characters,omitempty"`
 }
 
 // CategorySummary — pass rate категории.
@@ -81,6 +90,11 @@ type Report struct {
 	QuoteAppends int      `json:"quote_appends,omitempty"`
 	QuoteCases   int      `json:"quote_cases,omitempty"`
 	QuoteParts   []string `json:"quote_parts,omitempty"`
+	// Гарантия вопроса другому игроку (PLAN 41): дописок вопроса за прогон,
+	// кейсов с допиской и персонажи, к которым был вопрос.
+	PromptAppends    int      `json:"prompt_appends,omitempty"`
+	PromptCases      int      `json:"prompt_cases,omitempty"`
+	PromptCharacters []string `json:"prompt_characters,omitempty"`
 	// Run — первое исполнение каждого кейса в формате ago: с ним работает
 	// eval.Diff и регрессионный гейт.
 	Run *eval.RunResult `json:"run"`
@@ -155,6 +169,8 @@ func BuildReport(plans []Plan, results []RepeatReport, slice, repeats int, metaF
 			}
 			cr.QuoteAppends += run.QuoteAppends
 			cr.QuoteParts = mergeParts(cr.QuoteParts, run.QuoteParts)
+			cr.PromptAppends += run.PromptAppends
+			cr.PromptCharacters = mergeParts(cr.PromptCharacters, run.PromptCharacters)
 			if repeat == 0 {
 				report.Run.Cases = append(report.Run.Cases, eval.CaseResult{
 					Name: plan.Name, Output: run.Output,
@@ -180,6 +196,11 @@ func BuildReport(plans []Plan, results []RepeatReport, slice, repeats int, metaF
 			report.QuoteCases++
 		}
 		report.QuoteParts = mergeParts(report.QuoteParts, cr.QuoteParts)
+		report.PromptAppends += cr.PromptAppends
+		if cr.PromptAppends > 0 {
+			report.PromptCases++
+		}
+		report.PromptCharacters = mergeParts(report.PromptCharacters, cr.PromptCharacters)
 	}
 	// Run.PassRate — первый повтор (с ним работает eval.Diff); PassRate
 	// отчёта — кейс целиком: он прошёл, только если прошли все повторы.

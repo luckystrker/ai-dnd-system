@@ -91,6 +91,10 @@ type Config struct {
 	// недостающие компоненты цитаты. По нему eval считает, как часто модель
 	// пропускает цитату сама (PLAN 40); в бою счётчик уходит в лог хода.
 	OnRollQuote func(QuoteAppend)
+	// OnPlayerPrompt вызывается, когда гарантия закрывающего вопроса
+	// дописала «<имя>, что делаешь?» по сигналу ask_player (PLAN 41):
+	// модель передала решение другому игроку, но забыла вопрос.
+	OnPlayerPrompt func(PlayerPromptAppend)
 	// SkipToolkit собирает агента только из ExtraTools: eval на скриптованных
 	// траекториях проверяет промпт, память и лимиты без живой БД-кампании.
 	SkipToolkit bool
@@ -227,9 +231,18 @@ func New(cfg Config) (*DM, error) {
 		// чтобы скореры видели сырой ответ модели. Живой eval и бой идут с
 		// гарантией: это продуктовое правило (PLAN 40), а не метрика модели;
 		// счётчик срабатываний уходит в лог и отчёт eval.
-		factories = append(factories, func() middleware.Middleware {
-			return &rollQuoteMW{log: logger, onAppend: cfg.OnRollQuote}
-		})
+		//
+		// Гарантия вопроса другому игроку (PLAN 41) стоит перед ней, т.е.
+		// снаружи: её дописка выполняется после цитаты броска и остаётся
+		// последней фразой ответа.
+		factories = append(factories,
+			func() middleware.Middleware {
+				return &playerPromptMW{log: logger, onAppend: cfg.OnPlayerPrompt}
+			},
+			func() middleware.Middleware {
+				return &rollQuoteMW{log: logger, onAppend: cfg.OnRollQuote}
+			},
+		)
 	}
 	factories = append(factories, cfg.ExtraMiddleware...)
 
