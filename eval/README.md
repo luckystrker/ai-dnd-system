@@ -130,17 +130,36 @@ go run ./cmd/eval -baseline eval-results/baseline.json -gate
 Baseline на eve снять нельзя (TS-бот локально не собирается), поэтому гейт
 абсолютный и включается флагом `-gate`:
 
-- `-min-pass 0.75` — общий pass rate;
-- `-category agency=0.7,memory=0.8,...` — пороги категорий;
-- `-required case1,case2` — обязательные кейсы. По умолчанию берутся четыре
-  поведения: агентность (`agency-03-group-help-wait`), групповая запись в
-  память (`memory-01-damage-on-player-turn`), закрытие дня
-  (`day-01-overnight-rest`), публичные броски (`rolls-01-skill-check-public`).
+- `-min-pass 0.75` — общий pass rate по полному прогону `-n 1`;
+- `-category agency=0.7,memory=0.8,...` — пороги категорий по полному прогону;
+- обязательные кейсы проверяются **по отдельному отчёту повторов `-n 3`**
+  (решение 46): кейс проходит, если прошёл не меньше 2 из 3 повторов.
+  Список по умолчанию — `evalgame.DefaultGate().Required` (четыре поведения:
+  агентность `agency-03-group-help-wait`, групповая запись в память
+  `memory-01-damage-on-player-turn`, закрытие дня `day-01-overnight-rest`,
+  публичные броски `rolls-01-skill-check-public`); переопределяется
+  `-required-cases`.
+
+Двухступенчатый гейт:
+
+```bash
+# 1. полный прогон (пороги категорий и общий)
+go run ./cmd/eval -n 1 -out eval-results/last.json
+# 2. повторы обязательных кейсов
+go run ./cmd/eval -n 3 -case agency-03-group-help-wait,memory-01-damage-on-player-turn,day-01-overnight-rest,rolls-01-skill-check-public -out eval-results/required.json
+# 3. гейт по двум отчётам
+go run ./cmd/eval -from eval-results/last.json -required eval-results/required.json -gate
+```
+
+Без `-required` гейт падает с явным сообщением «не передан отчёт повторов
+обязательных кейсов» — тихого возврата к проверке по полному прогону нет.
+Если обязательного кейса нет в отчёте повторов или повторов меньше трёх, это
+тоже нарушение гейта.
 
 Значения по умолчанию — `evalgame.DefaultGate()` (утверждены владельцем,
-PLAN 30) и переопределяются флагами. Регрессионный гейт: `-baseline <json>`
-падает на кейсах, которые проходили раньше и провалились сейчас (через
-`eval.Diff`).
+PLAN 30; правило повторов — PLAN 46) и переопределяются флагами.
+Регрессионный гейт: `-baseline <json>` падает на кейсах, которые проходили
+раньше и провалились сейчас (через `eval.Diff`).
 
 ## Калибровка судьи
 

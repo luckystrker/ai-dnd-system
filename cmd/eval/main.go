@@ -57,7 +57,8 @@ func run(ctx context.Context, args []string) error {
 	gate := fs.Bool("gate", false, "включить абсолютный гейт и упасть на нарушениях")
 	minPass := fs.Float64("min-pass", evalgame.DefaultGate().MinPassRate, "порог общего pass rate (для -gate)")
 	categoryText := fs.String("category", "", "пороги категорий, например agency=0.7,memory=0.8")
-	requiredText := fs.String("required", "", "обязательные кейсы через запятую (пусто — утверждённый список)")
+	requiredText := fs.String("required-cases", "", "обязательные кейсы через запятую (пусто — утверждённый список)")
+	requiredReport := fs.String("required", "", "JSON-отчёт повторов -n 3 по обязательным кейсам (нужен для -gate)")
 	noJudge := fs.Bool("no-judge", false, "не подключать LLM-судью (только механические скореры)")
 	calibrate := fs.Bool("judge-calibration", true, "калибровать судью на вручную написанных ответах")
 	calibrationPath := fs.String("calibration", "eval/judge/calibration.jsonl", "фикстуры калибровки судьи")
@@ -79,7 +80,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		printReport(report, 0)
-		failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText)
+		failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText, *requiredReport)
 		if err != nil {
 			return err
 		}
@@ -180,7 +181,7 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("калибровка судьи не прошла: good должен проходить, bad — проваливаться")
 		}
 	}
-	failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText)
+	failed, err := applyGates(report, *baseline, *gate, *minPass, *categoryText, *requiredText, *requiredReport)
 	if err != nil {
 		return err
 	}
@@ -191,7 +192,7 @@ func run(ctx context.Context, args []string) error {
 }
 
 // applyGates проверяет регрессии относительно baseline и абсолютный гейт.
-func applyGates(report *evalgame.Report, baseline string, gate bool, minPass float64, categoryText, requiredText string) (bool, error) {
+func applyGates(report *evalgame.Report, baseline string, gate bool, minPass float64, categoryText, requiredText, requiredReportPath string) (bool, error) {
 	failed := false
 	if baseline != "" {
 		previous, err := evalgame.LoadReport(baseline)
@@ -210,6 +211,14 @@ func applyGates(report *evalgame.Report, baseline string, gate bool, minPass flo
 		}
 	}
 	if gate {
+		var required *evalgame.Report
+		if trimmed := strings.TrimSpace(requiredReportPath); trimmed != "" {
+			loaded, err := evalgame.LoadReport(trimmed)
+			if err != nil {
+				return false, fmt.Errorf("гейт: отчёт повторов обязательных кейсов %s: %w", trimmed, err)
+			}
+			required = loaded
+		}
 		thresholds := evalgame.DefaultGate()
 		thresholds.MinPassRate = minPass
 		parsed, err := evalgame.ParseCategoryThresholds(categoryText)
@@ -227,7 +236,7 @@ func applyGates(report *evalgame.Report, baseline string, gate bool, minPass flo
 				}
 			}
 		}
-		violations := thresholds.Violations(report)
+		violations := thresholds.Violations(report, required)
 		if len(violations) > 0 {
 			failed = true
 			fmt.Fprintln(os.Stderr, "\nгейт не пройден:")

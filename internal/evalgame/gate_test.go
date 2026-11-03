@@ -68,12 +68,16 @@ func TestGateViolations(t *testing.T) {
 		},
 		Run: &eval.RunResult{},
 	}
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "memory-01-damage-on-player-turn", Passes: 2, Repeats: 3, PassAtK: true},
+		{Name: "day-01-overnight-rest", Passes: 0, Repeats: 3},
+	}}
 	gate := Gate{
 		MinPassRate: 0.8,
 		Categories:  map[string]float64{"memory": 0.8, "day": 0.5, "agency": 0.5},
 		Required:    []string{"memory-01-damage-on-player-turn", "day-01-overnight-rest", "rolls-01-skill-check-public"},
 	}
-	violations := gate.Violations(report)
+	violations := gate.Violations(report, repeats)
 	if len(violations) != 5 {
 		t.Fatalf("ожидалось 5 нарушений, получено %d: %v", len(violations), violations)
 	}
@@ -88,13 +92,100 @@ func TestGateViolations(t *testing.T) {
 	}
 }
 
+// Решение 46: обязательный кейс проходит при 2 из 3 повторов, даже если в
+// полном прогоне -n 1 он провалился.
+func TestGateRequiredTwoOfThree(t *testing.T) {
+	t.Parallel()
+
+	full := passingReport()
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 2, Repeats: 3, PassAtK: true},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 2, Repeats: 3, PassAtK: true},
+	}}
+	gate := DefaultGate()
+	violations := gate.Violations(full, repeats)
+	if len(violations) > 0 {
+		t.Fatalf("2/3 должны проходить, нарушения: %v", violations)
+	}
+}
+
+// 1 из 3 — не проходит.
+func TestGateRequiredOneOfThree(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 1, Repeats: 3},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "agency-03-group-help-wait") {
+		t.Fatalf("1/3 должен проваливать гейт, нарушения: %v", violations)
+	}
+}
+
+// Обязательного кейса нет в отчёте повторов — провал с явным сообщением.
+func TestGateRequiredMissingInRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "нет в отчёте повторов") {
+		t.Fatalf("отсутствующий кейс должен проваливать гейт, нарушения: %v", violations)
+	}
+}
+
+// Отчёт повторов не передан — явная ошибка, а не возврат к старому правилу.
+func TestGateRequiredReportMissing(t *testing.T) {
+	t.Parallel()
+
+	violations := DefaultGate().Violations(passingReport(), nil)
+	if len(violations) != 1 || !containsText(violations[0], "не передан отчёт повторов") {
+		t.Fatalf("нужно явное нарушение про отсутствующий отчёт повторов, получено: %v", violations)
+	}
+}
+
+// Отчёт повторов с недостаточным числом прогонов тоже проваливает: правило
+// «2 из 3» требует трёх повторов.
+func TestGateRequiredNeedsThreeRepeats(t *testing.T) {
+	t.Parallel()
+
+	repeats := &Report{Cases: []CaseReport{
+		{Name: "agency-03-group-help-wait", Passes: 1, Repeats: 1, PassPowK: true},
+		{Name: "memory-01-damage-on-player-turn", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "day-01-overnight-rest", Passes: 3, Repeats: 3, PassPowK: true},
+		{Name: "rolls-01-skill-check-public", Passes: 3, Repeats: 3, PassPowK: true},
+	}}
+	violations := DefaultGate().Violations(passingReport(), repeats)
+	if len(violations) != 1 || !containsText(violations[0], "нужно не меньше 3") {
+		t.Fatalf("один повтор не должен считаться 2 из 3: %v", violations)
+	}
+}
+
+// passingReport — полный прогон -n 1, проходящий все пороги и без обязательных
+// кейсов в проверке (обязательные проверяются по отчёту повторов).
+func passingReport() *Report {
+	categories := map[string]CategorySummary{}
+	for name := range DefaultGate().Categories {
+		categories[name] = CategorySummary{Cases: 1, Passed: 1, PassRate: 1}
+	}
+	return &Report{PassRate: 1, Categories: categories, Run: &eval.RunResult{}}
+}
+
 // Голый eval.RunResult (старый/чужой файл) не содержит категорий; гейт должен
 // явно сказать об этом, а не рапортовать «категория X: нет кейсов».
 func TestGateRejectsBareRunResult(t *testing.T) {
 	t.Parallel()
 
 	report := &Report{Run: &eval.RunResult{Cases: []eval.CaseResult{{Name: "rolls-01", Passed: true}}}}
-	violations := Gate{Categories: map[string]float64{"rolls": 0.5}}.Violations(report)
+	violations := Gate{Categories: map[string]float64{"rolls": 0.5}}.Violations(report, nil)
 	if len(violations) == 0 || !containsText(violations[0], "без категорий") {
 		t.Fatalf("ожидалось явное нарушение про отчёт без категорий, получено: %v", violations)
 	}

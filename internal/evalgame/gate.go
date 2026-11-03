@@ -21,7 +21,8 @@ type Gate struct {
 	Categories map[string]float64
 	// Required — кейсы, которые обязаны пройти. Сюда входят четыре
 	// обязательных поведения: агентность, групповая запись в память,
-	// закрытие дня и публичные броски.
+	// закрытие дня и публичные броски. Проходят по отчёту повторов -n 3
+	// (не меньше 2 из 3), а не по полному прогону (решение 46).
 	Required []string
 }
 
@@ -78,8 +79,20 @@ func ParseCategoryThresholds(text string) (map[string]float64, error) {
 	return out, nil
 }
 
+// RequiredPasses / RequiredRepeats — правило решения владельца 46:
+// обязательный кейс считается пройденным, если прошёл не меньше 2 из 3
+// повторов. Категории и общий pass rate по-прежнему считаются по полному
+// прогону -n 1.
+const (
+	RequiredPasses  = 2
+	RequiredRepeats = 3
+)
+
 // Violations возвращает список нарушений гейта (пусто — гейт пройден).
-func (g Gate) Violations(report *Report) []string {
+// report — полный прогон -n 1 (общий pass rate и категории), repeats — отчёт
+// -n 3 по обязательным кейсам. Без отчёта повторов гейт явно падает: тихого
+// возврата к проверке обязательных кейсов по полному прогону нет.
+func (g Gate) Violations(report, repeats *Report) []string {
 	if report == nil || report.Run == nil {
 		return []string{"гейт: нет результата прогона"}
 	}
@@ -111,19 +124,34 @@ func (g Gate) Violations(report *Report) []string {
 				summary.Passed, summary.Cases))
 		}
 	}
+	if len(g.Required) == 0 {
+		return out
+	}
+	if repeats == nil {
+		out = append(out, "гейт: не передан отчёт повторов обязательных кейсов "+
+			"(-required); нужен прогон -n 3 по обязательным кейсам")
+		return out
+	}
 	byName := map[string]CaseReport{}
-	for _, item := range report.Cases {
+	for _, item := range repeats.Cases {
 		byName[item.Name] = item
 	}
 	for _, name := range g.Required {
 		item, exists := byName[name]
 		if !exists {
-			out = append(out, fmt.Sprintf("обязательный кейс %q не прогонялся", name))
+			out = append(out, fmt.Sprintf("обязательный кейс %q нет в отчёте повторов (-required)", name))
 			continue
 		}
-		if !item.PassPowK {
-			out = append(out, fmt.Sprintf("обязательный кейс %q провален (%d/%d повторов)",
-				name, item.Passes, item.Repeats))
+		if item.Repeats < RequiredRepeats {
+			out = append(out, fmt.Sprintf("обязательный кейс %q: повторов %d, нужно не меньше %d (-n 3)",
+				name, item.Repeats, RequiredRepeats))
+			continue
+		}
+		// Пропорционально правилу «2 из 3»: на трёх повторах это ровно
+		// два, на большем числе — не меньше двух третей.
+		if item.Passes*RequiredRepeats < RequiredPasses*item.Repeats {
+			out = append(out, fmt.Sprintf("обязательный кейс %q прошёл %d/%d повторов, нужно ≥%d из %d",
+				name, item.Passes, item.Repeats, RequiredPasses, RequiredRepeats))
 		}
 	}
 	return out

@@ -164,6 +164,10 @@ go run ./cmd/eval -telegram                         # калибровка ге�
 go run ./cmd/eval -n 1 -out eval-results/last.json
 # повторы только проблемных кейсов (Pass@k / Pass^k)
 go run ./cmd/eval -case rolls-05-narrate-per-tool-output -n 5 -out eval-results/rolls.json
+# повторы обязательных кейсов для гейта (нужно 2 из 3)
+go run ./cmd/eval -n 3 -case agency-03-group-help-wait,memory-01-damage-on-player-turn,day-01-overnight-rest,rolls-01-skill-check-public -out eval-results/required.json
+# гейт по двум отчётам: полный прогон + повторы обязательных
+go run ./cmd/eval -from eval-results/last.json -required eval-results/required.json -gate
 # регрессионный гейт относительно прошлого прогона
 go run ./cmd/eval -baseline eval-results/baseline.json -gate
 ```
@@ -184,8 +188,11 @@ go run ./cmd/eval -baseline eval-results/baseline.json -gate
   good должен пройти, bad — провалиться.
 
 Абсолютный гейт (`-gate`) — флаг, а не дефолт прогона: пороги по категориям и
-обязательные кейсы лежат в `evalgame.DefaultGate()` (утверждены владельцем,
-PLAN 30) и переопределяются `-min-pass`, `-category`, `-required`.
+общий pass rate считаются по полному прогону `-n 1`, обязательные кейсы — по
+отчёту повторов `-n 3` (`-required`): кейс проходит при 2 из 3 повторов
+(PLAN 46). Без отчёта повторов гейт явно падает. Пороги лежат в
+`evalgame.DefaultGate()` (утверждены владельцем, PLAN 30) и переопределяются
+`-min-pass`, `-category`, `-required-cases`.
 
 ## Деплой на VPS
 

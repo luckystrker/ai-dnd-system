@@ -31,6 +31,8 @@ go run ./cmd/eval -check-only      # состав набора, без моде�
 go run ./cmd/eval -telegram        # калибровка гейта и склейки (офлайн)
 go run ./cmd/eval -n 1 -out eval-results/last.json            # живой, нужен ключ
 go run ./cmd/eval -case <name> -n 5                            # повторы кейса
+go run ./cmd/eval -n 3 -case <required>,... -out eval-results/required.json
+go run ./cmd/eval -from <json> -required <repeats.json> -gate   # гейт (PLAN 46)
 go run ./cmd/eval -baseline <json> -gate                       # регрессионный гейт
 
 # e2e и диагностика
